@@ -675,3 +675,36 @@ Verification with `FORWARD_ONLY=1 DEFAULT_FLOAT=HALF DEV=ROCKCHIP ROCKCHIP_EW_RE
 - `mypy tinygrad/`: pass (216 source files).
 - `sz.py`: renderer 701 executable lines, runtime 180; comments and docstrings retained.
 - No host floating-point tensor arithmetic, tolerance relaxation, CMAC, CNA, or PPU execution was added.
+
+---
+
+## 2026-08-07 — Group 5: FP16 movement and static indexing
+
+The Rockchip census now covers slicing (including negative strides and empty results), transpose, permute, reshape/view, flip,
+squeeze/unsqueeze, flatten/unflatten, expand, detach, diagonal extraction, roll, and pad-to-reshape/slice compositions from
+`test/backend/test_ops.py`. The upstream negative-stride test explicitly creates FP32 input, so its Rockchip equivalent uses the same
+indexes over FP16 input. The constant integer-tensor indexing case is explicitly skipped because the DPU accepts FP16 inputs only;
+it is not emulated on the CPU.
+
+The static selection gather introduced for padding now preserves one proven nonzero FP16 fill bit-pattern. This enables sliced padded
+layouts such as a `3.456` constant border without a floating-point runtime operation. The compiler evaluates only output geometry;
+the runtime continues to copy raw `uint16` lanes according to integer offsets before a DPU EW add-zero realization.
+
+Representative direct realization profiles were bit-exact and used one ioctl each:
+
+| Case | Wall time | NPU submits | Maximum absolute error |
+|---|---:|---:|---:|
+| permute `(3,4,5) -> (5,3,4)` | 0.146 s | 1 | 0 |
+| reverse/stride slice | 0.050 s | 1 | 0 |
+| expand `(2,3,1) -> (2,3,4)` | 0.024 s | 1 | 0 |
+| nonzero pad then slice | 0.130 s | 1 | 0 |
+
+Verification with `FORWARD_ONLY=1 DEFAULT_FLOAT=HALF DEV=ROCKCHIP ROCKCHIP_EW_REDUCE=twoproduct`:
+
+- Movement census: **30 passed, 1 skipped in 15.78 s** with `-n12`.
+- Focused submit regression: **1 passed, 4 subtests passed**; every materialized layout submits exactly once.
+- Complete Rockchip census: **176 passed, 10 skipped, 103 subtests passed in 331.50 s** with `-n12`.
+- Full Ruff: pass.
+- `mypy tinygrad/`: pass (216 source files).
+- `sz.py`: renderer 704 executable lines, runtime 180; comments and docstrings retained.
+- No host floating-point tensor arithmetic, tolerance relaxation, CMAC, CNA, or PPU execution was added.

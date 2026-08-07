@@ -348,11 +348,14 @@ def _selection_gather(u:UOp, out_index:UOp, count:int, oslot:int) -> RKGather|No
   if not any(x.op is Ops.WHERE or (x.op is Ops.LOAD and len(x.src) > 2) for x in u.toposort()): return None
   out_ranges = _index_ranges(out_index)
   src_slot:int|None = None
+  fill_bits:int|None = None
   def selected(x:UOp, env:dict[UOp, int]) -> tuple[int, int]|None:
-    nonlocal src_slot
+    nonlocal src_slot, fill_bits
     if x.op is Ops.CONST and x.dtype.scalar() is dtypes.half:
-      if float(x.arg) == 0.0: return None
-      raise ValueError
+      bits = struct.unpack("<H", struct.pack("<e", float(x.arg)))[0]
+      if fill_bits is not None and fill_bits != bits: raise ValueError
+      fill_bits = bits
+      return None
     if x.op is Ops.CAST and x.dtype.scalar() is dtypes.half: return selected(x.src[0], env)
     if x.op is Ops.WHERE:
       if not _is_static_expr(x.src[0]): raise ValueError
@@ -381,7 +384,7 @@ def _selection_gather(u:UOp, out_index:UOp, count:int, oslot:int) -> RKGather|No
       offsets[dst] = offset
   except (RuntimeError, ValueError): return None
   if src_slot is None or any(offset == -2 for offset in offsets): return None
-  return RKGather(src_slot, 0, count, offsets=tuple(offsets))
+  return RKGather(src_slot, 0, count, offsets=tuple(offsets), fill_bits=fill_bits or 0)
 
 def _ew_leaf(u:UOp, out_index:UOp, count:int, oslot:int) -> RKArg|RKStatic|RKGather|float|tuple[UOp, UOp, UOp|None, int]|None:
   if u.op is Ops.CONST and u.dtype.scalar() is dtypes.half: return float(u.arg)

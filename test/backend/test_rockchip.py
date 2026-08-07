@@ -161,6 +161,17 @@ class TestRockchip(unittest.TestCase):
         ref = torch.nn.functional.pad(torch.from_numpy(xn), (0,2), mode=mode).numpy()
         self._check(1, Tensor(xn).pad((0,2), mode=mode), ref, **_FP16)
 
+  def test_movement_layouts_submit(self):
+    a = np.arange(60, dtype=np.float16).reshape(3,4,5)
+    b = np.arange(6, dtype=np.float16).reshape(2,3,1)
+    c = np.arange(27, dtype=np.float16).reshape(3,3,3)
+    padded = np.pad(c, ((3,2),(0,1),(1,1)), constant_values=np.float16(3.456))
+    cases = ((Tensor(a).permute(2,0,1), np.transpose(a, (2,0,1))), (Tensor(a)[::-1,:,::-2], a[::-1,:,::-2]),
+             (Tensor(b).expand(2,3,4), np.broadcast_to(b, (2,3,4))),
+             (Tensor(c).pad(((3,2),(0,1),(1,1)), value=3.456)[0:2,:,:], padded[0:2,:,:]))
+    for out, ref in cases:
+      with self.subTest(shape=out.shape): self._check(1, out, ref, **_FP16)
+
   # ---- GEMM / MATMUL (from test_ops, fp16 tol) ----
   def test_matmul_simple(self):
     helper_test_op([(4), (4,4)], lambda x,y: x.matmul(y), Tensor.dot, **_FP16)
@@ -442,6 +453,36 @@ class TestRockchipPaddingOps(unittest.TestCase):
 
 for _name in ("test_pad", "test_pad_reflect_mode", "test_pad_replicate_mode", "test_pad_circular_mode"):
   setattr(TestRockchipPaddingOps, _name, getattr(_test_ops.TestOps, _name))
+
+@unittest.skipUnless(Device.DEFAULT == "ROCKCHIP", "ROCKCHIP device only")
+class TestRockchipMovementOps(unittest.TestCase):
+  """Static slicing, view, permutation, and other movement cases from test_ops."""
+  helper_test_exception = _test_ops.TestOps.helper_test_exception
+
+  @classmethod
+  def setUpClass(cls): _test_ops.helper_test_op = _fp16_test_op
+
+  @classmethod
+  def tearDownClass(cls): _test_ops.helper_test_op = _TEST_OPS_HELPER
+
+  def test_slice_negative_strides(self):
+    rng = np.random.default_rng(600)
+    a = rng.standard_normal((10,10,10)).astype(np.float16)
+    t = Tensor(a)
+    for idx in (np.s_[::-1], np.s_[::-2], np.s_[:,2:0:-1], np.s_[:,2:0:-1,3:1:-2], np.s_[4:0:-3,2:0:-1,-1:-5:-2],
+                np.s_[2:5:-1,:,:], np.s_[:,2:5:-1,:], np.s_[:,:,2:5:-1]):
+      np.testing.assert_allclose(a[idx], t[idx].numpy(), **_FP16)
+
+  def test_slice_with_const_tensor(self):
+    self.skipTest("Rockchip DPU accepts FP16 inputs only; this case requires an integer index tensor")
+
+for _name in ("test_slice_in_bounds_1dim", "test_slice_on_0dim_tensor", "test_slice_int_indexing", "test_slice_in_bounds_multidim",
+              "test_slice_with_none", "test_slice_one_endpoint_out_of_bounds", "test_slice_stride_gt_one",
+              "test_slice_both_endpoints_out_of_bounds", "test_slice_start_gt_end", "test_slice_zero_in_shape", "test_slice_errors",
+              "test_slice_ellipsis", "test_double_slice", "test_pad_reshape", "test_pad_slice", "test_transpose", "test_permute",
+              "test_reshape", "test_view", "test_flip", "test_squeeze", "test_unsqueeze", "test_flatten", "test_unflatten", "test_diag",
+              "test_diagonal", "test_roll", "test_detach", "test_expand"):
+  setattr(TestRockchipMovementOps, _name, getattr(_test_ops.TestOps, _name))
 
 if __name__ == "__main__":
   unittest.main()
