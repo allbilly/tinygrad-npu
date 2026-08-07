@@ -853,3 +853,25 @@ Verification with `FORWARD_ONLY=1 DEFAULT_FLOAT=HALF DEV=ROCKCHIP ROCKCHIP_EW_RE
 - Static-index scatter census: **8 passed, 1 skipped in 13.06 s** with `-n12`.
 - Covered reductions: sum, product, mean, maximum, and minimum.
 - Tolerance remains exactly `atol=5e-3, rtol=5e-3`; no core change, host tensor arithmetic, CMAC, CNA, or PPU execution was added.
+
+---
+
+## 2026-08-08 — Ten-group completion audit
+
+Final standard census command:
+
+```sh
+FORWARD_ONLY=1 DEFAULT_FLOAT=HALF DEV=ROCKCHIP ROCKCHIP_EW_REDUCE=twoproduct \
+  python -m pytest test/backend/test_rockchip.py -q -n12 --durations=10
+```
+
+- **218 passed, 12 skipped, 107 subtests passed in 55.85 s**.
+- The added Groups 8–10 contribute 14 passing cases while total wall time remains approximately the earlier 55-second census.
+- Slowest calls were Conv1D 14.45 s, AvgPool3D 11.42 s, dilated ConvTranspose2D 10.57 s, and bilinear interpolation 10.21 s;
+  the measured slow-path decomposition remains host-compile-bound rather than ioctl/device-bound.
+- Full Ruff: pass.
+- `mypy tinygrad/`: pass (216 source files).
+- `sz.py`: Rockchip renderer 891 executable lines, runtime 181; comments and docstrings retained.
+- Changes since Group 6 are confined to `progress.md`, `test/backend/test_rockchip.py`, `tinygrad/renderer/rockchip.py`, and
+  `tinygrad/runtime/ops_rockchip.py`; shared tinygrad core is unchanged.
+- Audit found no host floating-point tensor arithmetic, tolerance relaxation, CMAC, CNA, or PPU execution in the Rockchip backend.
