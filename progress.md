@@ -823,3 +823,18 @@ Verification with `FORWARD_ONLY=1 DEFAULT_FLOAT=HALF DEV=ROCKCHIP ROCKCHIP_EW_RE
 - Adaptive-equivalent census: **2 passed in 12.30 s** with `-n12`.
 - Average and maximum cases both execute through the existing FP16 gather + DPU EW reduction path.
 - Tolerance remains exactly `atol=5e-3, rtol=5e-3`; no CPU arithmetic, CMAC, CNA, or PPU execution was added.
+
+---
+
+## 2026-08-08 — Group 9: FP16 polynomial and simple loss expressions
+
+The Rockchip census now covers square, cubic, a Horner-form quadratic, mean-squared error, and mean absolute error. These expressions
+compose the already proven FP16 ADD/MUL/ABS and reduction paths; BCE and NLL are intentionally outside this group because they require
+transcendental or indexed semantics. FP32 is used only by the PyTorch golden for the loss reductions, then cast to the FP16 device
+contract.
+
+Verification with `FORWARD_ONLY=1 DEFAULT_FLOAT=HALF DEV=ROCKCHIP ROCKCHIP_EW_REDUCE=twoproduct`:
+
+- Polynomial/simple-loss census: **4 passed in 12.73 s** with `-n12`.
+- Tolerance remains exactly `atol=5e-3, rtol=5e-3`.
+- Rockchip execution uses only DPU EW; no host tensor arithmetic, CMAC, CNA, or PPU execution was added.

@@ -368,6 +368,23 @@ class TestRockchipAdaptivePoolOps(unittest.TestCase):
                   lambda x: x.max_pool2d(kernel_size=4, stride=4))
 
 @unittest.skipUnless(Device.DEFAULT == "ROCKCHIP", "ROCKCHIP device only")
+class TestRockchipPolynomialLossOps(unittest.TestCase):
+  """Polynomial and simple loss expressions composed only from FP16 DPU EW primitives."""
+
+  def test_square_and_cubic(self):
+    _fp16_test_op([(4,5)], lambda x: x.square(), lambda x: x.square())
+    _fp16_test_op([(4,5)], lambda x: x*x*x, lambda x: x*x*x)
+
+  def test_horner_polynomial(self):
+    _fp16_test_op([(4,5)], lambda x: (x*0.5-1.25)*x+0.75, lambda x: (x*0.5-1.25)*x+0.75)
+
+  def test_mse_loss(self):
+    _fp16_fp32_golden_test_op([(3,4), (3,4)], lambda x,y: (x-y).square().mean(), lambda x,y: (x-y).square().mean())
+
+  def test_l1_loss(self):
+    _fp16_fp32_golden_test_op([(3,4), (3,4)], lambda x,y: (x-y).abs().mean(), lambda x,y: (x-y).abs().mean())
+
+@unittest.skipUnless(Device.DEFAULT == "ROCKCHIP", "ROCKCHIP device only")
 class TestRockchipInterpolateOps(unittest.TestCase):
   """Every FP16 interpolation case from test_ops at the test_gemm_fp16 tolerance."""
 
