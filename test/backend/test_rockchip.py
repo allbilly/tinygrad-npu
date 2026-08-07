@@ -628,6 +628,12 @@ class TestRockchipReductionOps(unittest.TestCase):
     with Context(NOOPT=1): _fp16_test_op([(16384)], lambda x: x.sum())
     self.assertEqual(Device["ROCKCHIP"].submit_count-before, 43)
 
+  def test_sum_dtype_arg(self):
+    before = Device["ROCKCHIP"].submit_count
+    _fp16_test_op([(45,3)], lambda x: x.sum(dtype=torch.float32), lambda x: x.sum(dtype=dtypes.float32), forward_only=True)
+    self.assertEqual(Device["ROCKCHIP"].submit_count-before, 2)
+    with self.assertRaises(AttributeError): Tensor([1.0, 2.0]).sum(dtype="")
+
   def test_non_fp16_reductions(self):
     self.skipTest("Rockchip DPU accepts FP16 tensors only; FP32 dtype, boolean, and integer reductions are excluded")
 

@@ -920,3 +920,27 @@ Verification with `FORWARD_ONLY=1 DEFAULT_FLOAT=HALF DEV=ROCKCHIP`:
 - Tolerance remains exactly `atol=5e-3, rtol=5e-3`.
 - Full Ruff and `mypy tinygrad/` pass; `sz.py` reports renderer **898** executable lines and runtime **176**.
 - No shared tinygrad core change, host tensor arithmetic, CMAC, CNA, or PPU execution was added.
+
+---
+
+## 2026-08-08 — 427-case census and terminal FP32 reduction output
+
+`pytest --collect-only test/backend/test_ops.py` is the authoritative migration scope: **427 tests**, comprising 421 methods in
+`TestOps` and 6 methods in `TestOpsUint8`. Before this milestone, `test_rockchip.py` represented 178 unique `TestOps` names, including
+8 explicit skipped placeholders; 243 `TestOps` names and all 6 uint8 tests were not yet represented. This inventory remains the active
+porting backlog rather than redefining completion around the existing Rockchip census.
+
+The first newly ported case is `test_sum_dtype_arg`. RK3588 already has a proven FP16-input/FP32-output EW recipe, so the balanced FP16
+reduction tree now tags only its terminal ADD for `OUT_PRECISION=5`. No FP32 value is fed into another DPU task, avoiding the known
+`IN_PRECISION=5` timeout. The 135-input reduction uses one 133-task FP16 PC chain followed by one isolated FP32-output ADD: **2 ioctl
+submits** total. The runtime resets DPU state after the terminal FP32 task while still holding the cross-process lock, preventing its
+BS/WDMA configuration from leaking into a later FP16 program.
+
+Verification with `FORWARD_ONLY=1 DEFAULT_FLOAT=HALF DEV=ROCKCHIP`:
+
+- Focused `test_sum_dtype_arg`: **1 passed in 11.63 s** with `-n12`.
+- Complete reduction class: **22 passed, 1 skipped in 14.70 s** with `-n12`.
+- Clean complete Rockchip census: **220 passed, 11 skipped, 107 subtests passed in 51.88 s** with `-n12`.
+- The FP32-output case retains the FP16 tolerance ceiling of `atol=5e-3, rtol=5e-3`.
+- Full Ruff and `mypy tinygrad/` pass; `sz.py` reports renderer **925** executable lines and runtime **183**.
+- No shared tinygrad core change, host numeric conversion, CPU tensor arithmetic, CMAC, CNA, or PPU execution was added.

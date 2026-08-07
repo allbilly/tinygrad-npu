@@ -4,7 +4,7 @@ import numpy as np
 from tinygrad.device import BufferSpec, Compiled, LRUAllocator, Program, TinyELF
 from tinygrad.helpers import from_mv, getenv, round_up, suppress_finalizing, temp, to_mv
 from tinygrad.renderer.rockchip import (RKBufferKind, RockchipRenderer, decode_image, patch_stage, emit_ew_stage,
-  RKArg, rk_cmd, _MAX_EW_ELEMS_FP16, _EW_CFG_MAX, _EW_STAGE_ABS, _EW_STAGE_POSITIVE_MASK)
+  RKArg, rk_cmd, _MAX_EW_ELEMS_FP16, _EW_CFG_MAX, _EW_STAGE_ABS, _EW_STAGE_POSITIVE_MASK, _EW_STAGE_FP32_OUT)
 from tinygrad.runtime.autogen import rockchip as rk
 from tinygrad.runtime.support.hcq import FileIOInterface, HCQBuffer
 
@@ -100,6 +100,13 @@ class RockchipProgram(Program['RockchipDevice']):
       self._submit_pcchain(bodies)
       bodies.clear()
     for op in self.image.ew_ops:
+      if op.ew_cfg & _EW_STAGE_FP32_OUT:
+        flush()
+        stage = emit_ew_stage(op.dst, op.lhs, op.rhs, op.count, op.ew_cfg, mask_program or needs_state)
+        self._submit_pcchain([patch_stage(stage, address)])
+        self.dev.reset_npu()
+        needs_state = False
+        continue
       standalone = op.ew_cfg == _EW_STAGE_POSITIVE_MASK
       if standalone:
         flush()
