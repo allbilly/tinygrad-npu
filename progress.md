@@ -809,3 +809,17 @@ Verification with `FORWARD_ONLY=1 DEFAULT_FLOAT=HALF DEV=ROCKCHIP ROCKCHIP_EW_RE
 - `mypy tinygrad/`: pass (216 source files).
 - `sz.py`: renderer 891 executable lines, runtime 181; comments and docstrings retained.
 - No shared tinygrad core change, host floating-point tensor arithmetic, tolerance relaxation, CMAC, CNA, or PPU execution was added.
+
+---
+
+## 2026-08-08 — Group 8: adaptive-pooling-equivalent FP16 windows
+
+Tinygrad currently exposes no adaptive average/max pooling API, so the Rockchip census covers the exact equivalent cases whose input
+windows divide evenly: 4×4 to 2×2 and 4×4 to global 1×1. PyTorch adaptive pooling supplies the golden while tinygrad expresses the
+same operation with fixed kernel/stride pooling. No core API or backend lowering change was needed.
+
+Verification with `FORWARD_ONLY=1 DEFAULT_FLOAT=HALF DEV=ROCKCHIP ROCKCHIP_EW_REDUCE=twoproduct`:
+
+- Adaptive-equivalent census: **2 passed in 12.30 s** with `-n12`.
+- Average and maximum cases both execute through the existing FP16 gather + DPU EW reduction path.
+- Tolerance remains exactly `atol=5e-3, rtol=5e-3`; no CPU arithmetic, CMAC, CNA, or PPU execution was added.
