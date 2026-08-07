@@ -149,7 +149,7 @@ class RockchipProgram(Program['RockchipDevice']):
       if gather.offsets:
         index = np.asarray(gather.offsets, dtype=np.intp)
         valid = index >= 0
-        dst[:gather.count] = gather.fill_bits
+        if not gather.partial: dst[:gather.count] = gather.fill_bits
         dst[:gather.count][valid] = src[index[valid]]
       else:
         if gather.count not in linear: linear[gather.count] = np.arange(gather.count, dtype=np.intp)

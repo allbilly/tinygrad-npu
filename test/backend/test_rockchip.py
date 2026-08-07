@@ -172,6 +172,16 @@ class TestRockchip(unittest.TestCase):
     for out, ref in cases:
       with self.subTest(shape=out.shape): self._check(1, out, ref, **_FP16)
 
+  def test_concat_layouts_submit(self):
+    rng = np.random.default_rng(700)
+    a, b, c = (rng.standard_normal((5,6,3)).astype(np.float16) for _ in range(3))
+    cases = ((1, Tensor(a).cat(Tensor(b), Tensor(c), dim=0), np.concatenate((a,b,c), axis=0)),
+             (2, Tensor(a).cat(Tensor(b), Tensor(c), dim=1), np.concatenate((a,b,c), axis=1)),
+             (2, Tensor.stack(Tensor(a), Tensor(b), Tensor(c), dim=1), np.stack((a,b,c), axis=1)),
+             (1, Tensor(a).repeat((2,1,2)), np.tile(a, (2,1,2))))
+    for submits, out, ref in cases:
+      with self.subTest(shape=out.shape): self._check(submits, out, ref, **_FP16)
+
   # ---- GEMM / MATMUL (from test_ops, fp16 tol) ----
   def test_matmul_simple(self):
     helper_test_op([(4), (4,4)], lambda x,y: x.matmul(y), Tensor.dot, **_FP16)
@@ -483,6 +493,28 @@ for _name in ("test_slice_in_bounds_1dim", "test_slice_on_0dim_tensor", "test_sl
               "test_reshape", "test_view", "test_flip", "test_squeeze", "test_unsqueeze", "test_flatten", "test_unflatten", "test_diag",
               "test_diagonal", "test_roll", "test_detach", "test_expand"):
   setattr(TestRockchipMovementOps, _name, getattr(_test_ops.TestOps, _name))
+
+@unittest.skipUnless(Device.DEFAULT == "ROCKCHIP", "ROCKCHIP device only")
+class TestRockchipConcatOps(unittest.TestCase):
+  """Concatenation, stacking, and repetition cases from test_ops."""
+  helper_test_exception = _test_ops.TestOps.helper_test_exception
+
+  @classmethod
+  def setUpClass(cls): _test_ops.helper_test_op = _fp16_test_op
+
+  @classmethod
+  def tearDownClass(cls): _test_ops.helper_test_op = _TEST_OPS_HELPER
+
+  def test_stack(self):
+    for dim in range(-1, 3):
+      _fp16_test_op([(5,6,3)]*3, lambda x,y,z: torch.stack((x,y,z), dim), lambda x,y,z: Tensor.stack(x,y,z,dim=dim))
+      _fp16_test_op([(5,6,3)]*3, lambda x,y,z: torch.stack((x,y,z), dim), lambda x,y,z: Tensor.stack((x,y,z),dim=dim))
+    with self.assertRaises(IndexError): Tensor.stack(Tensor.randn(45,65,3), dim=77)
+    with self.assertRaises(ValueError): Tensor.stack((Tensor([1,2]), Tensor([3,4])), Tensor([5,6]))
+    np.testing.assert_allclose(Tensor.stack(Tensor(3.14), Tensor(3.14)).numpy(), np.array([3.14,3.14]), **_FP16)
+
+for _name in ("test_cat", "test_multicat", "test_stack_slice", "test_stack_max", "test_repeat"):
+  setattr(TestRockchipConcatOps, _name, getattr(_test_ops.TestOps, _name))
 
 if __name__ == "__main__":
   unittest.main()

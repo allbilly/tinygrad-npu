@@ -708,3 +708,52 @@ Verification with `FORWARD_ONLY=1 DEFAULT_FLOAT=HALF DEV=ROCKCHIP ROCKCHIP_EW_RE
 - `mypy tinygrad/`: pass (216 source files).
 - `sz.py`: renderer 704 executable lines, runtime 180; comments and docstrings retained.
 - No host floating-point tensor arithmetic, tolerance relaxation, CMAC, CNA, or PPU execution was added.
+
+---
+
+## 2026-08-07 — Group 6: FP16 concatenation, stacking, and repetition
+
+Cat, multicat, stack, stack-to-slice, stack-to-max, and repeat from `test/backend/test_ops.py` now pass on Rockchip. RKImage v16 adds
+a partial raw gather: several FP16 source buffers may populate disjoint lanes of the same scratch buffer, with negative offsets skipped
+instead of filled. The compiler proves that every destination lane selects exactly one source and that there are no constant-fill lanes
+before emitting this form. Runtime work remains integer indexing and raw `uint16` copies; one DPU EW add-zero stage realizes each
+scheduled output kernel.
+
+The upstream scalar-stack assertion bypasses `helper_test_op` and compares FP16 `3.140625` to float64 `3.14` at zero tolerance. Its
+Rockchip equivalent keeps the same operation but uses the unchanged `test_gemm_fp16` ceiling (`5e-3/5e-3`). No backend tolerance was
+relaxed.
+
+Representative direct profiles were bit-exact:
+
+| Case | Wall time | NPU submits | Maximum absolute error |
+|---|---:|---:|---:|
+| cat axis 0 | 0.192 s | 1 | 0 |
+| cat axis 1 | 0.060 s | 2 | 0 |
+| stack axis 1 | 0.025 s | 2 | 0 |
+| repeat | 0.041 s | 1 | 0 |
+
+This milestone also removed two compile-time outliers exposed by full duration reporting. Selection/static-expression classification is
+now memoized per kernel, and static gather index/gate UOps are compiled once into exact geometry evaluators with a cached output-lane
+map. These evaluators inspect only immutable graph geometry and constants, never input values.
+
+| Case | Before | After | Dominant cause removed |
+|---|---:|---:|---|
+| nested Conv2D compile | 63.15 s | 4.84 s | repeated selection/static subtree walks |
+| nested Conv2D isolated test call | 61.61 s | 6.81 s | same |
+| ConvTranspose3D compile | 64.93 s | 3.18 s | recursive evaluation of 108 gather maps |
+| ConvTranspose3D isolated test call | 64.82 s | 5.11 s | same |
+| complete Rockchip census | 331.50 s | 51.13 s | both compiler bottlenecks |
+
+The ConvTranspose3D wall-time decomposition before the gather evaluator was: 64.93 s compile, 0.34 s schedule, 0.14 s raw gather
+setup, 0.21 s command construction, 0.075 s across 27 blocking ioctls, and 0.89 s total execution. This confirms the optimization
+target was host compilation, not NPU execution or ioctl waiting.
+
+Verification with `FORWARD_ONLY=1 DEFAULT_FLOAT=HALF DEV=ROCKCHIP ROCKCHIP_EW_REDUCE=twoproduct`:
+
+- Concat census: **6 passed in 19.32 s** with `-n12`.
+- Focused submit regression: **1 passed, 4 subtests passed**.
+- Complete Rockchip census: **183 passed, 10 skipped, 107 subtests passed in 51.13 s** with `-n12` and `--durations=20`.
+- Full Ruff: pass.
+- `mypy tinygrad/`: pass (216 source files).
+- `sz.py`: renderer 794 executable lines, runtime 180; comments and docstrings retained.
+- No host floating-point tensor arithmetic, tolerance relaxation, CMAC, CNA, or PPU execution was added.
