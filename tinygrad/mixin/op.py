@@ -1063,7 +1063,8 @@ class OpMixin(ElementwiseMixin, ReduceMixin):
       if mode == "linear":
         index = (scale*arr if align_corners else (scale*(arr+0.5))-0.5).clip(0, self.shape[i]-1)
         low, high, perc = [y.reshape(reshape).expand(expand) for y in (index.floor().int(), index.ceil().int(), index - index.floor())]
-        x = x.gather(i, low).lerp(x.gather(i, high), perc)
+        # Preserve the input dtype between separable axes so an intermediate never requires wider storage than the input device supports.
+        x = x.gather(i, low).lerp(x.gather(i, high), perc).cast(self.dtype)
       else:
         index = (scale*(arr+0.5) if mode=="nearest-exact" else scale*arr).cast(dtypes.int32).reshape(reshape).expand(expand)
         x = x.gather(i, index)

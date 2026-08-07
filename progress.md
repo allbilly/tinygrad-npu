@@ -559,3 +559,33 @@ Verification with `FORWARD_ONLY=1 DEFAULT_FLOAT=HALF DEV=ROCKCHIP ROCKCHIP_EW_RE
 - Full Ruff: pass.
 - `mypy tinygrad/`: pass (216 source files).
 - DPU-only audit unchanged: runtime NumPy operations remain raw `uint16` views, integer index construction, and copies. There is no host floating-point tensor arithmetic, CMAC, CNA, or PPU execution path.
+
+---
+
+## 2026-08-07 — FP16 interpolation through gather + DPU EW
+
+All eight `test_interpolate*` methods from `test/backend/test_ops.py` are now mirrored into the Rockchip census at exactly the `test_gemm_fp16` tolerance ceiling (`atol=rtol=grad_atol=grad_rtol=5e-3`). This covers 24 linear, bilinear, trilinear, nearest, nearest-exact, and corner-aligned shape/mode combinations.
+
+Nearest interpolation is lowered as an integer host gather followed by an FP16 DPU EW add-zero pass-through, so output realization still submits NPU work rather than becoming a host output copy. The compile-time geometry evaluator now respects integer cast points and FP16/FP32 rounding. This fixed multidimensional nearest maps where delaying `float→int` until after applying a row stride selected the wrong source elements.
+
+Linear interpolation keeps coordinate calculations as input-independent FP32 compiler geometry, materializes the resulting weights as immutable FP16 bit tables, and executes every input-dependent blend through DPU EW MUL/ADD. Each separable axis casts its result back to the input dtype, preventing bilinear and trilinear schedules from creating an FP32 intermediate that the Rockchip NPU cannot consume.
+
+Representative direct cold profiles, excluding Torch reference generation:
+
+| Case | Wall time | Submits | Maximum absolute error |
+|---|---:|---:|---:|
+| nearest 13→9, `(2,3,13)` | 0.211 s | 1 | 0 |
+| linear 29→52, `(2,3,29)` | 0.681 s | 1 | 0.0009766 |
+| bilinear `(12,20)→(9,31)` | 7.278 s | 2 | 0.0019531 |
+| trilinear `(5,2,8)→(3,6,4)` | 2.742 s | 3 | 0.0009766 |
+
+Verification with `FORWARD_ONLY=1 DEFAULT_FLOAT=HALF DEV=ROCKCHIP ROCKCHIP_EW_REDUCE=twoproduct`:
+
+- Interpolation census: **8 passed in 33.19 s** with `-n12`.
+- Explicit nearest/trilinear ioctl regressions: **2 passed**; nearest submits once and trilinear once per axis.
+- Complete Rockchip census: **112 passed, 9 skipped, 96 subtests passed in 111.05 s** with `-n12`.
+- Generic FP32 `test_ops` interpolation census: **8 passed**.
+- `test/unit/test_dtype_weak.py`: **32 passed, 1 xfailed**.
+- Full Ruff and `mypy tinygrad/`: pass (216 source files).
+- `sz.py`: renderer 487 executable lines, runtime 140; comments and docstrings retained.
+- No CPU floating-point tensor arithmetic, tolerance relaxation beyond `test_gemm_fp16`, CMAC, CNA, or PPU execution was added.

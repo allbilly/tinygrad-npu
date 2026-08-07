@@ -144,6 +144,16 @@ class TestRockchip(unittest.TestCase):
     ref = torch.nn.functional.avg_pool2d(torch.from_numpy(xn), **args).numpy()
     self._check(1, Tensor(xn).avg_pool2d(**args), ref)
 
+  def test_interpolate_nearest_submit(self):
+    x = self._half((2,3,13), 502)
+    ref = torch.nn.functional.interpolate(torch.from_numpy(x.numpy()), size=(9,), mode="nearest").numpy()
+    self._check(1, x.interpolate((9,), mode="nearest"), ref, **_FP16)
+
+  def test_interpolate_trilinear_submit(self):
+    x = self._half((1,1,3,2,4), 503)
+    ref = torch.nn.functional.interpolate(torch.from_numpy(x.numpy()), size=(2,4,3), mode="trilinear").numpy()
+    self._check(3, x.interpolate((2,4,3), mode="linear"), ref, **_FP16)
+
   # ---- GEMM / MATMUL (from test_ops, fp16 tol) ----
   def test_matmul_simple(self):
     helper_test_op([(4), (4,4)], lambda x,y: x.matmul(y), Tensor.dot, **_FP16)
@@ -311,6 +321,21 @@ class TestRockchipAvgPoolOps(unittest.TestCase):
 for _name, _test in vars(_test_ops.TestOps).items():
   if (_name.startswith("test_avg_pool") and _name != "test_avg_pool3d") or _name == "test_global_avg_pool2d":
     setattr(TestRockchipAvgPoolOps, _name, _test)
+
+@unittest.skipUnless(Device.DEFAULT == "ROCKCHIP", "ROCKCHIP device only")
+class TestRockchipInterpolateOps(unittest.TestCase):
+  """Every FP16 interpolation case from test_ops at the test_gemm_fp16 tolerance."""
+
+  @classmethod
+  def setUpClass(cls): _test_ops.helper_test_op = _fp16_test_op
+
+  @classmethod
+  def tearDownClass(cls): _test_ops.helper_test_op = _TEST_OPS_HELPER
+
+# Keep the FP16 interpolation census synchronized as test_ops grows.
+for _name, _test in vars(_test_ops.TestOps).items():
+  if _name.startswith("test_interpolate"):
+    setattr(TestRockchipInterpolateOps, _name, _test)
 
 if __name__ == "__main__":
   unittest.main()

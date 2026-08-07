@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from enum import IntEnum
 from typing import Callable
 from tinygrad.device import Compiler
-from tinygrad.dtype import dtypes
+from tinygrad.dtype import DType, dtypes
 from tinygrad.helpers import cdiv, cmod, floordiv, floormod
 from tinygrad.renderer import Renderer
 from tinygrad.runtime.autogen import rockchip as rk
@@ -167,31 +167,39 @@ def _root_param(u:UOp) -> UOp|None:
     u = u.src[0]
   return u
 
+def _eval_cast(value:int|float|bool, dtype:DType) -> int|float|bool:
+  if dtype.scalar() is dtypes.bool: return bool(value)
+  if dtype.scalar() in dtypes.ints: return int(value)
+  if dtype.scalar() is dtypes.half: return struct.unpack("<e", struct.pack("<e", float(value)))[0]
+  if dtype.scalar() is dtypes.float: return struct.unpack("<f", struct.pack("<f", float(value)))[0]
+  return float(value)
+
 def _eval_expr(u:UOp, env:dict[UOp, int]) -> int|float|bool:
-  if u.op is Ops.CONST: return u.arg
+  if u.op is Ops.CONST: return _eval_cast(u.arg, u.dtype)
   if u.op is Ops.RANGE: return env[u]
-  if u.op is Ops.CAST: return _eval_expr(u.src[0], env)
-  if u.op is Ops.WHERE: return _eval_expr(u.src[1] if _eval_expr(u.src[0], env) else u.src[2], env)
+  if u.op is Ops.CAST: return _eval_cast(_eval_expr(u.src[0], env), u.dtype)
+  if u.op is Ops.WHERE: return _eval_cast(_eval_expr(u.src[1] if _eval_expr(u.src[0], env) else u.src[2], env), u.dtype)
   lhs = _eval_expr(u.src[0], env)
-  if u.op is Ops.RECIPROCAL: return 1.0 / float(lhs)
+  if u.op is Ops.RECIPROCAL: return _eval_cast(1.0 / float(lhs), u.dtype)
+  if u.op is Ops.TRUNC: return _eval_cast(int(lhs), u.dtype)
   rhs = _eval_expr(u.src[1], env)
-  if u.op is Ops.ADD: return lhs + rhs
-  if u.op is Ops.MUL: return lhs * rhs
-  if u.op is Ops.SUB: return lhs - rhs
-  if u.op is Ops.CDIV: return cdiv(int(lhs), int(rhs))
-  if u.op is Ops.CMOD: return cmod(int(lhs), int(rhs))
-  if u.op is Ops.FLOORDIV: return floordiv(int(lhs), int(rhs))
-  if u.op is Ops.FLOORMOD: return floormod(int(lhs), int(rhs))
-  if u.op is Ops.MAX: return max(lhs, rhs)
+  if u.op is Ops.ADD: return _eval_cast(lhs + rhs, u.dtype)
+  if u.op is Ops.MUL: return _eval_cast(lhs * rhs, u.dtype)
+  if u.op is Ops.SUB: return _eval_cast(lhs - rhs, u.dtype)
+  if u.op is Ops.CDIV: return _eval_cast(cdiv(int(lhs), int(rhs)), u.dtype)
+  if u.op is Ops.CMOD: return _eval_cast(cmod(int(lhs), int(rhs)), u.dtype)
+  if u.op is Ops.FLOORDIV: return _eval_cast(floordiv(int(lhs), int(rhs)), u.dtype)
+  if u.op is Ops.FLOORMOD: return _eval_cast(floormod(int(lhs), int(rhs)), u.dtype)
+  if u.op is Ops.MAX: return _eval_cast(max(lhs, rhs), u.dtype)
   if u.op is Ops.CMPLT: return lhs < rhs
   if u.op is Ops.CMPNE: return lhs != rhs
-  if u.op is Ops.AND: return int(lhs) & int(rhs)
-  if u.op is Ops.OR: return int(lhs) | int(rhs)
+  if u.op is Ops.AND: return _eval_cast(int(lhs) & int(rhs), u.dtype)
+  if u.op is Ops.OR: return _eval_cast(int(lhs) | int(rhs), u.dtype)
   raise RuntimeError(f"RKPLAN_REJECT:unsupported_static {u.op.name}")
 
 def _eval_int(u:UOp, env:dict[UOp, int]) -> int: return int(_eval_expr(u, env))
 
-_STATIC_OPS = {Ops.CONST, Ops.RANGE, Ops.CAST, Ops.ADD, Ops.MUL, Ops.SUB, Ops.RECIPROCAL, Ops.WHERE,
+_STATIC_OPS = {Ops.CONST, Ops.RANGE, Ops.CAST, Ops.ADD, Ops.MUL, Ops.SUB, Ops.RECIPROCAL, Ops.TRUNC, Ops.WHERE,
                Ops.CMPLT, Ops.CMPNE, Ops.AND, Ops.OR, Ops.MAX}
 def _is_static_expr(u:UOp) -> bool: return u.op in _STATIC_OPS and all(_is_static_expr(x) for x in u.src)
 
@@ -273,9 +281,9 @@ def _gather_plan(src_index:int, dst_scratch:int, out_index:UOp, load_index:UOp, 
   return RKGather(src_index, dst_scratch, count, offsets=_gather_offsets(out_index, load_index, gate, count), fill_bits=fill_bits)
 
 def _ew_leaf(u:UOp, out_index:UOp, count:int, oslot:int) -> RKArg|RKStatic|float|tuple[UOp, UOp, UOp|None, int]|None:
-  if u.op is Ops.RECIPROCAL and u.dtype.scalar() is dtypes.half and _is_static_expr(u): return RKStatic(u)
-  if u.op is Ops.CAST and u.dtype.scalar() is dtypes.half: return _ew_leaf(u.src[0], out_index, count, oslot)
   if u.op is Ops.CONST and u.dtype.scalar() is dtypes.half: return float(u.arg)
+  if u.dtype.scalar() is dtypes.half and _is_static_expr(u): return RKStatic(u)
+  if u.op is Ops.CAST and u.dtype.scalar() is dtypes.half: return _ew_leaf(u.src[0], out_index, count, oslot)
   if u.op is Ops.LOAD and u.src[0].op is Ops.INDEX and u.src[0].src[0].op is Ops.PARAM:
     param, index, gate = u.src[0].src[0], u.src[0].src[1], u.src[2] if len(u.src) > 2 else None
     if len(u.src) > 1 and u.src[1].op is not Ops.CONST: return None
@@ -366,6 +374,7 @@ def lower_ew(uops:list[UOp]) -> RKImage:
   out_index, out, val = store.src[0].src[1], RKArg(RKBufferKind.ARG, oslot), store.src[1]
   if val.op is Ops.CONST and val.dtype.scalar() is dtypes.half:
     return RKImage(RKTarget.RK3588, constants=struct.pack("<e", float(val.arg)), fill=RKFill(out, count))
+  if _ew_leaf(val, out_index, count, oslot) is not None: val = val.alu(Ops.ADD, UOp.const(0.0, dtypes.half))
   supported = RockchipRenderer.code_for_op
   chain_limit = 512
   relu_input = _relu_operand(val)
@@ -502,9 +511,11 @@ def _fold_masked_max(gate:UOp, default:UOp, val:UOp, opposite:bool) -> UOp|None:
     return val.replace(src=(val.src[0], default, val.src[2]))
   return None
 
+def _fp32_alu_to_fp16(x:UOp) -> UOp|None:
+  return None if _is_static_expr(x) else x.src[0].cast(dtypes.half).alu(x.op, x.src[1].cast(dtypes.half))
+
 _pm_fp32_to_fp16 = PatternMatcher([
-  (UPat(Ops.ADD, dtypes.float, name="x"), lambda x: x.src[0].cast(dtypes.half).alu(Ops.ADD, x.src[1].cast(dtypes.half))),
-  (UPat(Ops.MUL, dtypes.float, name="x"), lambda x: x.src[0].cast(dtypes.half).alu(Ops.MUL, x.src[1].cast(dtypes.half))),
+  (UPat((Ops.ADD, Ops.MUL), dtypes.float, name="x"), _fp32_alu_to_fp16),
   (UPat(Ops.CAST, dtypes.half, name="root", src=(UPat.cvar("c"),)), lambda root,c: root.const_like(c.arg)),
   (UPat(Ops.CAST, dtypes.half, src=(UPat(Ops.CAST, dtypes.float, src=(UPat(dtype=dtypes.half, name="x"),)),)), lambda x: x),
   (UPat(Ops.CAST, dtypes.half, src=(UPat(dtype=dtypes.half, name="x"),)), lambda x: x),
