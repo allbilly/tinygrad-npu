@@ -122,12 +122,15 @@ class TestRockchip(unittest.TestCase):
     self._check(0, 2 * a, (a.numpy().astype(np.float32) * 2).astype(np.float16))
 
   def test_mul_naninf(self):
-    self.skipTest("RK3588 FP16 DPU EW MUL returns NaN for infinity operands")
-    a = self._half((45, 65), 16)
+    rng = np.random.default_rng(16)
+    an = rng.uniform(-2, 2, size=(45,65)).astype(np.float16)
+    an.flat[:9] = (-math.inf, -65504.0, -2.0, -0.0, 0.0, 2.0, 65504.0, math.inf, math.nan)
+    a = Tensor(an)
     n = _ew_submits(45*65)
-    self._check(n, a * math.inf, (a.numpy().astype(np.float32) * np.float32(np.inf)).astype(np.float16))
-    self._check(n, a * -math.inf, (a.numpy().astype(np.float32) * np.float32(-np.inf)).astype(np.float16))
-    self._check(n, a * math.nan, (a.numpy().astype(np.float32) * np.float32(np.nan)).astype(np.float16))
+    with np.errstate(invalid="ignore"):
+      self._check(4*n, a * math.inf, (an.astype(np.float32) * np.float32(np.inf)).astype(np.float16))
+      self._check(4*n, a * -math.inf, (an.astype(np.float32) * np.float32(-np.inf)).astype(np.float16))
+      self._check(n, a * math.nan, (an.astype(np.float32) * np.float32(np.nan)).astype(np.float16))
 
   # ---- MAX ----
   def test_maximum_fp16(self):

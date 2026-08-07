@@ -938,6 +938,15 @@ _pm_abs = PatternMatcher([(_abs_pattern, lambda x: x.alu(Ops.MAX, x.alu(Ops.MUL,
 def _fp32_alu_to_fp16(x:UOp) -> UOp|None:
   return None if _is_static_expr(x) else x.src[0].cast(dtypes.half).alu(x.op, x.src[1].cast(dtypes.half))
 
+def _fold_infinite_mul(x:UOp) -> UOp|None:
+  """DPU EW MUL maps finite×infinity to NaN; synthesize the IEEE result from DPU sign masks."""
+  if (scaled:=_const_operand(x, Ops.MUL)) is None or not math.isinf(factor:=float(scaled[1].arg)): return None
+  zero, neg_one = UOp.const(0.0, dtypes.half), UOp.const(-1.0, dtypes.half)
+  positive, negative = _positive_mask(scaled[0]), _positive_mask(scaled[0].alu(Ops.MUL, neg_one))
+  lhs, rhs = (negative, positive) if factor < 0 else (positive, negative)
+  sign = lhs.alu(Ops.ADD, rhs.alu(Ops.MUL, neg_one)).alu(Ops.ADD, zero)  # normalize the SUB result's -0.
+  return sign.alu(Ops.FDIV, zero)
+
 def _fold_casted_relu(root:UOp) -> UOp|None:
   """Recover native half MAX from the float WHERE emitted for half ReLU inside a reduction."""
   if len(root.src) != 1 or (where:=root.src[0]).op is not Ops.WHERE or where.dtype.scalar() is not dtypes.float: return None
@@ -951,6 +960,7 @@ def _fold_casted_relu(root:UOp) -> UOp|None:
 
 _pm_fp32_to_fp16 = PatternMatcher([
   (UPat((Ops.ADD, Ops.MUL), dtypes.float, name="x"), _fp32_alu_to_fp16),
+  (UPat(Ops.MUL, dtypes.half, name="x"), _fold_infinite_mul),
   (UPat(Ops.CAST, dtypes.half, name="root"), _fold_casted_relu),
   (UPat(Ops.CAST, dtypes.half, name="root", src=(UPat.cvar("c"),)), lambda root,c: root.const_like(c.arg)),
   (UPat(Ops.CAST, dtypes.half, src=(UPat(Ops.CAST, dtypes.float, src=(UPat(dtype=dtypes.half, name="x"),)),)), lambda x: x),

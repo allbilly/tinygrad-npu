@@ -897,3 +897,26 @@ Verification:
 - `mypy tinygrad/`: pass (216 source files).
 - `sz.py`: renderer **891 → 890** executable lines, runtime **181 → 176**; comments and docstrings retained.
 - No shared tinygrad core change, CPU tensor arithmetic, tolerance relaxation, CMAC, CNA, or PPU execution was added.
+
+---
+
+## 2026-08-08 — IEEE FP16 multiply by infinity on DPU EW
+
+RK3588's native FP16 DPU EW `MUL` returns NaN for an infinity operand, including nonzero finite values. The Rockchip renderer now
+recognizes a scalar `+inf` or `-inf` multiplier and synthesizes the IEEE result entirely on DPU EW:
+
+1. DPU positive-mask stages compute `x > 0` and `-x > 0`.
+2. Their difference forms `sign(x)` (or its inverse for `-inf`), followed by `+0` to normalize the DPU SUB stage's `-0`.
+3. DPU FDIV divides that sign by zero, producing signed infinity for nonzero values and NaN for either signed zero or NaN.
+
+The regression includes negative/positive infinity inputs, FP16 extrema, ordinary signs, both signed zeros, and NaN. A one-tile
+infinite scalar multiply uses **4 blocking ioctl submits**: two stateful positive-mask submissions, one preparation chain, and one
+final sign/FDIV chain. Multiplication by NaN retains the native one-submit EW path.
+
+Verification with `FORWARD_ONLY=1 DEFAULT_FLOAT=HALF DEV=ROCKCHIP`:
+
+- Focused infinity/NaN regression: **1 passed in 12.49 s** with `-n12`.
+- Complete Rockchip census: **219 passed, 11 skipped, 107 subtests passed in 49.16 s** with `-n12`.
+- Tolerance remains exactly `atol=5e-3, rtol=5e-3`.
+- Full Ruff and `mypy tinygrad/` pass; `sz.py` reports renderer **898** executable lines and runtime **176**.
+- No shared tinygrad core change, host tensor arithmetic, CMAC, CNA, or PPU execution was added.
