@@ -124,14 +124,17 @@ _DPU, _RDMA = 0x1001, 0x2001
 _MAX_EW_ELEMS_FP16 = 64000  # elementwise.py tile cap
 _EW_DATA_MODE_FP16 = 1 << 28
 _EW_EDATA_SIZE_FP16 = 2 << 22
-_EW_ALU_ADD = 2 << 16
-_EW_RELU_BYPASS = 1 << 9
-_EW_OP_CVT_BYPASS = 1 << 8
-_EW_LUT_BYPASS = 1 << 7
-_EW_OP_SRC_DMA = 1 << 6
+_EW_ALU_MIN, _EW_ALU_ADD, _EW_ALU_ABS = 1 << 16, 2 << 16, 5 << 16
+_EW_RELUX_EN, _EW_RELU_BYPASS, _EW_OP_CVT_BYPASS = 1 << 10, 1 << 9, 1 << 8
+_EW_LUT_BYPASS, _EW_OP_SRC_DMA, _EW_MUL_PRELU = 1 << 7, 1 << 6, 1 << 5
 _EW_OP_TYPE_MUL = 1 << 2
 _EW_CFG_COMMON = _EW_DATA_MODE_FP16 | _EW_EDATA_SIZE_FP16 | _EW_LUT_BYPASS | _EW_OP_SRC_DMA
 _EW_CFG_RELU = _EW_CFG_COMMON
+_EW_CFG_RELU6 = _EW_CFG_COMMON | _EW_RELUX_EN
+_EW_CFG_MIN = _EW_CFG_COMMON | _EW_RELU_BYPASS | _EW_ALU_MIN
+_EW_CFG_ABS = _EW_CFG_COMMON | _EW_RELU_BYPASS | _EW_ALU_ABS
+_EW_CFG_LEAKY_RELU = _EW_CFG_COMMON | _EW_RELU_BYPASS | _EW_OP_CVT_BYPASS | _EW_MUL_PRELU | _EW_OP_TYPE_MUL
+_EW_RELUX_CMP_RELU6 = struct.unpack("<I", struct.pack("<f", 6.0))[0]
 _EW_CFG = {
   Ops.ADD: _EW_CFG_COMMON | _EW_RELU_BYPASS | _EW_ALU_ADD,
   Ops.MUL: _EW_CFG_COMMON | _EW_RELU_BYPASS | _EW_OP_CVT_BYPASS | _EW_OP_TYPE_MUL,
@@ -149,7 +152,8 @@ def emit_ew_stage(dst:RKArg, lhs:RKArg, rhs:RKArg, count:int, ew_cfg:int) -> RKS
     (_DPU,rk.REG_DPU_DATA_FORMAT,(2<<29)|(2<<26)|2),
     (_DPU,rk.REG_DPU_DATA_CUBE_WIDTH,width),(_DPU,rk.REG_DPU_DATA_CUBE_HEIGHT,0),
     (_DPU,rk.REG_DPU_DATA_CUBE_NOTCH_ADDR,0),(_DPU,rk.REG_DPU_DATA_CUBE_CHANNEL,(7<<16)|7),
-    (_DPU,rk.REG_DPU_EW_CFG,ew_cfg),(_DPU,rk.REG_DPU_OUT_CVT_SCALE,(1<<16)|1),
+    (_DPU,rk.REG_DPU_EW_CFG,ew_cfg),(_DPU,rk.REG_DPU_EW_RELUX_CMP_VALUE,_EW_RELUX_CMP_RELU6),
+    (_DPU,rk.REG_DPU_OUT_CVT_SCALE,(1<<16)|1),
     (_RDMA,rk.REG_DPU_RDMA_RDMA_S_POINTER,0xe),(_RDMA,rk.REG_DPU_RDMA_RDMA_DATA_CUBE_WIDTH,width),
     (_RDMA,rk.REG_DPU_RDMA_RDMA_DATA_CUBE_HEIGHT,0),(_RDMA,rk.REG_DPU_RDMA_RDMA_DATA_CUBE_CHANNEL,7),
     (_RDMA,rk.REG_DPU_RDMA_RDMA_ERDMA_CFG,(1<<30)|(2<<2)))
@@ -319,6 +323,35 @@ def _relu_operand(u:UOp) -> UOp|None:
   if u.src[1].op is Ops.CONST and float(u.src[1].arg) == 0.0: return u.src[0]
   return None
 
+def _const_operand(u:UOp, op:Ops, value:float|None=None) -> tuple[UOp, UOp]|None:
+  if u.op is not op: return None
+  for operand, const in (u.src, u.src[::-1]):
+    if const.op is Ops.CONST and (value is None or float(const.arg) == value): return operand, const
+  return None
+
+def _negated_operand(u:UOp) -> UOp|None:
+  if (scaled:=_const_operand(u, Ops.MUL, -1.0)) is not None: return scaled[0]
+  return UOp.const(-float(u.arg), dtypes.half) if u.op is Ops.CONST else None
+
+def _ew_plan(u:UOp) -> tuple[int, UOp, UOp]|None:
+  if (relu:=_relu_operand(u)) is not None: return _EW_CFG_RELU, relu, UOp.const(0.0, dtypes.half)
+  if u.op is Ops.MAX:
+    for direct, product in (u.src, u.src[::-1]):
+      if (scaled:=_const_operand(product, Ops.MUL)) is None or scaled[0].key != direct.key: continue
+      factor = float(scaled[1].arg)
+      if factor == -1.0: return _EW_CFG_ABS, direct, direct
+      if 0.0 <= factor <= 1.0: return _EW_CFG_LEAKY_RELU, direct, scaled[1]
+  if (outer:=_const_operand(u, Ops.MUL, -1.0)) is not None and outer[0].op is Ops.MAX:
+    lhs, rhs = (_negated_operand(x) for x in outer[0].src)
+    if lhs is not None and rhs is not None: return _EW_CFG_MIN, lhs, rhs
+  if u.op is Ops.ADD:
+    for positive, negative in (u.src, u.src[::-1]):
+      source, scaled = _relu_operand(positive), _const_operand(negative, Ops.MUL, -1.0)
+      if source is not None and scaled is not None and (upper:=_relu_operand(scaled[0])) is not None and \
+         (shifted:=_const_operand(upper, Ops.ADD, -6.0)) is not None and shifted[0].key == source.key:
+        return _EW_CFG_RELU6, source, UOp.const(0.0, dtypes.half)
+  return (_EW_CFG[u.op], u.src[0], u.src[1]) if u.op in _EW_CFG and u.dtype.scalar() is dtypes.half else None
+
 def _compensated_mul_sum(terms:list[UOp]) -> UOp:
   """Kahan sum built after symbolic simplification so compensation remains as DPU EW ops."""
   zero, neg_one = UOp.const(0.0, dtypes.half), UOp.const(-1.0, dtypes.half)
@@ -379,7 +412,9 @@ def lower_ew(uops:list[UOp]) -> RKImage:
   chain_limit = 512
   relu_input = _relu_operand(val)
   reduction = relu_input if relu_input is not None else val
-  if (reduction_info:=_mul_reduction_terms(reduction)) is not None and reduction_info[1]:
+  native_plan = _ew_plan(val)
+  native_cfg = native_plan[0] if native_plan is not None else None
+  if native_cfg not in (_EW_CFG_MIN, _EW_CFG_RELU6) and (reduction_info:=_mul_reduction_terms(reduction)) is not None and reduction_info[1]:
     terms = reduction_info[0]
     reduce_mode = os.getenv("ROCKCHIP_EW_REDUCE", "sequential").strip().lower()
     if reduce_mode == "kahan": reduced = _compensated_mul_sum(terms)
@@ -389,18 +424,19 @@ def lower_ew(uops:list[UOp]) -> RKImage:
     val = reduced.alu(Ops.MAX, val.src[0] if val.src[1] is reduction else val.src[1]) if reduction is not val else reduced
   order:list[UOp] = []
   visited:dict[UOp, bool] = {}
+  plans:dict[UOp, tuple[int, UOp, UOp]] = {}
   def visit(u:UOp) -> bool:
     if u in visited: return visited[u]
-    if u.op in supported and u.dtype.scalar() is dtypes.half:
-      visited[u] = all(visit(src) for src in u.src)
-      if visited[u]: order.append(u)
+    if (plan:=_ew_plan(u)) is not None:
+      visited[u] = all(visit(src) for src in plan[1:])
+      if visited[u]: plans[u] = plan; order.append(u)
     else: visited[u] = _ew_leaf(u, out_index, count, oslot) is not None
     return visited[u]
   if not visit(val) or not order or order[-1] is not val:
     raise RuntimeError(f"RKPLAN_REJECT:unsupported_graph {_unsupported_ew_ops(uops, out_index, count, oslot, supported)}")
   uses = {u: 0 for u in order}
   for node in order:
-    for src in node.src:
+    for src in plans[node][1:]:
       if src in uses: uses[src] += 1
   values:dict[UOp, RKArg] = {}
   leaves:dict[UOp, RKArg] = {}
@@ -410,7 +446,7 @@ def lower_ew(uops:list[UOp]) -> RKImage:
   gather_scratch:dict[tuple[int, int, int, tuple[tuple[int, int, int], ...], tuple[int, ...], int], int] = {}
   gathers:list[RKGather] = []
   for expr in order:
-    for src in expr.src:
+    for src in plans[expr][1:]:
       if isinstance((leaf:=_ew_leaf(src, out_index, count, oslot)), float):
         bits = struct.pack("<e", leaf)
         if bits not in const_scratch: const_scratch[bits] = len(const_scratch)
@@ -450,17 +486,18 @@ def lower_ew(uops:list[UOp]) -> RKImage:
     leaves[u] = ret
     return ret
   for expr in order:
-    lhs, rhs = operand(expr.src[0]), operand(expr.src[1])
+    ew_cfg, lhs_u, rhs_u = plans[expr]
+    lhs, rhs = operand(lhs_u), operand(rhs_u)
     if expr is val: dst = out
-    elif (reuse:=next((values[src] for src in expr.src if src in values and uses[src] == 1 and
+    elif (reuse:=next((values[src] for src in (lhs_u, rhs_u) if src in values and uses[src] == 1 and
                        values[src].kind is RKBufferKind.SCRATCH), None)) is not None: dst = reuse
     else:
       slot = free.pop() if free else scratch_count
       if slot == scratch_count: scratch_count += 1
       dst = RKArg(RKBufferKind.SCRATCH, slot)
-    ew_ops.append(RKEWOp(dst, lhs, rhs, count, _EW_CFG_RELU if _relu_operand(expr) is not None else _EW_CFG[expr.op]))
+    ew_ops.append(RKEWOp(dst, lhs, rhs, count, ew_cfg))
     values[expr] = dst
-    for dep in expr.src:
+    for dep in (lhs_u, rhs_u):
       if dep in uses:
         uses[dep] -= 1
         arg = values[dep]
@@ -511,11 +548,39 @@ def _fold_masked_max(gate:UOp, default:UOp, val:UOp, opposite:bool) -> UOp|None:
     return val.replace(src=(val.src[0], default, val.src[2]))
   return None
 
+def _is_const(u:UOp, value:float) -> bool: return u.op is Ops.CONST and float(u.arg) == value
+
+def _minimum(lhs:UOp, rhs:UOp) -> UOp:
+  neg_one = UOp.const(-1.0, dtypes.half)
+  return lhs.alu(Ops.MUL, neg_one).alu(Ops.MAX, rhs.alu(Ops.MUL, neg_one)).alu(Ops.MUL, neg_one)
+
+def _fold_ordered_where(x:UOp) -> UOp|None:
+  gate, yes, no = x.src
+  if gate.op is Ops.OR and yes.op is Ops.CONST:
+    for upper, lower in ((gate.src[0], gate.src[1]), (gate.src[1], gate.src[0])):
+      if (upper.op is Ops.CMPLT and upper.src[0].key == yes.key and upper.src[1].op is Ops.MAX and
+          lower.op is Ops.CMPLT and lower.src[0].key == no.key and lower.src[1].key == yes.key and
+          {u.key for u in upper.src[1].src} == {no.key, yes.key}): return _minimum(upper.src[1], yes)
+  if gate.op is not Ops.CMPLT: return None
+  lhs, rhs = gate.src
+  if yes.key == rhs.key and no.key == lhs.key: return lhs.alu(Ops.MAX, rhs)
+  if yes.key == lhs.key and no.key == rhs.key: return _minimum(lhs, rhs)
+  # LeakyReLU with 0 <= slope <= 1 is max(x, slope*x).
+  if no.key == lhs.key and _is_const(rhs, 0.0) and yes.op is Ops.MUL:
+    scaled = yes.src[1] if yes.src[0].key == no.key else yes.src[0] if yes.src[1].key == no.key else None
+    if scaled is not None and scaled.op is Ops.CONST and 0.0 <= float(scaled.arg) <= 1.0: return no.alu(Ops.MAX, yes)
+  return None
+
+_abs_pattern = UPat(Ops.MUL, dtypes.half, src=[UPat.var("x"), UPat(Ops.WHERE, src=(
+  UPat(Ops.CMPNE, src=(UPat.var("x"), UPat.const(0.0))),
+  UPat(Ops.WHERE, src=(UPat(Ops.CMPLT, src=(UPat.var("x"), UPat.const(0.0))), UPat.const(-1.0), UPat.const(1.0))), UPat.const(0.0)))])
+
 def _fp32_alu_to_fp16(x:UOp) -> UOp|None:
   return None if _is_static_expr(x) else x.src[0].cast(dtypes.half).alu(x.op, x.src[1].cast(dtypes.half))
 
 _pm_fp32_to_fp16 = PatternMatcher([
   (UPat((Ops.ADD, Ops.MUL), dtypes.float, name="x"), _fp32_alu_to_fp16),
+  (_abs_pattern, lambda x: x.alu(Ops.MAX, x.alu(Ops.MUL, UOp.const(-1.0, dtypes.half)))),
   (UPat(Ops.CAST, dtypes.half, name="root", src=(UPat.cvar("c"),)), lambda root,c: root.const_like(c.arg)),
   (UPat(Ops.CAST, dtypes.half, src=(UPat(Ops.CAST, dtypes.float, src=(UPat(dtype=dtypes.half, name="x"),)),)), lambda x: x),
   (UPat(Ops.CAST, dtypes.half, src=(UPat(dtype=dtypes.half, name="x"),)), lambda x: x),
@@ -526,9 +591,7 @@ _pm_fp32_to_fp16 = PatternMatcher([
    lambda gate,val,default: _fold_masked_max(gate, default, val, False)),
   (UPat(Ops.WHERE, dtypes.half, src=(UPat.var("gate"), UPat.cvar("default"), UPat.var("val"))),
    lambda gate,default,val: _fold_masked_max(gate, default, val, True)),
-  (UPat(Ops.WHERE, dtypes.half, name="x"), lambda x: x.src[1].alu(Ops.MAX, x.src[2])
-   if x.src[0].op is Ops.CMPLT and x.src[0].src[0] is x.src[2] and x.src[0].src[1] is x.src[1] and
-      x.src[2].op is Ops.CONST and float(x.src[2].arg) == 0.0 else None),
+  (UPat(Ops.WHERE, dtypes.half, name="x"), _fold_ordered_where),
 ])
 def _fp16_rewrite(uops:list[UOp]) -> list[UOp]:
   sink = next(u for u in uops if u.op is Ops.SINK)

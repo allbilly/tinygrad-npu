@@ -589,3 +589,28 @@ Verification with `FORWARD_ONLY=1 DEFAULT_FLOAT=HALF DEV=ROCKCHIP ROCKCHIP_EW_RE
 - Full Ruff and `mypy tinygrad/`: pass (216 source files).
 - `sz.py`: renderer 487 executable lines, runtime 140; comments and docstrings retained.
 - No CPU floating-point tensor arithmetic, tolerance relaxation beyond `test_gemm_fp16`, CMAC, CNA, or PPU execution was added.
+
+---
+
+## 2026-08-07 — Native DPU EW activation and FP16 broadcast census
+
+The activation census now mirrors ReLU, LeakyReLU, ReLU6, ABS, clip, maximum, and minimum from `test/backend/test_ops.py`. The Rockchip-specific maximum and minimum cases cover tensor-tensor and tensor-scalar inputs. A separate broadcast census exercises FP16 ADD, MUL, and SUB across scalar, row, column, channel, batch, and full-tensor operands, in addition to the existing generic broadcast, scalar subtraction, reverse subtraction, and negation cases.
+
+The compact lowering follows the proven RK3588 recipes in `~/npu` and `~/rk3588`:
+
+- ABS selects EW ALU algorithm 5 and ignores the second operand.
+- LeakyReLU selects EW multiply with `EW_MUL_PRELU`, so the FP16 slope is applied only to negative elements.
+- ReLU6 keeps EW ReLU active, enables `EW_RELUX_EN`, and writes the FP32 representation of 6 to `EW_RELUX_CMP_VALUE`.
+- Minimum selects EW ALU algorithm 1 after recognizing tinygrad's negated-MAX form.
+
+All configuration words are assembled from named register fields. Direct hardware probes for ABS, LeakyReLU, and minimum were bit-exact against FP16 NumPy results. Compiler task inspection confirmed that ReLU6, LeakyReLU, ABS, and minimum each lower to exactly one DPU EW task rather than their multi-operation algebraic forms.
+
+Verification with `FORWARD_ONLY=1 DEFAULT_FLOAT=HALF DEV=ROCKCHIP ROCKCHIP_EW_REDUCE=twoproduct`:
+
+- Activation and broadcast census: **19 passed in 13.26 s** with `-n12`.
+- Complete Rockchip census: **131 passed, 9 skipped, 96 subtests passed in 126.79 s** with `-n12`.
+- Full Ruff: pass.
+- `mypy tinygrad/`: pass (216 source files).
+- `sz.py`: renderer 542 executable lines, runtime 140; this milestone adds 55 renderer lines.
+- Tolerances remain exactly the existing FP16 ceiling (`atol=rtol=grad_atol=grad_rtol=5e-3`).
+- No CPU floating-point tensor arithmetic, CMAC, CNA, or PPU execution path was added.

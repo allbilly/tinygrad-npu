@@ -337,5 +337,48 @@ for _name, _test in vars(_test_ops.TestOps).items():
   if _name.startswith("test_interpolate"):
     setattr(TestRockchipInterpolateOps, _name, _test)
 
+@unittest.skipUnless(Device.DEFAULT == "ROCKCHIP", "ROCKCHIP device only")
+class TestRockchipActivationOps(unittest.TestCase):
+  """FP16 ADD/MUL/MAX activation and clamp census at the test_gemm_fp16 tolerance."""
+  helper_test_exception = _test_ops.TestOps.helper_test_exception
+
+  @classmethod
+  def setUpClass(cls): _test_ops.helper_test_op = _fp16_test_op
+
+  @classmethod
+  def tearDownClass(cls): _test_ops.helper_test_op = _TEST_OPS_HELPER
+
+  def test_maximum(self):
+    _fp16_test_op([(45,65), (45,65)], torch.maximum, Tensor.maximum)
+    _fp16_test_op(None, torch.maximum, Tensor.maximum, vals=[[1., 0., 3., -4.], 3.])
+
+  def test_minimum(self):
+    _fp16_test_op([(45,65), (45,65)], torch.minimum, Tensor.minimum)
+    _fp16_test_op(None, torch.minimum, Tensor.minimum, vals=[[1., 0., 3., -4.], 3.])
+
+for _name in ("test_relu", "test_relu_exact", "test_relu_maximum_exact", "test_leaky_relu", "test_relu6", "test_abs", "test_abs_exact", "test_clip"):
+  setattr(TestRockchipActivationOps, _name, getattr(_test_ops.TestOps, _name))
+
+@unittest.skipUnless(Device.DEFAULT == "ROCKCHIP", "ROCKCHIP device only")
+class TestRockchipBroadcastOps(unittest.TestCase):
+  """FP16 broadcasted ADD/MUL/SUB across scalar, row, channel, and batch dimensions."""
+
+  @classmethod
+  def setUpClass(cls): _test_ops.helper_test_op = _fp16_test_op
+
+  @classmethod
+  def tearDownClass(cls): _test_ops.helper_test_op = _TEST_OPS_HELPER
+
+  def _test_broadcast(self, torch_fxn, tinygrad_fxn):
+    for rhs in ((), (5,), (4,1), (1,3,1,1), (2,1,1,1), (1,1,4,5)):
+      _fp16_test_op([(2,3,4,5), rhs], torch_fxn, tinygrad_fxn)
+
+  def test_broadcast_add_fp16(self): self._test_broadcast(lambda x,y: x+y, Tensor.add)
+  def test_broadcast_mul_fp16(self): self._test_broadcast(lambda x,y: x*y, Tensor.mul)
+  def test_broadcast_sub_fp16(self): self._test_broadcast(lambda x,y: x-y, Tensor.sub)
+
+for _name in ("test_broadcasted_add", "test_broadcasted_add_2", "test_sub", "test_scalar_sub", "test_scalar_rsub", "test_neg"):
+  setattr(TestRockchipBroadcastOps, _name, getattr(_test_ops.TestOps, _name))
+
 if __name__ == "__main__":
   unittest.main()
