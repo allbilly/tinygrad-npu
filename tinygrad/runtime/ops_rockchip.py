@@ -8,8 +8,8 @@ from tinygrad.renderer.rockchip import (RKBufferKind, RockchipRenderer, decode_i
 from tinygrad.runtime.autogen import rockchip as rk
 from tinygrad.runtime.support.hcq import FileIOInterface, HCQBuffer
 
-# Ordinary ADD/MUL chains pass through 512 tasks; mixed TwoProduct chains use the image's tested 256-task cap.
-_EW_CHAIN_MAX = 512
+# Ordinary ADD/MUL chains are capped at the measured 383-task boundary; mixed TwoProduct chains use 256.
+_EW_CHAIN_MAX = 383
 _PC_TAIL, _CMD_BUF_MIN, _TASK_BUF_MIN = 4, 65536, 16384
 
 def _pc(target:int, reg:int, value:int=0) -> int: return (target << 48) | ((value & 0xffffffff) << 16) | reg
@@ -142,20 +142,21 @@ class RockchipProgram(Program['RockchipDevice']):
     linear:dict[int, np.ndarray] = {}
     for gather in self.image.gathers:
       dst = np.frombuffer(to_mv(int(self.scratch[gather.dst_scratch].va_addr), self.scratch[gather.dst_scratch].size), dtype=np.uint16)
+      if gather.count not in linear: linear[gather.count] = np.arange(gather.count, dtype=np.intp)
+      dst_index = linear[gather.count] * gather.dst_stride
       if gather.values:
-        dst[:gather.count] = gather.values
+        dst[dst_index] = gather.values
         continue
       src = np.frombuffer(to_mv(int(bufs[gather.src_index].va_addr), bufs[gather.src_index].size), dtype=np.uint16)
       if gather.offsets:
         index = np.asarray(gather.offsets, dtype=np.intp)
         valid = index >= 0
-        if not gather.partial: dst[:gather.count] = gather.fill_bits
-        dst[:gather.count][valid] = src[index[valid]]
+        if not gather.partial: dst[dst_index] = gather.fill_bits
+        dst[dst_index[valid]] = src[index[valid]]
       else:
-        if gather.count not in linear: linear[gather.count] = np.arange(gather.count, dtype=np.intp)
         index = np.full(gather.count, gather.base, dtype=np.intp)
         for divisor, limit, stride in gather.axes: index += (linear[gather.count]//divisor%limit)*stride
-        dst[:gather.count] = src[index]
+        dst[dst_index] = src[index]
     def address(kind:RKBufferKind, index:int) -> int:
       if kind is RKBufferKind.ARG:
         if index >= len(bufs): raise RuntimeError(f"RKImage argument slot {index} is not bound")

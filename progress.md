@@ -676,8 +676,6 @@ Verification with `FORWARD_ONLY=1 DEFAULT_FLOAT=HALF DEV=ROCKCHIP ROCKCHIP_EW_RE
 - `sz.py`: renderer 701 executable lines, runtime 180; comments and docstrings retained.
 - No host floating-point tensor arithmetic, tolerance relaxation, CMAC, CNA, or PPU execution was added.
 
----
-
 ## 2026-08-07 — Group 5: FP16 movement and static indexing
 
 The Rockchip census now covers slicing (including negative strides and empty results), transpose, permute, reshape/view, flip,
@@ -757,3 +755,57 @@ Verification with `FORWARD_ONLY=1 DEFAULT_FLOAT=HALF DEV=ROCKCHIP ROCKCHIP_EW_RE
 - `mypy tinygrad/`: pass (216 source files).
 - `sz.py`: renderer 794 executable lines, runtime 180; comments and docstrings retained.
 - No host floating-point tensor arithmetic, tolerance relaxation, CMAC, CNA, or PPU execution was added.
+
+---
+
+## 2026-08-08 — Group 7: FP16 reductions and measured EW chain boundary
+
+The Rockchip census now covers the FP16 sum, mean, minimum, maximum, and product reduction cases selected from
+`test/backend/test_ops.py`, including the `NOOPT=1` product register loop and the 16,384-element full sum. ReLU inside an unrolled
+reduction is recovered from tinygrad's FP32-shaped `WHERE` as native half DPU `MAX(0,x)`. Non-FP16 boolean, integer, and explicit
+FP32 reduction cases remain explicitly excluded because the NPU accepts FP16 tensor inputs only.
+
+Direct dependent-ADD probes found that the previous 512-task PC-chain setting was not a safe hardware limit. A 383-task chain passes,
+while 384 tasks in one chain time out; the driver reports task counter 510 for the earlier 512-task failure and resets the NPU. Ordinary
+FP16 EW images are therefore capped at **383 tasks per ioctl**. Mixed TwoProduct images retain their independently proven 256-task cap.
+
+The full sum originally spent more than 59 seconds in compiler expansion and never reached an ioctl. Its wall decomposition was
+0.127 s import, 0.012 s graph construction, 0.053 s scheduling, then over 59 s in kernel optimization/code generation. The Rockchip
+regression now uses tinygrad's existing `NOOPT=1` compact register-loop path so no shared codegen change is required. The Rockchip
+renderer gathers raw FP16 lanes into 64-byte-aligned scratch slots and emits a balanced DPU EW tree. It also preserves fused scalar
+post-scales and lowers minimum as `-max(-x)` entirely through DPU EW. Host work is integer address/layout construction and raw `uint16`
+movement only; every arithmetic operation executes on DPU EW.
+
+| 16,384-element sum | Before | After |
+|---|---:|---:|
+| Realization wall time | >59 s, timed out before submit | 1.26 s |
+| DPU tasks | not reached | 16,383 |
+| ioctl submits | 0 | 43 |
+| Absolute error vs FP32 sum (magnitude 56.32) | not reached | 0.057 |
+
+The complete census profile identified the slowest pooling case as host-compile-bound:
+
+| `test_avg_pool3d` phase | Wall time |
+|---|---:|
+| Torch golden | 0.0007 s |
+| Tensor construction | 0.007 s |
+| Scheduling | 0.344 s |
+| Compile/link before Rockchip gather caches | 10.045 s |
+| Rockchip rendering within compile | 2.230 s |
+| NPU execution | 0.080 s |
+| Command construction + 3 blocking ioctls | 0.0073 s |
+
+Bounded Rockchip-only index/selection caches reduced the controlled compile/link phase from **10.04 s to 8.15 s** and Rockchip
+rendering from **2.23 s to 0.93 s**. The remaining approximately 7.2 s is shared optimizer/codegen work and was deliberately left
+unchanged. `--dist=worksteal` varied from 52.53 s to 59.41 s across full cold runs, so it is not treated as a reliable optimization.
+
+Verification with `FORWARD_ONLY=1 DEFAULT_FLOAT=HALF DEV=ROCKCHIP ROCKCHIP_EW_REDUCE=twoproduct`:
+
+- Reduction census: **21 passed, 1 skipped in 19.86 s** with `-n12` after restoring the shared optimizer unchanged.
+- `test_sum_full` call: **1.20 s**, with an explicit **43-submit** regression.
+- Complete Rockchip census: **204 passed, 11 skipped, 107 subtests passed in 59.41 s** with `-n12 --dist=worksteal`; cold-run
+  scheduling/compile contention varies materially, while NPU execution and ioctl time remain sub-second in the profiled slow case.
+- Full Ruff: pass.
+- `mypy tinygrad/`: pass (216 source files).
+- `sz.py`: renderer 891 executable lines, runtime 181; comments and docstrings retained.
+- No shared tinygrad core change, host floating-point tensor arithmetic, tolerance relaxation, CMAC, CNA, or PPU execution was added.

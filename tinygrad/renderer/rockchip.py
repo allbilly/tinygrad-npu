@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64, math, os, struct
 from dataclasses import dataclass
 from enum import IntEnum
+from functools import lru_cache
 from typing import Callable
 from tinygrad.device import Compiler
 from tinygrad.dtype import DType, dtypes
@@ -11,9 +12,9 @@ from tinygrad.renderer import Renderer
 from tinygrad.runtime.autogen import rockchip as rk
 from tinygrad.uop.ops import GroupOp, Ops, UOp, UPat, PatternMatcher, graph_rewrite
 
-RKIMAGE_MAGIC, RKIMAGE_VERSION = b"RKIM", 16
+RKIMAGE_MAGIC, RKIMAGE_VERSION = b"RKIM", 17
 _HEADER = struct.Struct("<4sHHHHIII")  # magic, version, target, scratch, gathers, ops, constants, flags
-_SCRATCH, _GATHER, _GATHER_AXIS = struct.Struct("<II"), struct.Struct("<HHIBBiH"), struct.Struct("<IIi")
+_SCRATCH, _GATHER, _GATHER_AXIS = struct.Struct("<II"), struct.Struct("<HHIBBiHI"), struct.Struct("<IIi")
 _FILL = struct.Struct("<BBHI")  # dst_kind, pad, dst_index, count
 _EWOP = struct.Struct("<BBHIIII")  # dst_kind, pad, dst_index, lhs_kind, lhs_index, rhs_kind, rhs_index
 _EWOP2 = struct.Struct("<II")  # count, ew_cfg
@@ -36,6 +37,7 @@ class RKGather:
   fill_bits: int = 0
   values: tuple[int, ...] = ()  # compile-time FP16 vector, no source argument
   partial: bool = False  # skip negative offsets, preserving lanes written by another gather
+  dst_stride: int = 1  # destination stride in FP16 lanes; scalar reductions use 32 for 64-byte alignment
 
 @dataclass(frozen=True)
 class RKMultiGather: gathers: tuple[RKGather, ...]
@@ -58,7 +60,7 @@ class RKImage:
   target: RKTarget
   scratch: tuple[RKScratch, ...] = (); constants: bytes = b""; version: int = RKIMAGE_VERSION
   gathers: tuple[RKGather, ...] = (); fill: RKFill|None = None; ew_ops: tuple[RKEWOp, ...] = ()
-  chain_limit: int = 512
+  chain_limit: int = 383
 
 @dataclass(frozen=True)
 class RKReloc: word: int; arg: RKArg
@@ -73,7 +75,7 @@ def encode_image(image:RKImage) -> bytes:
   for sc in image.scratch: out += _SCRATCH.pack(sc.size, sc.alignment)
   for g in image.gathers:
     kind = 3 if g.partial else 2 if g.values else 1 if g.offsets else 0
-    out += _GATHER.pack(g.dst_scratch, g.src_index, g.count, kind, len(g.axes), g.base, g.fill_bits)
+    out += _GATHER.pack(g.dst_scratch, g.src_index, g.count, kind, len(g.axes), g.base, g.fill_bits, g.dst_stride)
     if kind == 2: out += struct.pack(f"<{g.count}H", *g.values)
     elif kind in (1, 3): out += struct.pack(f"<{g.count}i", *g.offsets)
     else:
@@ -87,23 +89,23 @@ def encode_image(image:RKImage) -> bytes:
 def decode_image(blob:bytes) -> RKImage:
   magic, version, target, nscratch, ngather, nop, nconst, flags = _HEADER.unpack_from(blob)
   chain_limit = flags >> 8
-  if magic != RKIMAGE_MAGIC or version != RKIMAGE_VERSION or flags & 0xfe or chain_limit not in (256, 512):
+  if magic != RKIMAGE_MAGIC or version != RKIMAGE_VERSION or flags & 0xfe or chain_limit not in (256, 383):
     raise ValueError("invalid RKImage header")
   off = _HEADER.size
   scratch = tuple(RKScratch(*_SCRATCH.unpack_from(blob, off+i*_SCRATCH.size)) for i in range(nscratch)); off += nscratch*_SCRATCH.size
   gathers:list[RKGather] = []
   for _ in range(ngather):
-    dst_scratch, src_index, count, kind, naxes, base, fill_bits = _GATHER.unpack_from(blob, off); off += _GATHER.size
-    if kind not in (0, 1, 2, 3) or (kind and naxes): raise ValueError("invalid RKGather")
+    dst_scratch, src_index, count, kind, naxes, base, fill_bits, dst_stride = _GATHER.unpack_from(blob, off); off += _GATHER.size
+    if kind not in (0, 1, 2, 3) or (kind and naxes) or dst_stride < 1: raise ValueError("invalid RKGather")
     if kind == 2:
       values = struct.unpack_from(f"<{count}H", blob, off); off += 2*count
-      gathers.append(RKGather(src_index, dst_scratch, count, fill_bits=fill_bits, values=values))
+      gathers.append(RKGather(src_index, dst_scratch, count, fill_bits=fill_bits, values=values, dst_stride=dst_stride))
     elif kind in (1, 3):
       offsets = struct.unpack_from(f"<{count}i", blob, off); off += 4*count
-      gathers.append(RKGather(src_index, dst_scratch, count, offsets=offsets, fill_bits=fill_bits, partial=kind == 3))
+      gathers.append(RKGather(src_index, dst_scratch, count, offsets=offsets, fill_bits=fill_bits, partial=kind == 3, dst_stride=dst_stride))
     else:
       axes = tuple(_GATHER_AXIS.unpack_from(blob, off+i*_GATHER_AXIS.size) for i in range(naxes)); off += naxes*_GATHER_AXIS.size
-      gathers.append(RKGather(src_index, dst_scratch, count, base, axes, fill_bits=fill_bits))
+      gathers.append(RKGather(src_index, dst_scratch, count, base, axes, fill_bits=fill_bits, dst_stride=dst_stride))
   ew_ops:list[RKEWOp] = []
   for _ in range(nop):
     dk, _, di, lk, li, rk_, ri = _EWOP.unpack_from(blob, off); off += _EWOP.size
@@ -276,7 +278,9 @@ def _is_static_expr(u:UOp, cache:dict[UOp, bool]|None=None) -> bool:
   if cache is not None: cache[u] = ret
   return ret
 
-def _index_ranges(index:UOp) -> list[UOp]: return [u for u in index.toposort() if u.op is Ops.RANGE]
+@lru_cache(maxsize=16384)
+def _cached_index_ranges(index:UOp) -> tuple[UOp, ...]: return tuple(u for u in index.toposort() if u.op is Ops.RANGE)
+def _index_ranges(index:UOp) -> list[UOp]: return list(_cached_index_ranges(index))
 
 def _iter_range_env(ranges:list[UOp]) -> list[dict[UOp, int]]:
   if not ranges: return [{}]
@@ -413,7 +417,8 @@ def _gather_plan(src_index:int, dst_scratch:int, out_index:UOp, load_index:UOp, 
   return RKGather(src_index, dst_scratch, count, offsets=_gather_offsets(out_index, load_index, gate, count, evaluator), fill_bits=fill_bits)
 
 def _selection_gather(u:UOp, out_index:UOp, count:int, oslot:int, selection_cache:dict[UOp, tuple[bool, bool]]|None=None,
-                      static_cache:dict[UOp, bool]|None=None) -> RKGather|RKMultiGather|None:
+                      static_cache:dict[UOp, bool]|None=None,
+                      choice_cache:dict[tuple, tuple[tuple[int, int]|None, int|None]]|None=None) -> RKGather|RKMultiGather|None:
   """Collapse a static WHERE/ADD tree of mutually exclusive gated loads into raw gather offsets."""
   seen = selection_cache if selection_cache is not None else {}
   def selection_tree(x:UOp) -> tuple[bool, bool]:
@@ -434,34 +439,42 @@ def _selection_gather(u:UOp, out_index:UOp, count:int, oslot:int, selection_cach
   if selection_tree(u) != (True, True): return None
   out_ranges = _index_ranges(out_index)
   fill_bits:int|None = None
-  def selected(x:UOp, env:dict[UOp, int]) -> tuple[int, int]|None:
-    nonlocal fill_bits
+  choices = choice_cache if choice_cache is not None else {}
+  range_key = tuple(out_ranges)
+  def selected(x:UOp, env:dict[UOp, int]) -> tuple[tuple[int, int]|None, int|None]:
+    key = x, range_key, tuple(env[r] for r in out_ranges)
+    if key in choices: return choices[key]
+    ret:tuple[tuple[int, int]|None, int|None]
     if x.op is Ops.CONST and x.dtype.scalar() is dtypes.half:
       bits = struct.unpack("<H", struct.pack("<e", float(x.arg)))[0]
-      if fill_bits is not None and fill_bits != bits: raise ValueError
-      fill_bits = bits
-      return None
-    if x.op is Ops.CAST and x.dtype.scalar() is dtypes.half: return selected(x.src[0], env)
-    if x.op is Ops.WHERE:
+      ret = None, bits
+    elif x.op is Ops.CAST and x.dtype.scalar() is dtypes.half: ret = selected(x.src[0], env)
+    elif x.op is Ops.WHERE:
       if not _is_static_expr(x.src[0], static_cache): raise ValueError
-      return selected(x.src[1] if _eval_int(x.src[0], env) else x.src[2], env)
-    if x.op is Ops.ADD:
-      lhs, rhs = selected(x.src[0], env), selected(x.src[1], env)
-      if lhs is not None and rhs is not None: raise ValueError
-      return lhs if lhs is not None else rhs
-    if x.op is not Ops.LOAD or x.src[0].op is not Ops.INDEX or x.src[0].src[0].op is not Ops.PARAM: raise ValueError
-    param, index, gate = x.src[0].src[0], x.src[0].src[1], x.src[2] if len(x.src) > 2 else None
-    if (param.dtype.scalar() is not dtypes.half or param.arg.slot == oslot or param.src[0].op is not Ops.CONST or
-        any(r not in out_ranges for r in _index_ranges(index) + ([] if gate is None else _index_ranges(gate)))): raise ValueError
-    if gate is not None:
-      if not _is_static_expr(gate, static_cache): raise ValueError
-      if not _eval_int(gate, env): return selected(x.src[1], env) if len(x.src) > 1 else None
-    return param.arg.slot, _eval_int(index, env)
+      ret = selected(x.src[1] if _eval_int(x.src[0], env) else x.src[2], env)
+    elif x.op is Ops.ADD:
+      (lhs,lbits), (rhs,rbits) = selected(x.src[0], env), selected(x.src[1], env)
+      if lhs is not None and rhs is not None or lbits is not None and rbits is not None and lbits != rbits: raise ValueError
+      ret = (lhs if lhs is not None else rhs), (lbits if lbits is not None else rbits)
+    elif x.op is Ops.LOAD and x.src[0].op is Ops.INDEX and x.src[0].src[0].op is Ops.PARAM:
+      param, index, gate = x.src[0].src[0], x.src[0].src[1], x.src[2] if len(x.src) > 2 else None
+      if (param.dtype.scalar() is not dtypes.half or param.arg.slot == oslot or param.src[0].op is not Ops.CONST or
+          any(r not in out_ranges for r in _index_ranges(index) + ([] if gate is None else _index_ranges(gate)))): raise ValueError
+      if gate is not None:
+        if not _is_static_expr(gate, static_cache): raise ValueError
+        if not _eval_int(gate, env): ret = selected(x.src[1], env) if len(x.src) > 1 else (None, None)
+        else: ret = ((param.arg.slot, _eval_int(index, env)), None)
+      else: ret = ((param.arg.slot, _eval_int(index, env)), None)
+    else: raise ValueError
+    choices[key] = ret
+    return ret
   slots, offsets = [-2] * count, [-2] * count
   try:
     for env in _iter_range_env(out_ranges):
-      dst, choice = _eval_int(out_index, env), selected(u, env)
+      dst, (choice,bits) = _eval_int(out_index, env), selected(u, env)
       if not 0 <= dst < count: raise ValueError
+      if bits is not None and fill_bits not in (None, bits): raise ValueError
+      if bits is not None: fill_bits = bits
       slot, offset = (-1, -1) if choice is None else choice
       if slots[dst] not in (-2, slot) or offsets[dst] not in (-2, offset): raise ValueError
       slots[dst], offsets[dst] = slot, offset
@@ -474,19 +487,21 @@ def _selection_gather(u:UOp, out_index:UOp, count:int, oslot:int, selection_cach
                                       partial=True) for src in sources))
 
 def _ew_leaf(u:UOp, out_index:UOp, count:int, oslot:int, static_cache:dict[UOp, bool]|None=None,
-             selection_cache:dict[UOp, tuple[bool, bool]]|None=None) -> RKLeaf:
+             selection_cache:dict[UOp, tuple[bool, bool]]|None=None,
+             choice_cache:dict[tuple, tuple[tuple[int, int]|None, int|None]]|None=None) -> RKLeaf:
   if u.op is Ops.CONST and u.dtype.scalar() is dtypes.half: return float(u.arg)
   if u.dtype.scalar() is dtypes.half and _is_static_expr(u, static_cache): return RKStatic(u)
-  if u.op is Ops.CAST and u.dtype.scalar() is dtypes.half: return _ew_leaf(u.src[0], out_index, count, oslot, static_cache, selection_cache)
+  if u.op is Ops.CAST and u.dtype.scalar() is dtypes.half:
+    return _ew_leaf(u.src[0], out_index, count, oslot, static_cache, selection_cache, choice_cache)
   if u.op is Ops.LOAD and u.src[0].op is Ops.INDEX and u.src[0].src[0].op is Ops.PARAM:
     param, index, gate = u.src[0].src[0], u.src[0].src[1], u.src[2] if len(u.src) > 2 else None
     if len(u.src) > 1 and u.src[1].op is not Ops.CONST:
-      return _selection_gather(u, out_index, count, oslot, selection_cache, static_cache)
+      return _selection_gather(u, out_index, count, oslot, selection_cache, static_cache, choice_cache)
     fill_bits = struct.unpack("<H", struct.pack("<e", float(u.src[1].arg) if len(u.src) > 1 else 0.0))[0]
     if param.dtype.scalar() is not dtypes.half or param.arg.slot == oslot or param.src[0].op is not Ops.CONST: return None
     if gate is None and index.key == out_index.key and int(param.src[0].arg) == count: return RKArg(RKBufferKind.ARG, param.arg.slot)
     return param, index, gate, fill_bits
-  return _selection_gather(u, out_index, count, oslot, selection_cache, static_cache) if u.dtype.scalar() is dtypes.half else None
+  return _selection_gather(u, out_index, count, oslot, selection_cache, static_cache, choice_cache) if u.dtype.scalar() is dtypes.half else None
 
 def _unsupported_ew_ops(uops:list[UOp], out_index:UOp, count:int, oslot:int, supported:dict) -> list[str]:
   bad:list[str] = []
@@ -581,7 +596,8 @@ def _two_sum(lhs:UOp, rhs:UOp, neg_one:UOp) -> tuple[UOp, UOp]:
 def _precise_mul_sum(terms:list[UOp]) -> UOp:
   """Recover FP16 product residuals and accumulate a three-half expansion using only DPU EW ops."""
   zero, neg_one, splitter = UOp.const(0.0, dtypes.half), UOp.const(-1.0, dtypes.half), UOp.const(65.0, dtypes.half)
-  products, errors = zip(*((_two_product(term, neg_one, splitter) if term.op is Ops.MUL else (term, zero)) for term in terms))
+  pairs = tuple(_two_product(term, neg_one, splitter) if term.op is Ops.MUL else (term, zero) for term in terms)
+  products, errors = tuple(x[0] for x in pairs), tuple(x[1] for x,term in zip(pairs, terms) if term.op is Ops.MUL)
   high, middle, low = products[0], zero, zero
   for part in products[1:] + errors:
     high, error = _two_sum(high, part, neg_one)
@@ -590,7 +606,79 @@ def _precise_mul_sum(terms:list[UOp]) -> UOp:
   middle = middle.alu(Ops.ADD, low)
   return high.alu(Ops.ADD, middle)
 
+def _lower_scalar_loop_reduction(uops:list[UOp]) -> RKImage|None:
+  """Turn a compact scalar register reduction into balanced FP16 DPU EW stages."""
+  global_stores = [(store, _root_param(store.src[0])) for store in uops if store.op is Ops.STORE]
+  global_stores = [(store, param) for store,param in global_stores if param is not None]
+  ranges = [u for u in uops if u.op is Ops.RANGE]
+  if len(global_stores) != 1 or len(ranges) != 1: return None
+  store, out_param = global_stores[0]
+  assert out_param is not None
+  if (out_param.dtype.scalar() is not dtypes.half or out_param.src[0].op is not Ops.CONST or int(out_param.src[0].arg) != 1 or
+      store.src[0].op is not Ops.INDEX): return None
+  reduce_range = ranges[0]
+  if reduce_range.src[0].op is not Ops.CONST or (groups:=int(reduce_range.src[0].arg)) <= 0: return None
+  loads:list[tuple[UOp, UOp]] = []
+  for u in uops:
+    if u.op is not Ops.LOAD or u.dtype.scalar() is not dtypes.half or not u.src or u.src[0].op is not Ops.INDEX: continue
+    param = _root_param(u.src[0])
+    if param is not None and param.arg.slot != out_param.arg.slot: loads.append((u, param))
+  if not loads or len({param.key for _,param in loads}) != 1: return None
+  in_param = loads[0][1]
+  if in_param.src[0].op is not Ops.CONST: return None
+  updates = [u for u in uops if u.op is Ops.STORE and _root_param(u.src[0]) is None and reduce_range in u.toposort()]
+  if len(updates) != 1: return None
+  final_value = store.src[1]
+  def local_load(x:UOp) -> UOp|None:
+    while x.op is Ops.CAST: x = x.src[0]
+    return x if x.op is Ops.LOAD and _root_param(x.src[0]) is None else None
+  if local_load(final_value) is not None: post_scale = 1.0
+  elif final_value.op is Ops.MUL and (final_load:=next((x for x in final_value.src if local_load(x) is not None), None)) is not None and \
+       (scale:=final_value.src[1 if final_value.src[0] is final_load else 0]).op is Ops.CONST: post_scale = float(scale.arg)
+  else: return None
+  reduce_ops = {u.op for u in updates[0].src[1].toposort()
+                if u.dtype.scalar() is dtypes.half and u.op in (Ops.ADD, Ops.MUL, Ops.MAX)}
+  negate_inputs = reduce_ops == {Ops.MUL, Ops.MAX} and any(u.op is Ops.CONST and u.dtype.scalar() is dtypes.half and
+                                                            float(u.arg) == -1.0 for u in updates[0].src[1].toposort())
+  if negate_inputs: reduce_op = Ops.MAX
+  elif len(reduce_ops) == 1: reduce_op = next(iter(reduce_ops))
+  else: return None
+  if reduce_op not in _EW_CFG: return None
+  gather_offsets = [tuple(_eval_int(load.src[0].src[1], {reduce_range:r}) for r in range(groups)) for load,_ in loads]
+  input_count = int(in_param.src[0].arg)
+  if input_count != groups*len(loads) or sorted(offset for offsets in gather_offsets for offset in offsets) != list(range(input_count)): return None
+
+  if input_count < 2: return None
+  const_values = tuple(dict.fromkeys(x for x in ((-1.0,) if negate_inputs else ()) + ((post_scale,) if post_scale != 1.0 else ())))
+  const_slots = {value:i for i,value in enumerate(const_values)}
+  data_slot = len(const_values)
+  gathers = (RKGather(in_param.arg.slot, data_slot, input_count, 0, ((1, input_count, 1),), dst_stride=32),)
+  cfg = _EW_CFG[reduce_op]
+  ew_ops:list[RKEWOp] = []
+  active = [i*64 for i in range(input_count)]
+  if negate_inputs:
+    neg_one = RKArg(RKBufferKind.SCRATCH, const_slots[-1.0])
+    for offset in active:
+      value = RKArg(RKBufferKind.SCRATCH, data_slot, offset)
+      ew_ops.append(RKEWOp(value, value, neg_one, 1, _EW_CFG[Ops.MUL]))
+  while len(active) > 1:
+    next_active:list[int] = []
+    for i in range(0, len(active)-1, 2):
+      lhs, rhs = active[i], active[i+1]
+      dst = RKArg(RKBufferKind.ARG, out_param.arg.slot) if len(active) == 2 and post_scale == 1.0 else RKArg(RKBufferKind.SCRATCH, data_slot, lhs)
+      ew_ops.append(RKEWOp(dst, RKArg(RKBufferKind.SCRATCH, data_slot, lhs), RKArg(RKBufferKind.SCRATCH, data_slot, rhs), 1, cfg))
+      next_active.append(lhs)
+    if len(active) & 1: next_active.append(active[-1])
+    active = next_active
+  if post_scale != 1.0:
+    ew_ops.append(RKEWOp(RKArg(RKBufferKind.ARG, out_param.arg.slot), RKArg(RKBufferKind.SCRATCH, data_slot, active[0]),
+                         RKArg(RKBufferKind.SCRATCH, const_slots[post_scale]), 1, _EW_CFG[Ops.MUL]))
+  constants = b"".join(struct.pack("<e", value) for value in const_values)
+  scratch = tuple(RKScratch(2) for _ in const_values) + (RKScratch(input_count*64),)
+  return RKImage(RKTarget.RK3588, scratch, constants, gathers=gathers, ew_ops=tuple(ew_ops), chain_limit=383)
+
 def lower_ew(uops:list[UOp]) -> RKImage:
+  if (loop_reduction:=_lower_scalar_loop_reduction(uops)) is not None: return loop_reduction
   stores = [u for u in uops if u.op is Ops.STORE]
   outs = [_root_param(u.src[0]) for u in stores]
   if (not stores or any(p is None or p.dtype.scalar() is not dtypes.half or p.src[0].op is not Ops.CONST for p in outs) or
@@ -602,23 +690,25 @@ def lower_ew(uops:list[UOp]) -> RKImage:
   out_index, out, val = store.src[0].src[1], RKArg(RKBufferKind.ARG, oslot), store.src[1]
   static_cache:dict[UOp, bool] = {}
   selection_cache:dict[UOp, tuple[bool, bool]] = {}
+  choice_cache:dict[tuple, tuple[tuple[int, int]|None, int|None]] = {}
   gather_eval = _GatherEval()
   leaf_cache:dict[UOp, RKLeaf] = {}
   def ew_leaf(u:UOp):
-    if u not in leaf_cache: leaf_cache[u] = _ew_leaf(u, out_index, count, oslot, static_cache, selection_cache)
+    if u not in leaf_cache: leaf_cache[u] = _ew_leaf(u, out_index, count, oslot, static_cache, selection_cache, choice_cache)
     return leaf_cache[u]
   if val.op is Ops.CONST and val.dtype.scalar() is dtypes.half:
     return RKImage(RKTarget.RK3588, constants=struct.pack("<e", float(val.arg)), fill=RKFill(out, count))
   if ew_leaf(val) is not None: val = val.alu(Ops.ADD, UOp.const(0.0, dtypes.half))
   supported = RockchipRenderer.code_for_op
-  chain_limit = 512
+  chain_limit = 383
   relu_input = _relu_operand(val)
   reduction = relu_input if relu_input is not None else val
   native_plan = _ew_plan(val)
   native_cfg = native_plan[0] if native_plan is not None else None
-  if native_cfg not in (_EW_CFG_MIN, _EW_CFG_RELU6) and (reduction_info:=_mul_reduction_terms(reduction)) is not None and reduction_info[1]:
+  if (native_cfg not in (_EW_CFG_MIN, _EW_CFG_RELU6) and (reduction_info:=_mul_reduction_terms(reduction)) is not None and
+      (reduction_info[1] or len(reduction_info[0]) > 8)):
     terms = reduction_info[0]
-    reduce_mode = os.getenv("ROCKCHIP_EW_REDUCE", "sequential").strip().lower()
+    reduce_mode = os.getenv("ROCKCHIP_EW_REDUCE", "twoproduct").strip().lower()
     if reduce_mode == "kahan": reduced = _compensated_mul_sum(terms)
     elif reduce_mode == "twoproduct": reduced, chain_limit = _precise_mul_sum(terms), 256
     elif reduce_mode != "sequential": raise ValueError(f"invalid ROCKCHIP_EW_REDUCE={reduce_mode!r}")
@@ -849,8 +939,20 @@ _pm_abs = PatternMatcher([(_abs_pattern, lambda x: x.alu(Ops.MAX, x.alu(Ops.MUL,
 def _fp32_alu_to_fp16(x:UOp) -> UOp|None:
   return None if _is_static_expr(x) else x.src[0].cast(dtypes.half).alu(x.op, x.src[1].cast(dtypes.half))
 
+def _fold_casted_relu(root:UOp) -> UOp|None:
+  """Recover native half MAX from the float WHERE emitted for half ReLU inside a reduction."""
+  if len(root.src) != 1 or (where:=root.src[0]).op is not Ops.WHERE or where.dtype.scalar() is not dtypes.float: return None
+  gate, yes, no = where.src
+  if (yes.op is not Ops.CAST or len(yes.src) != 1 or yes.src[0].dtype.scalar() is not dtypes.half or
+      no.op is not Ops.CONST or float(no.arg) != 0.0): return None
+  val = yes.src[0]
+  if (gate.op is not Ops.CMPLT or gate.src[0].op is not Ops.CONST or float(gate.src[0].arg) != 0.0 or
+      gate.src[1].key != val.key): return None
+  return val.alu(Ops.MAX, UOp.const(0.0, dtypes.half))
+
 _pm_fp32_to_fp16 = PatternMatcher([
   (UPat((Ops.ADD, Ops.MUL), dtypes.float, name="x"), _fp32_alu_to_fp16),
+  (UPat(Ops.CAST, dtypes.half, name="root"), _fold_casted_relu),
   (UPat(Ops.CAST, dtypes.half, name="root", src=(UPat.cvar("c"),)), lambda root,c: root.const_like(c.arg)),
   (UPat(Ops.CAST, dtypes.half, src=(UPat(Ops.CAST, dtypes.float, src=(UPat(dtype=dtypes.half, name="x"),)),)), lambda x: x),
   (UPat(Ops.CAST, dtypes.half, src=(UPat(dtype=dtypes.half, name="x"),)), lambda x: x),

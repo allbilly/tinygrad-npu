@@ -6,7 +6,7 @@ The backend accepts FP16 inputs and emits contiguous FP16 DPU EW output. It does
 perform host arithmetic or FP32→FP16 conversion. GEMM gather layout is prepared on
 the host, then every MUL/ADD is submitted to DPU EW.
 
-Reduction via ROCKCHIP_EW_REDUCE=sequential|kahan|twoproduct (default sequential).
+Reduction via ROCKCHIP_EW_REDUCE=sequential|kahan|twoproduct (default twoproduct).
 TwoProduct uses a conservative 256-task mixed MUL/ADD chain cap.
 """
 from __future__ import annotations
@@ -14,14 +14,15 @@ import math, os, unittest
 import numpy as np
 import torch
 from tinygrad import Tensor, Device
+from tinygrad.helpers import Context
 from test.backend import test_ops as _test_ops
 from test.backend.test_ops import helper_test_op, slow_test
 
 # fp16 tol matches test_ops.test_gemm_fp16
 _FP16 = dict(atol=5e-3, rtol=5e-3)
 _FP16_WITH_GRAD = dict(atol=5e-3, rtol=5e-3, grad_atol=5e-3, grad_rtol=5e-3)
-_EW_CHAIN_FP16, _EW_CHAIN_TWOPRODUCT = 512, 256
-_EW_REDUCE = os.getenv("ROCKCHIP_EW_REDUCE", "sequential").strip().lower()
+_EW_CHAIN_FP16, _EW_CHAIN_TWOPRODUCT = 383, 256
+_EW_REDUCE = os.getenv("ROCKCHIP_EW_REDUCE", "twoproduct").strip().lower()
 _TEST_OPS_HELPER = _test_ops.helper_test_op
 
 def _fp16_test_op(*args, **kwargs):
@@ -515,6 +516,43 @@ class TestRockchipConcatOps(unittest.TestCase):
 
 for _name in ("test_cat", "test_multicat", "test_stack_slice", "test_stack_max", "test_repeat"):
   setattr(TestRockchipConcatOps, _name, getattr(_test_ops.TestOps, _name))
+
+@unittest.skipUnless(Device.DEFAULT == "ROCKCHIP", "ROCKCHIP device only")
+class TestRockchipReductionOps(unittest.TestCase):
+  """FP16 sum, mean, minimum/maximum, and product reductions from test_ops."""
+  helper_test_exception = _test_ops.TestOps.helper_test_exception
+
+  @classmethod
+  def setUpClass(cls): _test_ops.helper_test_op = _fp16_test_op
+
+  @classmethod
+  def tearDownClass(cls): _test_ops.helper_test_op = _TEST_OPS_HELPER
+
+  def test_min(self):
+    for shape in ((3,3), (45,3)): _fp16_test_op([shape], lambda x: x.min())
+    _fp16_test_op([(45,3)], lambda x: x.min().mul(0.5))
+    _fp16_test_op([()], lambda x: x.min())
+
+  def test_max(self):
+    _fp16_test_op([(45,3)], lambda x: x.max())
+    _fp16_test_op([(45,3)], lambda x: x.max().mul(0.5))
+    _fp16_test_op(None, lambda x: x.max().mul(0.5), vals=[[[1.0,1.0,0.0,1.0]]])
+    _fp16_test_op([(3,4,5,6)], lambda x: x.max(axis=1)[0], lambda x: x.max(axis=1))
+    _fp16_test_op([()], lambda x: x.max())
+
+  def test_sum_full(self):
+    before = Device["ROCKCHIP"].submit_count
+    with Context(NOOPT=1): _fp16_test_op([(16384)], lambda x: x.sum())
+    self.assertEqual(Device["ROCKCHIP"].submit_count-before, 43)
+
+  def test_non_fp16_reductions(self):
+    self.skipTest("Rockchip DPU accepts FP16 tensors only; FP32 dtype, boolean, and integer reductions are excluded")
+
+for _name in ("test_sum_fake", "test_sum_collapse", "test_sum_collapse_neg", "test_sum_pad_collapse", "test_sum_twice",
+              "test_sum_cat_collapse", "test_max_dont_collapse", "test_sum_simple", "test_sum_relu", "test_sum_tiny",
+              "test_sum", "test_sum_with_zeros_shape", "test_prod", "test_prod_dtype_arg", "test_const_reduce", "test_mean",
+              "test_mean_axis", "test_mean_zero_axis"):
+  setattr(TestRockchipReductionOps, _name, getattr(_test_ops.TestOps, _name))
 
 if __name__ == "__main__":
   unittest.main()
