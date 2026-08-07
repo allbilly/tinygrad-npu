@@ -2,7 +2,7 @@ from __future__ import annotations
 import ctypes, mmap, os, time
 import numpy as np
 from tinygrad.device import BufferSpec, Compiled, LRUAllocator, Program, TinyELF
-from tinygrad.helpers import from_mv, suppress_finalizing, to_mv
+from tinygrad.helpers import from_mv, round_up, suppress_finalizing, to_mv
 from tinygrad.renderer.rockchip import (RKBufferKind, RockchipRenderer, decode_image, patch_stage, emit_ew_stage,
   RKArg, _MAX_EW_ELEMS_FP16)
 from tinygrad.runtime.autogen import rockchip as rk
@@ -13,7 +13,6 @@ _EW_CHAIN_MAX = 512
 _PC_TAIL, _CMD_BUF_MIN, _TASK_BUF_MIN = 4, 65536, 16384
 
 def _pc(target:int, reg:int, value:int=0) -> int: return (target << 48) | ((value & 0xffffffff) << 16) | reg
-def _align_up(value:int, alignment:int) -> int: return (value + alignment - 1) & ~(alignment - 1)
 
 class RockchipAllocator(LRUAllocator['RockchipDevice']):
   def _alloc(self, size:int, options:BufferSpec) -> HCQBuffer: return self.dev._gpu_alloc(size)
@@ -27,9 +26,7 @@ class RockchipProgram(Program['RockchipDevice']):
   def __init__(self, dev:'RockchipDevice', obj:TinyELF):
     self.dev, self.name, self.image = dev, obj.name, decode_image(obj.lib)
     self.scratch = tuple(dev._gpu_alloc(x.size) for x in self.image.scratch)
-    self.submit_count = 0
     self._cmd_buf:HCQBuffer|None = None
-    self._cmd_cap = 0
     self._task_buf:HCQBuffer|None = None
 
   @suppress_finalizing
@@ -48,12 +45,11 @@ class RockchipProgram(Program['RockchipDevice']):
     words = 0
     for body in bodies:
       offsets.append(words)
-      words += _align_up(len(body) + _PC_TAIL, 2)
+      words += round_up(len(body) + _PC_TAIL, 2)
     need = words * 8
-    if self._cmd_buf is None or self._cmd_cap < need:
+    if self._cmd_buf is None or self._cmd_buf.size < need:
       if self._cmd_buf is not None: self.dev._gpu_free(self._cmd_buf)
       self._cmd_buf = self.dev._gpu_alloc(max(need, _CMD_BUF_MIN))
-      self._cmd_cap = self._cmd_buf.size
     task_need = n * ctypes.sizeof(rk.struct_rknpu_task)
     if self._task_buf is None or self._task_buf.size < task_need:
       if self._task_buf is not None: self.dev._gpu_free(self._task_buf)
@@ -78,7 +74,6 @@ class RockchipProgram(Program['RockchipDevice']):
       regcfg_obj_addr=0, task_base_addr=0, user_data=0, core_mask=1, fence_fd=-1,
       subcore_task=(rk.struct_rknpu_subcore_task*5)(
         rk.struct_rknpu_subcore_task(0, n), rk.struct_rknpu_subcore_task(n, 0), rk.struct_rknpu_subcore_task(n, 0)))
-    self.submit_count += 1
     self.dev.submit_count += 1
 
   def _run_ew_ops(self, address) -> None:
@@ -100,23 +95,24 @@ class RockchipProgram(Program['RockchipDevice']):
 
   def __call__(self, *bufs:HCQBuffer, global_size=(1,1,1), local_size=(1,1,1), vals=(), wait=False, **kwargs):
     del global_size, local_size, vals, kwargs
+    count = max((op.count for op in self.image.ew_ops), default=0)
     for i in range(len(self.image.constants)//2):
       if i >= len(self.scratch): break
-      count = max((op.count for op in self.image.ew_ops), default=0)
       bits = self.image.constants[i*2:i*2+2] * count
       ctypes.memmove(int(self.scratch[i].va_addr), bits, len(bits))
     linear:dict[int, np.ndarray] = {}
     for gather in self.image.gathers:
       dst = np.frombuffer(to_mv(int(self.scratch[gather.dst_scratch].va_addr), self.scratch[gather.dst_scratch].size), dtype=np.uint16)
-      if gather.values: dst[:gather.count] = gather.values
-      elif gather.offsets:
-        src = np.frombuffer(to_mv(int(bufs[gather.src_index].va_addr), bufs[gather.src_index].size), dtype=np.uint16)
+      if gather.values:
+        dst[:gather.count] = gather.values
+        continue
+      src = np.frombuffer(to_mv(int(bufs[gather.src_index].va_addr), bufs[gather.src_index].size), dtype=np.uint16)
+      if gather.offsets:
         index = np.asarray(gather.offsets, dtype=np.intp)
         valid = index >= 0
         dst[:gather.count] = gather.fill_bits
         dst[:gather.count][valid] = src[index[valid]]
       else:
-        src = np.frombuffer(to_mv(int(bufs[gather.src_index].va_addr), bufs[gather.src_index].size), dtype=np.uint16)
         if gather.count not in linear: linear[gather.count] = np.arange(gather.count, dtype=np.intp)
         index = np.full(gather.count, gather.base, dtype=np.intp)
         for divisor, limit, stride in gather.axes: index += (linear[gather.count]//divisor%limit)*stride

@@ -539,3 +539,23 @@ Verification with `FORWARD_ONLY=1 DEFAULT_FLOAT=HALF DEV=ROCKCHIP ROCKCHIP_EW_RE
 - Runtime CPU audit: NumPy is used only for raw `uint16` views and integer indexing/copies. There is no host floating-point arithmetic or conversion.
 
 PyTorch CPU does not implement FP16 AvgPool3D, so that one test constructs its oracle in FP32 and casts the oracle to FP16. This affects test-reference generation only; Rockchip execution remains FP16 DPU EW.
+
+---
+
+## 2026-08-07 — Rockchip backend style cleanup
+
+The renderer and runtime were simplified after comparing their structure with the Metal, DSP, QCOM, NV, and AMD backends. The cleanup shares one compile-time expression evaluator between integer index maps and geometry-only FP16 constant generation, relies on the recursive lowering walk as the single supported-graph check, removes the renderer's pass-through constructor, and uses the common `round_up` helper. The runtime no longer shadows the command buffer's existing size or keeps an unused per-program submit counter, and gather source setup is shared between affine and explicit-offset paths.
+
+`sz.py` decreased the Rockchip implementation from **642 to 618 executable lines**:
+
+| File | Before | After | Change |
+|---|---:|---:|---:|
+| `tinygrad/renderer/rockchip.py` | 498 | 478 | -20 |
+| `tinygrad/runtime/ops_rockchip.py` | 144 | 140 | -4 |
+
+Verification with `FORWARD_ONLY=1 DEFAULT_FLOAT=HALF DEV=ROCKCHIP ROCKCHIP_EW_REDUCE=twoproduct`:
+
+- Complete Rockchip census with `-n12`: **102 passed, 9 skipped, 96 subtests passed in 50.59 s**.
+- Full Ruff: pass.
+- `mypy tinygrad/`: pass (216 source files).
+- DPU-only audit unchanged: runtime NumPy operations remain raw `uint16` views, integer index construction, and copies. There is no host floating-point tensor arithmetic, CMAC, CNA, or PPU execution path.
