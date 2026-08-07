@@ -598,12 +598,12 @@ The activation census now mirrors ReLU, LeakyReLU, ReLU6, ABS, clip, maximum, an
 
 The compact lowering follows the proven RK3588 recipes in `~/npu` and `~/rk3588`:
 
-- ABS selects EW ALU algorithm 5 and ignores the second operand.
+- ABS uses the proven BS PReLU recipe with a slope of -1, followed by a DPU identity MAX that restores neutral pipeline state.
 - LeakyReLU selects EW multiply with `EW_MUL_PRELU`, so the FP16 slope is applied only to negative elements.
 - ReLU6 keeps EW ReLU active, enables `EW_RELUX_EN`, and writes the FP32 representation of 6 to `EW_RELUX_CMP_VALUE`.
 - Minimum selects EW ALU algorithm 1 after recognizing tinygrad's negated-MAX form.
 
-All configuration words are assembled from named register fields. Direct hardware probes for ABS, LeakyReLU, and minimum were bit-exact against FP16 NumPy results. Compiler task inspection confirmed that ReLU6, LeakyReLU, ABS, and minimum each lower to exactly one DPU EW task rather than their multi-operation algebraic forms.
+All configuration words are assembled from named register fields. Direct hardware probes for ABS, LeakyReLU, and minimum were bit-exact against FP16 NumPy results. ReLU6, LeakyReLU, and minimum each lower to one DPU EW task. ABS is recognized before generic WHERE lowering and uses two DPU submissions: the BS operation and a neutral-state identity restore.
 
 Verification with `FORWARD_ONLY=1 DEFAULT_FLOAT=HALF DEV=ROCKCHIP ROCKCHIP_EW_REDUCE=twoproduct`:
 
@@ -612,5 +612,35 @@ Verification with `FORWARD_ONLY=1 DEFAULT_FLOAT=HALF DEV=ROCKCHIP ROCKCHIP_EW_RE
 - Full Ruff: pass.
 - `mypy tinygrad/`: pass (216 source files).
 - `sz.py`: renderer 542 executable lines, runtime 140; this milestone adds 55 renderer lines.
+- Tolerances remain exactly the existing FP16 ceiling (`atol=rtol=grad_atol=grad_rtol=5e-3`).
+- No CPU floating-point tensor arithmetic, CMAC, CNA, or PPU execution path was added.
+
+---
+
+## 2026-08-07 — Group 3: DPU WHERE and masked arithmetic
+
+FP16 `WHERE` now lowers entirely to DPU work. CMPLT and CMPNE predicates use the proven BS/BN positive-mask recipe, boolean AND/OR compose exact 0/1 masks with EW MUL/MAX, and finite selection is reconstructed with EW MUL/ADD. Nested selection and broadcasted tensor/scalar arms use the same lowering.
+
+Constant infinity arms avoid the invalid `0 * inf` form. The compiler emits an FDIV correction for general masked fills and uses native MIN/MAX threshold selection when one arm is the compared tensor. No host code inspects input values: the runtime still uses NumPy only as raw `uint16` storage plus integer gather indexing.
+
+Comparison masks and BS-PReLU ABS change global DPU pipeline state. Rockchip submissions therefore use one cross-process device lock. Mask stages use the vendor-style standalone task with reset boundaries, while all following stages in a mask-containing program explicitly configure BS/BN and conversion state. ABS submits its BS task, resets, then submits a DPU identity MAX to restore neutral state. Ordinary GEMM/conv programs keep their compact PC-chain bodies and tested chain limits.
+
+Direct warm profiles:
+
+| Case | Wall time | NPU submits |
+|---|---:|---:|
+| scalar WHERE, 120 elements | 0.373 s | 3 |
+| infinity masked fill, 320 elements | 0.234 s | 3 |
+| exact ABS including `±inf` | 0.138 s | 2 |
+
+Verification with `FORWARD_ONLY=1 DEFAULT_FLOAT=HALF DEV=ROCKCHIP ROCKCHIP_EW_REDUCE=twoproduct`:
+
+- Group 3 WHERE census: **9 passed in 15.45 s** with `-n12`.
+- Activation regression: **10 passed in 13.71 s** with `-n12`.
+- Post-state GEMM/conv regression: **2 passed in 13.46 s** with `-n12`.
+- Complete Rockchip census: **140 passed, 9 skipped, 96 subtests passed in 125.46 s** with `-n12`.
+- Full Ruff: pass.
+- `mypy tinygrad/`: pass (216 source files).
+- `sz.py`: renderer 659 executable lines, runtime 180; comments and docstrings retained.
 - Tolerances remain exactly the existing FP16 ceiling (`atol=rtol=grad_atol=grad_rtol=5e-3`).
 - No CPU floating-point tensor arithmetic, CMAC, CNA, or PPU execution path was added.

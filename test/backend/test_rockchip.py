@@ -1,6 +1,6 @@
 """Rockchip NPU census: ops known to pass, with DRM_IOCTL_RKNPU_SUBMIT counts.
 
-Run: FORWARD_ONLY=1 DEFAULT_FLOAT=HALF DEV=ROCKCHIP python -m pytest test/backend/test_rockchip.py -q -n0
+Run: FORWARD_ONLY=1 DEFAULT_FLOAT=HALF DEV=ROCKCHIP python -m pytest test/backend/test_rockchip.py -q -n12
 
 The backend accepts FP16 inputs and emits contiguous FP16 DPU EW output. It does not
 perform host arithmetic or FP32→FP16 conversion. GEMM gather layout is prepared on
@@ -379,6 +379,48 @@ class TestRockchipBroadcastOps(unittest.TestCase):
 
 for _name in ("test_broadcasted_add", "test_broadcasted_add_2", "test_sub", "test_scalar_sub", "test_scalar_rsub", "test_neg"):
   setattr(TestRockchipBroadcastOps, _name, getattr(_test_ops.TestOps, _name))
+
+@unittest.skipUnless(Device.DEFAULT == "ROCKCHIP", "ROCKCHIP device only")
+class TestRockchipWhereOps(unittest.TestCase):
+  """FP16 WHERE and masked arithmetic lowered to DPU comparison masks and EW selection."""
+
+  test_inf_where = _test_ops.TestOps.test_inf_where
+
+  def test_where_tensor(self):
+    _fp16_test_op([(100,), (100,), (100,)], lambda x,a,b: torch.where(x > .1, a, b), lambda x,a,b: (x > .1).where(a, b),
+                  forward_only=True)
+
+  def test_where_scalar(self):
+    _fp16_test_op([(2,3,4,5)], lambda x: torch.where(x < -.2, 3.0, -2.0), lambda x: (x < -.2).where(3.0, -2.0),
+                  forward_only=True)
+
+  def test_where_broadcast(self):
+    _fp16_test_op([(2,3,4,5), (5,), (1,3,1,1)], lambda x,a,b: torch.where(x > 0, a, b),
+                  lambda x,a,b: (x > 0).where(a, b), forward_only=True)
+
+  def test_where_cmpne_exact(self):
+    values = [[-2., -1., 0., 1., 2.], [-2., 0., 0., 0., 2.], [4., 3., 2., 1., 0.], [-4., -3., -2., -1., 0.]]
+    _fp16_test_op(None, lambda x,y,a,b: torch.where(x != y, a, b), lambda x,y,a,b: (x != y).where(a, b), vals=values,
+                  forward_only=True)
+
+  def test_where_boolean_composition(self):
+    _fp16_test_op([(100,)], lambda x: torch.where((x > -.5) & (x < .5), x*2, x-1),
+                  lambda x: ((x > -.5) & (x < .5)).where(x*2, x-1), forward_only=True)
+    _fp16_test_op([(100,)], lambda x: torch.where((x < -.5) | (x > .5), x+2, x-2),
+                  lambda x: ((x < -.5) | (x > .5)).where(x+2, x-2), forward_only=True)
+
+  def test_where_nested(self):
+    _fp16_test_op([(100,), (100,), (100,)], lambda x,a,b: torch.where(x < -.5, a, torch.where(x > .5, b, x)),
+                  lambda x,a,b: (x < -.5).where(a, (x > .5).where(b, x)), forward_only=True)
+
+  def test_masked_fill_finite(self):
+    _fp16_test_op([(32,10)], lambda x: x.masked_fill(x > .1, -3.25), lambda x: x.masked_fill(x > .1, -3.25), forward_only=True)
+
+  def test_masked_fill_inf(self):
+    _fp16_test_op([(32,10)], lambda x: x.masked_fill(x > .1, -math.inf), lambda x: x.masked_fill(x > .1, -math.inf),
+                  forward_only=True)
+    _fp16_test_op([(32,10)], lambda x: x.masked_fill(x < .1, -math.inf), lambda x: x.masked_fill(x < .1, -math.inf),
+                  forward_only=True)
 
 if __name__ == "__main__":
   unittest.main()

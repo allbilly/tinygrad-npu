@@ -1,10 +1,10 @@
 from __future__ import annotations
-import ctypes, mmap, os, time
+import ctypes, fcntl, mmap, os, time
 import numpy as np
 from tinygrad.device import BufferSpec, Compiled, LRUAllocator, Program, TinyELF
-from tinygrad.helpers import from_mv, round_up, suppress_finalizing, to_mv
+from tinygrad.helpers import from_mv, round_up, suppress_finalizing, temp, to_mv
 from tinygrad.renderer.rockchip import (RKBufferKind, RockchipRenderer, decode_image, patch_stage, emit_ew_stage,
-  RKArg, _MAX_EW_ELEMS_FP16)
+  RKArg, _MAX_EW_ELEMS_FP16, _EW_CFG_MAX, _EW_STAGE_ABS, _EW_STAGE_POSITIVE_MASK)
 from tinygrad.runtime.autogen import rockchip as rk
 from tinygrad.runtime.support.hcq import FileIOInterface, HCQBuffer
 
@@ -76,21 +76,60 @@ class RockchipProgram(Program['RockchipDevice']):
         rk.struct_rknpu_subcore_task(0, n), rk.struct_rknpu_subcore_task(n, 0), rk.struct_rknpu_subcore_task(n, 0)))
     self.dev.submit_count += 1
 
+  def _submit_standalone(self, body:tuple[int, ...]) -> None:
+    """Submit a stateful DPU stage with the direct PC tail used by the vendor examples."""
+    commands = body + (_pc(rk.TARGET_PC, rk.REG_PC_OPERATION_ENABLE, 0x18),)
+    need = len(commands) * 8
+    if self._cmd_buf is None or self._cmd_buf.size < need:
+      if self._cmd_buf is not None: self.dev._gpu_free(self._cmd_buf)
+      self._cmd_buf = self.dev._gpu_alloc(max(need, _CMD_BUF_MIN))
+    if self._task_buf is None:
+      self._task_buf = self.dev._gpu_alloc(_TASK_BUF_MIN, rk.RKNPU_MEM_KERNEL_MAPPING)
+    cmd, task = self._cmd_buf, self._task_buf
+    ctypes.memmove(int(cmd.va_addr), (ctypes.c_uint64 * len(commands))(*commands), need)
+    desc = rk.struct_rknpu_task(0, 4, 0x18, 0x300, 0x1ffff, 0, len(commands), 0, self._dma(cmd))
+    ctypes.memmove(int(task.va_addr), ctypes.addressof(desc), ctypes.sizeof(desc))
+    rk.DRM_IOCTL_RKNPU_SUBMIT(self.dev.fd_ctl,
+      flags=rk.RKNPU_JOB_PC|rk.RKNPU_JOB_BLOCK|rk.RKNPU_JOB_PINGPONG, timeout=6000,
+      task_start=0, task_number=1, task_counter=0, priority=0, task_obj_addr=task.meta.obj_addr,
+      regcfg_obj_addr=0, task_base_addr=0, user_data=0, core_mask=1, fence_fd=-1,
+      subcore_task=(rk.struct_rknpu_subcore_task*5)(rk.struct_rknpu_subcore_task(0, 1)))
+    self.dev.submit_count += 1
+
   def _run_ew_ops(self, address) -> None:
     bodies:list[tuple[int, ...]] = []
+    mask_program = any(op.ew_cfg == _EW_STAGE_POSITIVE_MASK for op in self.image.ew_ops)
+    needs_state = False
     def flush() -> None:
       if not bodies: return
       self._submit_pcchain(bodies)
       bodies.clear()
     for op in self.image.ew_ops:
+      standalone = op.ew_cfg == _EW_STAGE_POSITIVE_MASK
+      if standalone:
+        flush()
+        self.dev.reset_npu()
+        needs_state = True
       for start in range(0, op.count, _MAX_EW_ELEMS_FP16):
         count = min(_MAX_EW_ELEMS_FP16, op.count-start)
         offset = start*2
         stage = emit_ew_stage(RKArg(op.dst.kind, op.dst.index, op.dst.addend+offset),
                               RKArg(op.lhs.kind, op.lhs.index, op.lhs.addend+offset),
-                              RKArg(op.rhs.kind, op.rhs.index, op.rhs.addend+offset), count, op.ew_cfg)
-        bodies.append(patch_stage(stage, address))
-        if len(bodies) >= self.image.chain_limit: flush()
+                              RKArg(op.rhs.kind, op.rhs.index, op.rhs.addend+offset), count, op.ew_cfg, mask_program or needs_state)
+        body = patch_stage(stage, address)
+        if standalone:
+          self._submit_standalone(body)
+          if op.ew_cfg == _EW_STAGE_POSITIVE_MASK: self.dev.reset_npu()
+        else:
+          bodies.append(body)
+          if op.ew_cfg == _EW_STAGE_ABS:
+            flush()
+            self.dev.reset_npu()
+            dst = RKArg(op.dst.kind, op.dst.index, op.dst.addend+offset)
+            bodies.append(patch_stage(emit_ew_stage(dst, dst, dst, count, _EW_CFG_MAX, True), address))
+            flush()
+          needs_state = False
+          if len(bodies) >= self.image.chain_limit: flush()
     flush()
 
   def __call__(self, *bufs:HCQBuffer, global_size=(1,1,1), local_size=(1,1,1), vals=(), wait=False, **kwargs):
@@ -124,7 +163,9 @@ class RockchipProgram(Program['RockchipDevice']):
       if index >= len(self.scratch): raise RuntimeError(f"RKImage scratch slot {index} is not declared")
       return self._dma(self.scratch[index])
     start = time.perf_counter()
-    self._run_ew_ops(address)
+    fcntl.flock(self.dev.npu_lock_fd, fcntl.LOCK_EX)
+    try: self._run_ew_ops(address)
+    finally: fcntl.flock(self.dev.npu_lock_fd, fcntl.LOCK_UN)
     if (fill:=self.image.fill) is not None:
       bits = self.image.constants[:2] * fill.count
       dest = bufs[fill.dst.index] if fill.dst.kind is RKBufferKind.ARG else self.scratch[fill.dst.index]
@@ -134,6 +175,7 @@ class RockchipProgram(Program['RockchipDevice']):
 class RockchipDevice(Compiled):
   def __init__(self, device:str):
     self.fd_ctl = FileIOInterface(os.getenv("ROCKCHIP_DRM", "/dev/dri/card1"), os.O_RDWR)
+    self.npu_lock_fd = os.open(temp("rockchip_npu.lock"), os.O_RDWR|os.O_CREAT|os.O_CLOEXEC, 0o666)
     self.submit_count = 0
     super().__init__(device, RockchipAllocator(self), [RockchipRenderer], RockchipProgram)
   def _gpu_alloc(self, size:int, flags:int=0) -> HCQBuffer:

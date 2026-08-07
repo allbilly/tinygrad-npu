@@ -1,6 +1,6 @@
 from __future__ import annotations
 # ruff: noqa: E702
-import base64, os, struct
+import base64, math, os, struct
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import Callable
@@ -124,36 +124,94 @@ _DPU, _RDMA = 0x1001, 0x2001
 _MAX_EW_ELEMS_FP16 = 64000  # elementwise.py tile cap
 _EW_DATA_MODE_FP16 = 1 << 28
 _EW_EDATA_SIZE_FP16 = 2 << 22
-_EW_ALU_MIN, _EW_ALU_ADD, _EW_ALU_ABS = 1 << 16, 2 << 16, 5 << 16
+_EW_ALU_MIN, _EW_ALU_ADD, _EW_ALU_SUB = 1 << 16, 2 << 16, 4 << 16
 _EW_RELUX_EN, _EW_RELU_BYPASS, _EW_OP_CVT_BYPASS = 1 << 10, 1 << 9, 1 << 8
 _EW_LUT_BYPASS, _EW_OP_SRC_DMA, _EW_MUL_PRELU = 1 << 7, 1 << 6, 1 << 5
-_EW_OP_TYPE_MUL = 1 << 2
+_EW_OP_TYPE_MUL, _EW_OP_BYPASS, _EW_BYPASS = 1 << 2, 1 << 1, 1 << 0
 _EW_CFG_COMMON = _EW_DATA_MODE_FP16 | _EW_EDATA_SIZE_FP16 | _EW_LUT_BYPASS | _EW_OP_SRC_DMA
 _EW_CFG_RELU = _EW_CFG_COMMON
 _EW_CFG_RELU6 = _EW_CFG_COMMON | _EW_RELUX_EN
 _EW_CFG_MIN = _EW_CFG_COMMON | _EW_RELU_BYPASS | _EW_ALU_MIN
-_EW_CFG_ABS = _EW_CFG_COMMON | _EW_RELU_BYPASS | _EW_ALU_ABS
+_EW_CFG_SUB = _EW_CFG_COMMON | _EW_RELU_BYPASS | _EW_ALU_SUB
 _EW_CFG_LEAKY_RELU = _EW_CFG_COMMON | _EW_RELU_BYPASS | _EW_OP_CVT_BYPASS | _EW_MUL_PRELU | _EW_OP_TYPE_MUL
+_EW_CFG_FDIV = _EW_CFG_COMMON | _EW_RELU_BYPASS | _EW_OP_CVT_BYPASS | (3 << 16)
+_EW_CFG_MAX = _EW_CFG_COMMON | _EW_RELU_BYPASS
+_EW_CFG_BYPASS = _EW_RELU_BYPASS | _EW_OP_CVT_BYPASS | _EW_LUT_BYPASS | _EW_OP_BYPASS | _EW_BYPASS
 _EW_RELUX_CMP_RELU6 = struct.unpack("<I", struct.pack("<f", 6.0))[0]
+_EW_STAGE_POSITIVE_MASK = 1 << 31  # software tag consumed by emit_ew_stage, never written to EW_CFG
+_EW_STAGE_ABS = 1 << 30  # software tag for BS PReLU slope -1, never written to EW_CFG
 _EW_CFG = {
   Ops.ADD: _EW_CFG_COMMON | _EW_RELU_BYPASS | _EW_ALU_ADD,
   Ops.MUL: _EW_CFG_COMMON | _EW_RELU_BYPASS | _EW_OP_CVT_BYPASS | _EW_OP_TYPE_MUL,
-  Ops.MAX: _EW_CFG_COMMON | _EW_RELU_BYPASS,
+  Ops.MAX: _EW_CFG_MAX,
+  Ops.FDIV: _EW_CFG_FDIV,
 }
 def _cmd(target:int, reg:int, value:int) -> int: return ((target&0xffff)<<48)|((value&0xffffffff)<<16)|(reg&0xffff)
 def _scratch_bytes(count:int) -> int: return max(count * 2, 64)
 
-def emit_ew_stage(dst:RKArg, lhs:RKArg, rhs:RKArg, count:int, ew_cfg:int) -> RKStage:
-  """Build one contiguous FP16 DPU EW command body without its PC-chain tail."""
-  if not (0 < count <= _MAX_EW_ELEMS_FP16): raise ValueError(f"EW fp16 count {count} out of range")
+_BS_BYPASS, _BS_ALU_BYPASS, _BS_MUL_BYPASS = 1, 1 << 1, 1 << 4
+_BS_MUL_PRELU, _BS_RELU_BYPASS, _BS_RELUX_EN = 1 << 5, 1 << 6, 1 << 7
+_BS_ALU_SUB = 4 << 16
+_BS_BN_BYPASS = _BS_BYPASS | _BS_ALU_BYPASS | _BS_MUL_BYPASS | _BS_RELU_BYPASS
+_BS_MASK_CFG = _BS_ALU_SUB | _BS_RELU_BYPASS
+_BN_MASK_CFG = _BS_ALU_SUB | _BS_ALU_BYPASS | _BS_RELUX_EN
+_BS_OW_OD_BYPASS = 1 << 1
+_FP32_MIN_FP16_SUBNORMAL = struct.unpack("<I", struct.pack("<f", 2**-24))[0]
+_FP32_ONE = struct.unpack("<I", struct.pack("<f", 1.0))[0]
+_FP16_TWO_MUL = struct.unpack("<H", struct.pack("<e", 2.0))[0] << 16
+_FP16_POS_INF_MUL = struct.unpack("<H", struct.pack("<e", float("inf")))[0] << 16
+_FP16_NEG_ONE_MUL = struct.unpack("<H", struct.pack("<e", -1.0))[0] << 16
+
+def _emit_positive_mask_stage(dst:RKArg, src:RKArg, count:int) -> RKStage:
+  """Map positive FP16 lanes to 1 and non-positive lanes to 0 using DPU BS/BN."""
   width = (count + 7) // 8 - 1
   regs:tuple[tuple[int, int, int], ...] = ((_DPU,rk.REG_DPU_S_POINTER,0xe),
     (_DPU,rk.REG_DPU_FEATURE_MODE_CFG,(15<<5)|(2<<1)|1),
     (_DPU,rk.REG_DPU_DATA_FORMAT,(2<<29)|(2<<26)|2),
     (_DPU,rk.REG_DPU_DATA_CUBE_WIDTH,width),(_DPU,rk.REG_DPU_DATA_CUBE_HEIGHT,0),
     (_DPU,rk.REG_DPU_DATA_CUBE_NOTCH_ADDR,0),(_DPU,rk.REG_DPU_DATA_CUBE_CHANNEL,(7<<16)|7),
-    (_DPU,rk.REG_DPU_EW_CFG,ew_cfg),(_DPU,rk.REG_DPU_EW_RELUX_CMP_VALUE,_EW_RELUX_CMP_RELU6),
-    (_DPU,rk.REG_DPU_OUT_CVT_SCALE,(1<<16)|1),
+    (_DPU,rk.REG_DPU_BS_CFG,_BS_BN_BYPASS),(_DPU,rk.REG_DPU_BN_CFG,_BS_BN_BYPASS),
+    (_DPU,rk.REG_DPU_BS_ALU_CFG,0),(_DPU,rk.REG_DPU_BS_MUL_CFG,0),
+    (_DPU,rk.REG_DPU_BS_OW_CFG,_BS_OW_OD_BYPASS),(_DPU,rk.REG_DPU_WDMA_SIZE_0,7),(_DPU,rk.REG_DPU_WDMA_SIZE_1,width),
+    (_DPU,rk.REG_DPU_BN_MUL_CFG,0),(_DPU,rk.REG_DPU_BN_RELUX_CMP_VALUE,0),
+    (_DPU,rk.REG_DPU_BS_CFG,_BS_MASK_CFG),(_DPU,rk.REG_DPU_BS_ALU_CFG,_FP32_MIN_FP16_SUBNORMAL),
+    (_DPU,rk.REG_DPU_BS_MUL_CFG,_FP16_TWO_MUL),(_DPU,rk.REG_DPU_BN_CFG,_BN_MASK_CFG),
+    (_DPU,rk.REG_DPU_BN_MUL_CFG,_FP16_POS_INF_MUL),(_DPU,rk.REG_DPU_BN_RELUX_CMP_VALUE,_FP32_ONE),
+    (_DPU,rk.REG_DPU_EW_CFG,_EW_CFG[Ops.MAX]|_EW_BYPASS),(_DPU,rk.REG_DPU_EW_CVT_SCALE_VALUE,1),
+    (_DPU,rk.REG_DPU_OUT_CVT_OFFSET,0),(_DPU,rk.REG_DPU_OUT_CVT_SCALE,(1<<16)|1),(_DPU,rk.REG_DPU_OUT_CVT_SHIFT,0),
+    (_DPU,rk.REG_DPU_SURFACE_ADD,1<<6),
+    (_RDMA,rk.REG_DPU_RDMA_RDMA_S_POINTER,0xe),(_RDMA,rk.REG_DPU_RDMA_RDMA_DATA_CUBE_WIDTH,width),
+    (_RDMA,rk.REG_DPU_RDMA_RDMA_DATA_CUBE_HEIGHT,0),(_RDMA,rk.REG_DPU_RDMA_RDMA_DATA_CUBE_CHANNEL,7),
+    (_RDMA,rk.REG_DPU_RDMA_RDMA_ERDMA_CFG,(1<<30)|(2<<2)))
+  commands = [_cmd(*x) for x in regs]
+  relocs:list[RKReloc] = []
+  for target, reg, arg in ((_DPU,rk.REG_DPU_DST_BASE_ADDR,dst),(_RDMA,rk.REG_DPU_RDMA_RDMA_SRC_BASE_ADDR,src),
+                           (_RDMA,rk.REG_DPU_RDMA_RDMA_EW_BASE_ADDR,src)):
+    relocs.append(RKReloc(len(commands), arg)); commands.append(_cmd(target, reg, 0))
+  commands.append(_cmd(_RDMA, rk.REG_DPU_RDMA_RDMA_FEATURE_MODE_CFG, (2<<15)|(15<<11)|(2<<5)|(1<<3)|1))
+  return RKStage(tuple(commands), tuple(relocs))
+
+def emit_ew_stage(dst:RKArg, lhs:RKArg, rhs:RKArg, count:int, ew_cfg:int, stateful:bool=False) -> RKStage:
+  """Build one contiguous FP16 DPU EW command body without its PC-chain tail."""
+  if not (0 < count <= _MAX_EW_ELEMS_FP16): raise ValueError(f"EW fp16 count {count} out of range")
+  if ew_cfg == _EW_STAGE_POSITIVE_MASK: return _emit_positive_mask_stage(dst, lhs, count)
+  abs_stage = ew_cfg == _EW_STAGE_ABS
+  width = (count + 7) // 8 - 1
+  pipeline = ((_DPU,rk.REG_DPU_BS_CFG,(_BS_RELU_BYPASS|_BS_MUL_PRELU|_BS_ALU_BYPASS) if abs_stage else _BS_BN_BYPASS),
+    (_DPU,rk.REG_DPU_BN_CFG,_BS_BN_BYPASS),(_DPU,rk.REG_DPU_BS_ALU_CFG,0),
+    (_DPU,rk.REG_DPU_BS_MUL_CFG,_FP16_NEG_ONE_MUL if abs_stage else 0),(_DPU,rk.REG_DPU_BS_OW_CFG,_BS_OW_OD_BYPASS),
+    (_DPU,rk.REG_DPU_WDMA_SIZE_0,7),(_DPU,rk.REG_DPU_WDMA_SIZE_1,width),(_DPU,rk.REG_DPU_BN_MUL_CFG,0),
+    (_DPU,rk.REG_DPU_BN_RELUX_CMP_VALUE,0)) if stateful or abs_stage else ()
+  conversion = ((_DPU,rk.REG_DPU_EW_CVT_SCALE_VALUE,1),(_DPU,rk.REG_DPU_OUT_CVT_OFFSET,0),
+    (_DPU,rk.REG_DPU_OUT_CVT_SHIFT,0),(_DPU,rk.REG_DPU_SURFACE_ADD,1<<6)) if stateful or abs_stage or ew_cfg == _EW_CFG_FDIV else ()
+  regs:tuple[tuple[int, int, int], ...] = ((_DPU,rk.REG_DPU_S_POINTER,0xe),
+    (_DPU,rk.REG_DPU_FEATURE_MODE_CFG,(15<<5)|(2<<1)|1),
+    (_DPU,rk.REG_DPU_DATA_FORMAT,(2<<29)|(2<<26)|2),
+    (_DPU,rk.REG_DPU_DATA_CUBE_WIDTH,width),(_DPU,rk.REG_DPU_DATA_CUBE_HEIGHT,0),
+    (_DPU,rk.REG_DPU_DATA_CUBE_NOTCH_ADDR,0),(_DPU,rk.REG_DPU_DATA_CUBE_CHANNEL,(7<<16)|7)) + pipeline + (
+    (_DPU,rk.REG_DPU_EW_CFG,_EW_CFG_BYPASS if abs_stage else ew_cfg),
+    (_DPU,rk.REG_DPU_EW_RELUX_CMP_VALUE,_EW_RELUX_CMP_RELU6)) + conversion + (
+    (_DPU,rk.REG_DPU_OUT_CVT_SCALE,1 if ew_cfg == _EW_CFG_FDIV else (1<<16)|1),
     (_RDMA,rk.REG_DPU_RDMA_RDMA_S_POINTER,0xe),(_RDMA,rk.REG_DPU_RDMA_RDMA_DATA_CUBE_WIDTH,width),
     (_RDMA,rk.REG_DPU_RDMA_RDMA_DATA_CUBE_HEIGHT,0),(_RDMA,rk.REG_DPU_RDMA_RDMA_DATA_CUBE_CHANNEL,7),
     (_RDMA,rk.REG_DPU_RDMA_RDMA_ERDMA_CFG,(1<<30)|(2<<2)))
@@ -162,7 +220,8 @@ def emit_ew_stage(dst:RKArg, lhs:RKArg, rhs:RKArg, count:int, ew_cfg:int) -> RKS
   for target, reg, arg in ((_DPU,rk.REG_DPU_DST_BASE_ADDR,dst),(_RDMA,rk.REG_DPU_RDMA_RDMA_SRC_BASE_ADDR,lhs),
                            (_RDMA,rk.REG_DPU_RDMA_RDMA_EW_BASE_ADDR,rhs)):
     relocs.append(RKReloc(len(commands), arg)); commands.append(_cmd(target, reg, 0))
-  commands.append(_cmd(_RDMA, rk.REG_DPU_RDMA_RDMA_FEATURE_MODE_CFG, (2<<15)|(15<<11)|(2<<5)|(1<<3)|1))
+  commands.append(_cmd(_RDMA, rk.REG_DPU_RDMA_RDMA_FEATURE_MODE_CFG,
+                       (2<<15)|(15<<11)|(2<<5)|(0 if ew_cfg == _EW_CFG_FDIV else 1<<3)|1))
   return RKStage(tuple(commands), tuple(relocs))
 
 def _root_param(u:UOp) -> UOp|None:
@@ -334,12 +393,16 @@ def _negated_operand(u:UOp) -> UOp|None:
   return UOp.const(-float(u.arg), dtypes.half) if u.op is Ops.CONST else None
 
 def _ew_plan(u:UOp) -> tuple[int, UOp, UOp]|None:
+  if u.op is Ops.CUSTOMI and u.arg == "rockchip_positive_mask" and len(u.src) == 1:
+    return _EW_STAGE_POSITIVE_MASK, u.src[0], u.src[0]
+  if (negated:=_const_operand(u, Ops.MUL, -1.0)) is not None:
+    return _EW_CFG_SUB, UOp.const(0.0, dtypes.half), negated[0]
   if (relu:=_relu_operand(u)) is not None: return _EW_CFG_RELU, relu, UOp.const(0.0, dtypes.half)
   if u.op is Ops.MAX:
     for direct, product in (u.src, u.src[::-1]):
       if (scaled:=_const_operand(product, Ops.MUL)) is None or scaled[0].key != direct.key: continue
       factor = float(scaled[1].arg)
-      if factor == -1.0: return _EW_CFG_ABS, direct, direct
+      if factor == -1.0: return _EW_STAGE_ABS, direct, direct
       if 0.0 <= factor <= 1.0: return _EW_CFG_LEAKY_RELU, direct, scaled[1]
   if (outer:=_const_operand(u, Ops.MUL, -1.0)) is not None and outer[0].op is Ops.MAX:
     lhs, rhs = (_negated_operand(x) for x in outer[0].src)
@@ -571,16 +634,77 @@ def _fold_ordered_where(x:UOp) -> UOp|None:
     if scaled is not None and scaled.op is Ops.CONST and 0.0 <= float(scaled.arg) <= 1.0: return no.alu(Ops.MAX, yes)
   return None
 
+def _unwrap_condition(u:UOp) -> UOp:
+  while u.op is Ops.CAST and u.dtype.scalar() in (dtypes.bool, dtypes.half, dtypes.float): u = u.src[0]
+  return u
+
+def _positive_mask(u:UOp) -> UOp: return UOp(Ops.CUSTOMI, dtypes.half, (u,), "rockchip_positive_mask")
+
+def _mask_expr(u:UOp) -> UOp|None:
+  """Build an exact FP16 0/1 predicate using only DPU stages."""
+  u = _unwrap_condition(u)
+  if u.op in (Ops.CMPLT, Ops.CMPNE):
+    lhs, rhs = (_unwrap_condition(x) for x in u.src)
+    # Boolean CMPNE is tinygrad's canonical NOT. Preserve it without trying to subtract bool values.
+    for value, other in ((lhs, rhs), (rhs, lhs)):
+      if value.op is Ops.CONST and value.dtype.scalar() is dtypes.bool:
+        mask = _mask_expr(other)
+        if mask is None: return None
+        return UOp.const(1.0, dtypes.half).alu(Ops.ADD, mask.alu(Ops.MUL, UOp.const(-1.0, dtypes.half))) if bool(value.arg) else mask
+    if lhs.dtype.scalar() not in (dtypes.half, dtypes.float) or rhs.dtype.scalar() not in (dtypes.half, dtypes.float): return None
+    neg_one = UOp.const(-1.0, dtypes.half)
+    lhs, rhs = lhs.cast(dtypes.half), rhs.cast(dtypes.half)
+    positive = _positive_mask(rhs.alu(Ops.ADD, lhs.alu(Ops.MUL, neg_one)))
+    if u.op is Ops.CMPLT: return positive
+    reverse = _positive_mask(lhs.alu(Ops.ADD, rhs.alu(Ops.MUL, neg_one)))
+    return positive.alu(Ops.MAX, reverse)
+  if u.op in (Ops.OR, Ops.AND):
+    operands = tuple(_mask_expr(x) for x in u.src)
+    if len(operands) != 2 or any(x is None for x in operands): return None
+    mask_lhs, mask_rhs = operands
+    assert mask_lhs is not None and mask_rhs is not None
+    return mask_lhs.alu(Ops.MAX if u.op is Ops.OR else Ops.MUL, mask_rhs)
+  return None
+
+def _fold_general_where(x:UOp) -> UOp|None:
+  mask = _mask_expr(x.src[0])
+  if mask is None: return None
+  yes, no = (arm.cast(dtypes.half) for arm in x.src[1:])
+  neg_one, one = UOp.const(-1.0, dtypes.half), UOp.const(1.0, dtypes.half)
+  inverse = one.alu(Ops.ADD, mask.alu(Ops.MUL, neg_one))
+  gate = _unwrap_condition(x.src[0])
+  if gate.op is Ops.CMPLT:
+    lhs, rhs, yes_u, no_u = (_unwrap_condition(u) for u in (gate.src[0], gate.src[1], x.src[1], x.src[2]))
+    if rhs.op is Ops.CONST and math.isfinite(float(rhs.arg)):
+      threshold = float(rhs.arg)
+      if yes_u.key == lhs.key and no_u.op is Ops.CONST and math.isfinite(float(no_u.arg)) and float(no_u.arg) != threshold:
+        base = _minimum(lhs.cast(dtypes.half), UOp.const(threshold, dtypes.half))
+        return base.alu(Ops.ADD, inverse.alu(Ops.MUL, UOp.const(float(no_u.arg)-threshold, dtypes.half)))
+      if no_u.key == lhs.key and yes_u.op is Ops.CONST and math.isfinite(float(yes_u.arg)) and float(yes_u.arg) != threshold:
+        base = lhs.cast(dtypes.half).alu(Ops.MAX, UOp.const(threshold, dtypes.half))
+        return base.alu(Ops.ADD, mask.alu(Ops.MUL, UOp.const(float(yes_u.arg)-threshold, dtypes.half)))
+  nonfinite = tuple(arm.op is Ops.CONST and not math.isfinite(float(arm.arg)) for arm in x.src[1:])
+  if any(nonfinite):
+    if any(arm.op is Ops.CONST and math.isnan(float(arm.arg)) for arm in x.src[1:]): return None
+    if all(nonfinite) and float(x.src[1].arg) == float(x.src[2].arg): return yes
+    inf_index = next(i for i,is_nonfinite in enumerate(nonfinite) if is_nonfinite)
+    if all(nonfinite): return None
+    finite, denominator = (no, inverse) if inf_index == 0 else (yes, mask)
+    sign = math.copysign(1.0, float(x.src[1+inf_index].arg))
+    correction = UOp.const(sign, dtypes.half).alu(Ops.FDIV, denominator).alu(Ops.ADD, UOp.const(-sign, dtypes.half))
+    return finite.alu(Ops.ADD, correction)
+  return yes.alu(Ops.MUL, mask).alu(Ops.ADD, no.alu(Ops.MUL, inverse))
+
 _abs_pattern = UPat(Ops.MUL, dtypes.half, src=[UPat.var("x"), UPat(Ops.WHERE, src=(
   UPat(Ops.CMPNE, src=(UPat.var("x"), UPat.const(0.0))),
   UPat(Ops.WHERE, src=(UPat(Ops.CMPLT, src=(UPat.var("x"), UPat.const(0.0))), UPat.const(-1.0), UPat.const(1.0))), UPat.const(0.0)))])
+_pm_abs = PatternMatcher([(_abs_pattern, lambda x: x.alu(Ops.MAX, x.alu(Ops.MUL, UOp.const(-1.0, dtypes.half))))])
 
 def _fp32_alu_to_fp16(x:UOp) -> UOp|None:
   return None if _is_static_expr(x) else x.src[0].cast(dtypes.half).alu(x.op, x.src[1].cast(dtypes.half))
 
 _pm_fp32_to_fp16 = PatternMatcher([
   (UPat((Ops.ADD, Ops.MUL), dtypes.float, name="x"), _fp32_alu_to_fp16),
-  (_abs_pattern, lambda x: x.alu(Ops.MAX, x.alu(Ops.MUL, UOp.const(-1.0, dtypes.half)))),
   (UPat(Ops.CAST, dtypes.half, name="root", src=(UPat.cvar("c"),)), lambda root,c: root.const_like(c.arg)),
   (UPat(Ops.CAST, dtypes.half, src=(UPat(Ops.CAST, dtypes.float, src=(UPat(dtype=dtypes.half, name="x"),)),)), lambda x: x),
   (UPat(Ops.CAST, dtypes.half, src=(UPat(dtype=dtypes.half, name="x"),)), lambda x: x),
@@ -592,9 +716,11 @@ _pm_fp32_to_fp16 = PatternMatcher([
   (UPat(Ops.WHERE, dtypes.half, src=(UPat.var("gate"), UPat.cvar("default"), UPat.var("val"))),
    lambda gate,default,val: _fold_masked_max(gate, default, val, True)),
   (UPat(Ops.WHERE, dtypes.half, name="x"), _fold_ordered_where),
+  (UPat(Ops.WHERE, dtypes.half, name="x"), _fold_general_where),
 ])
 def _fp16_rewrite(uops:list[UOp]) -> list[UOp]:
   sink = next(u for u in uops if u.op is Ops.SINK)
+  sink = graph_rewrite(sink, _pm_abs, name="rockchip abs")
   return list(graph_rewrite(sink, _pm_fp32_to_fp16, name="rockchip float→half").toposort())
 
 class RockchipRenderer(Renderer):
