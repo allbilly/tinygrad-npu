@@ -838,3 +838,18 @@ Verification with `FORWARD_ONLY=1 DEFAULT_FLOAT=HALF DEV=ROCKCHIP ROCKCHIP_EW_RE
 - Polynomial/simple-loss census: **4 passed in 12.73 s** with `-n12`.
 - Tolerance remains exactly `atol=5e-3, rtol=5e-3`.
 - Rockchip execution uses only DPU EW; no host tensor arithmetic, CMAC, CNA, or PPU execution was added.
+
+---
+
+## 2026-08-08 — Group 10: FP16 scatter and indexed reductions
+
+The Rockchip census now covers functional scatter replacement on dimensions 0 and 1, scalar-source scatter, and scatter-reduce sum,
+product, mean, maximum, and minimum. Indices are compile-time-static `arange` or broadcast constants: the renderer turns them into raw
+gather layout, while selected FP16 values and every reduction execute on DPU EW. External integer index buffers remain explicitly
+excluded because Rockchip accepts FP16 inputs only.
+
+Verification with `FORWARD_ONLY=1 DEFAULT_FLOAT=HALF DEV=ROCKCHIP ROCKCHIP_EW_REDUCE=twoproduct`:
+
+- Static-index scatter census: **8 passed, 1 skipped in 13.06 s** with `-n12`.
+- Covered reductions: sum, product, mean, maximum, and minimum.
+- Tolerance remains exactly `atol=5e-3, rtol=5e-3`; no core change, host tensor arithmetic, CMAC, CNA, or PPU execution was added.

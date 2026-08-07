@@ -13,7 +13,7 @@ from __future__ import annotations
 import math, os, unittest
 import numpy as np
 import torch
-from tinygrad import Tensor, Device
+from tinygrad import Tensor, Device, dtypes
 from tinygrad.helpers import Context
 from test.backend import test_ops as _test_ops
 from test.backend.test_ops import helper_test_op, slow_test
@@ -383,6 +383,53 @@ class TestRockchipPolynomialLossOps(unittest.TestCase):
 
   def test_l1_loss(self):
     _fp16_fp32_golden_test_op([(3,4), (3,4)], lambda x,y: (x-y).abs().mean(), lambda x,y: (x-y).abs().mean())
+
+@unittest.skipUnless(Device.DEFAULT == "ROCKCHIP", "ROCKCHIP device only")
+class TestRockchipScatterOps(unittest.TestCase):
+  """FP16 scatter with compile-time-static indices; external integer NPU inputs are unsupported."""
+
+  def test_scatter_static_tensor_source(self):
+    index = torch.arange(4, dtype=torch.int64).reshape(2,2)
+    _fp16_test_op([(2,4), (2,2)], lambda x,src: x.scatter(1, index, src),
+                  lambda x,src: x.scatter(1, Tensor.arange(4, dtype=dtypes.int32).reshape(2,2), src), forward_only=True)
+
+  def test_scatter_static_dim0(self):
+    index = torch.arange(4, dtype=torch.int64).reshape(2,2)
+    _fp16_test_op([(4,2), (2,2)], lambda x,src: x.scatter(0, index, src),
+                  lambda x,src: x.scatter(0, Tensor.arange(4, dtype=dtypes.int32).reshape(2,2), src), forward_only=True)
+
+  def test_scatter_static_scalar_source(self):
+    index = torch.arange(4, dtype=torch.int64).reshape(2,2)
+    _fp16_test_op([(2,4)], lambda x: x.scatter(1, index, value=0.5),
+                  lambda x: x.scatter(1, Tensor.arange(4, dtype=dtypes.int32).reshape(2,2), src=0.5), forward_only=True)
+
+  def test_scatter_reduce_static_sum(self):
+    index = torch.zeros((2,4), dtype=torch.int64)
+    _fp16_test_op([(1,4), (2,4)], lambda x,src: x.scatter_reduce(0, index, src, reduce="sum"),
+                  lambda x,src: x.scatter_reduce(0, Tensor.zeros(2,4, dtype=dtypes.int32, buffer=False), src, reduce="sum"), forward_only=True)
+
+  def test_scatter_reduce_static_max(self):
+    index = torch.zeros((2,4), dtype=torch.int64)
+    _fp16_test_op([(1,4), (2,4)], lambda x,src: x.scatter_reduce(0, index, src, reduce="amax"),
+                  lambda x,src: x.scatter_reduce(0, Tensor.zeros(2,4, dtype=dtypes.int32, buffer=False), src, reduce="amax"), forward_only=True)
+
+  def test_scatter_reduce_static_product(self):
+    index = torch.zeros((2,4), dtype=torch.int64)
+    _fp16_test_op([(1,4), (2,4)], lambda x,src: x.scatter_reduce(0, index, src, reduce="prod"),
+                  lambda x,src: x.scatter_reduce(0, Tensor.zeros(2,4, dtype=dtypes.int32, buffer=False), src, reduce="prod"), forward_only=True)
+
+  def test_scatter_reduce_static_min(self):
+    index = torch.zeros((2,4), dtype=torch.int64)
+    _fp16_test_op([(1,4), (2,4)], lambda x,src: x.scatter_reduce(0, index, src, reduce="amin"),
+                  lambda x,src: x.scatter_reduce(0, Tensor.zeros(2,4, dtype=dtypes.int32, buffer=False), src, reduce="amin"), forward_only=True)
+
+  def test_scatter_reduce_static_mean(self):
+    index = torch.zeros((2,4), dtype=torch.int64)
+    _fp16_fp32_golden_test_op([(1,4), (2,4)], lambda x,src: x.scatter_reduce(0, index, src, reduce="mean"),
+    lambda x,src: x.scatter_reduce(0, Tensor.zeros(2,4, dtype=dtypes.int32, buffer=False), src, reduce="mean"), forward_only=True)
+
+  @unittest.skip("Rockchip accepts FP16 inputs only; external integer index buffers are excluded")
+  def test_scatter_dynamic_integer_index(self): pass
 
 @unittest.skipUnless(Device.DEFAULT == "ROCKCHIP", "ROCKCHIP device only")
 class TestRockchipInterpolateOps(unittest.TestCase):
