@@ -1,13 +1,13 @@
 from __future__ import annotations
 # ruff: noqa: E702
-import base64, math, os, struct
+import base64, math, struct
 from dataclasses import dataclass
 from enum import IntEnum
 from functools import lru_cache
 from typing import Callable
 from tinygrad.device import Compiler
 from tinygrad.dtype import DType, dtypes
-from tinygrad.helpers import cdiv, cmod, floordiv, floormod
+from tinygrad.helpers import cdiv, cmod, floordiv, floormod, ceildiv, getenv
 from tinygrad.renderer import Renderer
 from tinygrad.runtime.autogen import rockchip as rk
 from tinygrad.uop.ops import GroupOp, Ops, UOp, UPat, PatternMatcher, graph_rewrite
@@ -128,11 +128,17 @@ def patch_stage(stage:RKStage, address:Callable[[RKBufferKind, int], int]) -> tu
     commands[reloc.word] = (word & ~0xffffffff0000) | (value << 16)
   return tuple(commands)
 
+def rk_cmd(target:int, reg:int, value:int) -> int: return ((target&0xffff)<<48)|((value&0xffffffff)<<16)|(reg&0xffff)
+def _scratch_bytes(count:int) -> int: return max(count * 2, 64)
+def _round_float(value:int|float|bool, fmt:str) -> float: return struct.unpack(fmt, struct.pack(fmt, float(value)))[0]
+def _f16_bits(value:int|float) -> int: return struct.unpack("<H", struct.pack("<e", float(value)))[0]
+def _f32_bits(value:int|float) -> int: return struct.unpack("<I", struct.pack("<f", float(value)))[0]
+
 _DPU, _RDMA = 0x1001, 0x2001
 _MAX_EW_ELEMS_FP16 = 64000  # elementwise.py tile cap
 _EW_DATA_MODE_FP16 = 1 << 28
 _EW_EDATA_SIZE_FP16 = 2 << 22
-_EW_ALU_MIN, _EW_ALU_ADD, _EW_ALU_SUB = 1 << 16, 2 << 16, 4 << 16
+_EW_ALU_MIN, _EW_ALU_ADD, _EW_ALU_FDIV, _EW_ALU_SUB = 1 << 16, 2 << 16, 3 << 16, 4 << 16
 _EW_RELUX_EN, _EW_RELU_BYPASS, _EW_OP_CVT_BYPASS = 1 << 10, 1 << 9, 1 << 8
 _EW_LUT_BYPASS, _EW_OP_SRC_DMA, _EW_MUL_PRELU = 1 << 7, 1 << 6, 1 << 5
 _EW_OP_TYPE_MUL, _EW_OP_BYPASS, _EW_BYPASS = 1 << 2, 1 << 1, 1 << 0
@@ -142,10 +148,10 @@ _EW_CFG_RELU6 = _EW_CFG_COMMON | _EW_RELUX_EN
 _EW_CFG_MIN = _EW_CFG_COMMON | _EW_RELU_BYPASS | _EW_ALU_MIN
 _EW_CFG_SUB = _EW_CFG_COMMON | _EW_RELU_BYPASS | _EW_ALU_SUB
 _EW_CFG_LEAKY_RELU = _EW_CFG_COMMON | _EW_RELU_BYPASS | _EW_OP_CVT_BYPASS | _EW_MUL_PRELU | _EW_OP_TYPE_MUL
-_EW_CFG_FDIV = _EW_CFG_COMMON | _EW_RELU_BYPASS | _EW_OP_CVT_BYPASS | (3 << 16)
+_EW_CFG_FDIV = _EW_CFG_COMMON | _EW_RELU_BYPASS | _EW_OP_CVT_BYPASS | _EW_ALU_FDIV
 _EW_CFG_MAX = _EW_CFG_COMMON | _EW_RELU_BYPASS
 _EW_CFG_BYPASS = _EW_RELU_BYPASS | _EW_OP_CVT_BYPASS | _EW_LUT_BYPASS | _EW_OP_BYPASS | _EW_BYPASS
-_EW_RELUX_CMP_RELU6 = struct.unpack("<I", struct.pack("<f", 6.0))[0]
+_EW_RELUX_CMP_RELU6 = _f32_bits(6.0)
 _EW_STAGE_POSITIVE_MASK = 1 << 31  # software tag consumed by emit_ew_stage, never written to EW_CFG
 _EW_STAGE_ABS = 1 << 30  # software tag for BS PReLU slope -1, never written to EW_CFG
 _EW_CFG = {
@@ -154,9 +160,6 @@ _EW_CFG = {
   Ops.MAX: _EW_CFG_MAX,
   Ops.FDIV: _EW_CFG_FDIV,
 }
-def _cmd(target:int, reg:int, value:int) -> int: return ((target&0xffff)<<48)|((value&0xffffffff)<<16)|(reg&0xffff)
-def _scratch_bytes(count:int) -> int: return max(count * 2, 64)
-
 _BS_BYPASS, _BS_ALU_BYPASS, _BS_MUL_BYPASS = 1, 1 << 1, 1 << 4
 _BS_MUL_PRELU, _BS_RELU_BYPASS, _BS_RELUX_EN = 1 << 5, 1 << 6, 1 << 7
 _BS_ALU_SUB = 4 << 16
@@ -164,15 +167,12 @@ _BS_BN_BYPASS = _BS_BYPASS | _BS_ALU_BYPASS | _BS_MUL_BYPASS | _BS_RELU_BYPASS
 _BS_MASK_CFG = _BS_ALU_SUB | _BS_RELU_BYPASS
 _BN_MASK_CFG = _BS_ALU_SUB | _BS_ALU_BYPASS | _BS_RELUX_EN
 _BS_OW_OD_BYPASS = 1 << 1
-_FP32_MIN_FP16_SUBNORMAL = struct.unpack("<I", struct.pack("<f", 2**-24))[0]
-_FP32_ONE = struct.unpack("<I", struct.pack("<f", 1.0))[0]
-_FP16_TWO_MUL = struct.unpack("<H", struct.pack("<e", 2.0))[0] << 16
-_FP16_POS_INF_MUL = struct.unpack("<H", struct.pack("<e", float("inf")))[0] << 16
-_FP16_NEG_ONE_MUL = struct.unpack("<H", struct.pack("<e", -1.0))[0] << 16
+_FP32_MIN_FP16_SUBNORMAL, _FP32_ONE = _f32_bits(2**-24), _f32_bits(1.0)
+_FP16_TWO_MUL, _FP16_POS_INF_MUL, _FP16_NEG_ONE_MUL = _f16_bits(2.0) << 16, _f16_bits(float("inf")) << 16, _f16_bits(-1.0) << 16
 
 def _emit_positive_mask_stage(dst:RKArg, src:RKArg, count:int) -> RKStage:
   """Map positive FP16 lanes to 1 and non-positive lanes to 0 using DPU BS/BN."""
-  width = (count + 7) // 8 - 1
+  width = ceildiv(count, 8) - 1
   regs:tuple[tuple[int, int, int], ...] = ((_DPU,rk.REG_DPU_S_POINTER,0xe),
     (_DPU,rk.REG_DPU_FEATURE_MODE_CFG,(15<<5)|(2<<1)|1),
     (_DPU,rk.REG_DPU_DATA_FORMAT,(2<<29)|(2<<26)|2),
@@ -191,12 +191,12 @@ def _emit_positive_mask_stage(dst:RKArg, src:RKArg, count:int) -> RKStage:
     (_RDMA,rk.REG_DPU_RDMA_RDMA_S_POINTER,0xe),(_RDMA,rk.REG_DPU_RDMA_RDMA_DATA_CUBE_WIDTH,width),
     (_RDMA,rk.REG_DPU_RDMA_RDMA_DATA_CUBE_HEIGHT,0),(_RDMA,rk.REG_DPU_RDMA_RDMA_DATA_CUBE_CHANNEL,7),
     (_RDMA,rk.REG_DPU_RDMA_RDMA_ERDMA_CFG,(1<<30)|(2<<2)))
-  commands = [_cmd(*x) for x in regs]
+  commands = [rk_cmd(*x) for x in regs]
   relocs:list[RKReloc] = []
   for target, reg, arg in ((_DPU,rk.REG_DPU_DST_BASE_ADDR,dst),(_RDMA,rk.REG_DPU_RDMA_RDMA_SRC_BASE_ADDR,src),
                            (_RDMA,rk.REG_DPU_RDMA_RDMA_EW_BASE_ADDR,src)):
-    relocs.append(RKReloc(len(commands), arg)); commands.append(_cmd(target, reg, 0))
-  commands.append(_cmd(_RDMA, rk.REG_DPU_RDMA_RDMA_FEATURE_MODE_CFG, (2<<15)|(15<<11)|(2<<5)|(1<<3)|1))
+    relocs.append(RKReloc(len(commands), arg)); commands.append(rk_cmd(target, reg, 0))
+  commands.append(rk_cmd(_RDMA, rk.REG_DPU_RDMA_RDMA_FEATURE_MODE_CFG, (2<<15)|(15<<11)|(2<<5)|(1<<3)|1))
   return RKStage(tuple(commands), tuple(relocs))
 
 def emit_ew_stage(dst:RKArg, lhs:RKArg, rhs:RKArg, count:int, ew_cfg:int, stateful:bool=False) -> RKStage:
@@ -204,7 +204,7 @@ def emit_ew_stage(dst:RKArg, lhs:RKArg, rhs:RKArg, count:int, ew_cfg:int, statef
   if not (0 < count <= _MAX_EW_ELEMS_FP16): raise ValueError(f"EW fp16 count {count} out of range")
   if ew_cfg == _EW_STAGE_POSITIVE_MASK: return _emit_positive_mask_stage(dst, lhs, count)
   abs_stage = ew_cfg == _EW_STAGE_ABS
-  width = (count + 7) // 8 - 1
+  width = ceildiv(count, 8) - 1
   pipeline = ((_DPU,rk.REG_DPU_BS_CFG,(_BS_RELU_BYPASS|_BS_MUL_PRELU|_BS_ALU_BYPASS) if abs_stage else _BS_BN_BYPASS),
     (_DPU,rk.REG_DPU_BN_CFG,_BS_BN_BYPASS),(_DPU,rk.REG_DPU_BS_ALU_CFG,0),
     (_DPU,rk.REG_DPU_BS_MUL_CFG,_FP16_NEG_ONE_MUL if abs_stage else 0),(_DPU,rk.REG_DPU_BS_OW_CFG,_BS_OW_OD_BYPASS),
@@ -223,12 +223,12 @@ def emit_ew_stage(dst:RKArg, lhs:RKArg, rhs:RKArg, count:int, ew_cfg:int, statef
     (_RDMA,rk.REG_DPU_RDMA_RDMA_S_POINTER,0xe),(_RDMA,rk.REG_DPU_RDMA_RDMA_DATA_CUBE_WIDTH,width),
     (_RDMA,rk.REG_DPU_RDMA_RDMA_DATA_CUBE_HEIGHT,0),(_RDMA,rk.REG_DPU_RDMA_RDMA_DATA_CUBE_CHANNEL,7),
     (_RDMA,rk.REG_DPU_RDMA_RDMA_ERDMA_CFG,(1<<30)|(2<<2)))
-  commands = [_cmd(*x) for x in regs]
+  commands = [rk_cmd(*x) for x in regs]
   relocs:list[RKReloc] = []
   for target, reg, arg in ((_DPU,rk.REG_DPU_DST_BASE_ADDR,dst),(_RDMA,rk.REG_DPU_RDMA_RDMA_SRC_BASE_ADDR,lhs),
                            (_RDMA,rk.REG_DPU_RDMA_RDMA_EW_BASE_ADDR,rhs)):
-    relocs.append(RKReloc(len(commands), arg)); commands.append(_cmd(target, reg, 0))
-  commands.append(_cmd(_RDMA, rk.REG_DPU_RDMA_RDMA_FEATURE_MODE_CFG,
+    relocs.append(RKReloc(len(commands), arg)); commands.append(rk_cmd(target, reg, 0))
+  commands.append(rk_cmd(_RDMA, rk.REG_DPU_RDMA_RDMA_FEATURE_MODE_CFG,
                        (2<<15)|(15<<11)|(2<<5)|(0 if ew_cfg == _EW_CFG_FDIV else 1<<3)|1))
   return RKStage(tuple(commands), tuple(relocs))
 
@@ -241,8 +241,8 @@ def _root_param(u:UOp) -> UOp|None:
 def _eval_cast(value:int|float|bool, dtype:DType) -> int|float|bool:
   if dtype.scalar() is dtypes.bool: return bool(value)
   if dtype.scalar() in dtypes.ints: return int(value)
-  if dtype.scalar() is dtypes.half: return struct.unpack("<e", struct.pack("<e", float(value)))[0]
-  if dtype.scalar() is dtypes.float: return struct.unpack("<f", struct.pack("<f", float(value)))[0]
+  if dtype.scalar() is dtypes.half: return _round_float(value, "<e")
+  if dtype.scalar() is dtypes.float: return _round_float(value, "<f")
   return float(value)
 
 def _eval_expr(u:UOp, env:dict[UOp, int]) -> int|float|bool:
@@ -345,8 +345,7 @@ class _GatherEval:
     key = u, tuple(ranges)
     if key not in self.funcs:
       names = {r:f"r{i}" for i,r in enumerate(ranges)}
-      scope = {"half":lambda x:struct.unpack("<e", struct.pack("<e", float(x)))[0],
-               "float32":lambda x:struct.unpack("<f", struct.pack("<f", float(x)))[0],
+      scope = {"half":lambda x:_round_float(x, "<e"), "float32":lambda x:_round_float(x, "<f"),
                "cdiv":cdiv, "cmod":cmod, "floordiv":floordiv, "floormod":floormod}
       self.funcs[key] = eval(f"lambda {','.join(names.values())}: {_static_expr_source(u, names)}", scope)
     return self.funcs[key]
@@ -358,7 +357,7 @@ def _static_vector(out_index:UOp, expr:UOp, count:int) -> tuple[int, ...]:
   for env in _iter_range_env(ranges):
     dst = _eval_int(out_index, env)
     if not 0 <= dst < count: raise RuntimeError("RKPLAN_REJECT:static_index")
-    bits = struct.unpack("<H", struct.pack("<e", float(_eval_expr(expr, env))))[0]
+    bits = _f16_bits(float(_eval_expr(expr, env)))
     if values[dst] is not None and values[dst] != bits: raise RuntimeError("RKPLAN_REJECT:static_index")
     values[dst] = bits
   if any(x is None for x in values): raise RuntimeError("RKPLAN_REJECT:static_index")
@@ -446,7 +445,7 @@ def _selection_gather(u:UOp, out_index:UOp, count:int, oslot:int, selection_cach
     if key in choices: return choices[key]
     ret:tuple[tuple[int, int]|None, int|None]
     if x.op is Ops.CONST and x.dtype.scalar() is dtypes.half:
-      bits = struct.unpack("<H", struct.pack("<e", float(x.arg)))[0]
+      bits = _f16_bits(float(x.arg))
       ret = None, bits
     elif x.op is Ops.CAST and x.dtype.scalar() is dtypes.half: ret = selected(x.src[0], env)
     elif x.op is Ops.WHERE:
@@ -497,7 +496,7 @@ def _ew_leaf(u:UOp, out_index:UOp, count:int, oslot:int, static_cache:dict[UOp, 
     param, index, gate = u.src[0].src[0], u.src[0].src[1], u.src[2] if len(u.src) > 2 else None
     if len(u.src) > 1 and u.src[1].op is not Ops.CONST:
       return _selection_gather(u, out_index, count, oslot, selection_cache, static_cache, choice_cache)
-    fill_bits = struct.unpack("<H", struct.pack("<e", float(u.src[1].arg) if len(u.src) > 1 else 0.0))[0]
+    fill_bits = _f16_bits(float(u.src[1].arg) if len(u.src) > 1 else 0.0)
     if param.dtype.scalar() is not dtypes.half or param.arg.slot == oslot or param.src[0].op is not Ops.CONST: return None
     if gate is None and index.key == out_index.key and int(param.src[0].arg) == count: return RKArg(RKBufferKind.ARG, param.arg.slot)
     return param, index, gate, fill_bits
@@ -708,7 +707,7 @@ def lower_ew(uops:list[UOp]) -> RKImage:
   if (native_cfg not in (_EW_CFG_MIN, _EW_CFG_RELU6) and (reduction_info:=_mul_reduction_terms(reduction)) is not None and
       (reduction_info[1] or len(reduction_info[0]) > 8)):
     terms = reduction_info[0]
-    reduce_mode = os.getenv("ROCKCHIP_EW_REDUCE", "twoproduct").strip().lower()
+    reduce_mode = getenv("ROCKCHIP_EW_REDUCE", "twoproduct").strip().lower()
     if reduce_mode == "kahan": reduced = _compensated_mul_sum(terms)
     elif reduce_mode == "twoproduct": reduced, chain_limit = _precise_mul_sum(terms), 256
     elif reduce_mode != "sequential": raise ValueError(f"invalid ROCKCHIP_EW_REDUCE={reduce_mode!r}")

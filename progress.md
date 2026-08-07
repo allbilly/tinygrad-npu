@@ -875,3 +875,25 @@ FORWARD_ONLY=1 DEFAULT_FLOAT=HALF DEV=ROCKCHIP ROCKCHIP_EW_REDUCE=twoproduct \
 - Changes since Group 6 are confined to `progress.md`, `test/backend/test_rockchip.py`, `tinygrad/renderer/rockchip.py`, and
   `tinygrad/runtime/ops_rockchip.py`; shared tinygrad core is unchanged.
 - Audit found no host floating-point tensor arithmetic, tolerance relaxation, CMAC, CNA, or PPU execution in the Rockchip backend.
+
+---
+
+## 2026-08-08 — Rockchip backend style cleanup
+
+The renderer/runtime split was reviewed against tinygrad's QCOM, DSP, AMD, and NV backends. Rockchip retains the same core structure:
+`Renderer` lowers and encodes device work, `Program` relocates/submits it, `Allocator` only manages buffers, and `Compiled` connects the
+pieces. The cleanup remains entirely Rockchip-local and makes the following conventions explicit:
+
+- shared `getenv`, `ceildiv`, and `round_up` helpers replace local equivalents;
+- one named `rk_cmd` encoder is shared by renderer and runtime instead of duplicating PC command packing;
+- FP16/FP32 rounding and register-bit conversion use named helpers;
+- command/task buffer growth is centralized in `RockchipProgram`;
+- the FDIV ALU selector and NPU counter-clear action are named rather than embedded numeric literals.
+
+Verification:
+
+- Complete Rockchip census: **218 passed, 12 skipped, 107 subtests passed in 48.37 s** with `-n12`.
+- Full Ruff: pass.
+- `mypy tinygrad/`: pass (216 source files).
+- `sz.py`: renderer **891 → 890** executable lines, runtime **181 → 176**; comments and docstrings retained.
+- No shared tinygrad core change, CPU tensor arithmetic, tolerance relaxation, CMAC, CNA, or PPU execution was added.

@@ -2,17 +2,15 @@ from __future__ import annotations
 import ctypes, fcntl, mmap, os, time
 import numpy as np
 from tinygrad.device import BufferSpec, Compiled, LRUAllocator, Program, TinyELF
-from tinygrad.helpers import from_mv, round_up, suppress_finalizing, temp, to_mv
+from tinygrad.helpers import from_mv, getenv, round_up, suppress_finalizing, temp, to_mv
 from tinygrad.renderer.rockchip import (RKBufferKind, RockchipRenderer, decode_image, patch_stage, emit_ew_stage,
-  RKArg, _MAX_EW_ELEMS_FP16, _EW_CFG_MAX, _EW_STAGE_ABS, _EW_STAGE_POSITIVE_MASK)
+  RKArg, rk_cmd, _MAX_EW_ELEMS_FP16, _EW_CFG_MAX, _EW_STAGE_ABS, _EW_STAGE_POSITIVE_MASK)
 from tinygrad.runtime.autogen import rockchip as rk
 from tinygrad.runtime.support.hcq import FileIOInterface, HCQBuffer
 
 # Ordinary ADD/MUL chains are capped at the measured 383-task boundary; mixed TwoProduct chains use 256.
 _EW_CHAIN_MAX = 383
-_PC_TAIL, _CMD_BUF_MIN, _TASK_BUF_MIN = 4, 65536, 16384
-
-def _pc(target:int, reg:int, value:int=0) -> int: return (target << 48) | ((value & 0xffffffff) << 16) | reg
+_PC_TAIL, _CMD_BUF_MIN, _TASK_BUF_MIN, _RKNPU_ACT_CLR_TOTAL_RW_AMOUNT = 4, 65536, 16384, 13
 
 class RockchipAllocator(LRUAllocator['RockchipDevice']):
   def _alloc(self, size:int, options:BufferSpec) -> HCQBuffer: return self.dev._gpu_alloc(size)
@@ -37,6 +35,12 @@ class RockchipProgram(Program['RockchipDevice']):
 
   def _dma(self, buf:HCQBuffer) -> int: return int(buf.meta.dma_addr)+int(buf.va_addr)-int(buf.base.va_addr)
 
+  def _submit_buffer(self, buf:HCQBuffer|None, need:int, minimum:int, flags:int=0) -> HCQBuffer:
+    if buf is None or buf.size < need:
+      if buf is not None: self.dev._gpu_free(buf)
+      buf = self.dev._gpu_alloc(max(need, minimum), flags)
+    return buf
+
   def _submit_pcchain(self, bodies:list[tuple[int, ...]]) -> None:
     """Submit contiguous FP16 EW tasks as one blocking PC chain."""
     n = len(bodies)
@@ -47,14 +51,9 @@ class RockchipProgram(Program['RockchipDevice']):
       offsets.append(words)
       words += round_up(len(body) + _PC_TAIL, 2)
     need = words * 8
-    if self._cmd_buf is None or self._cmd_buf.size < need:
-      if self._cmd_buf is not None: self.dev._gpu_free(self._cmd_buf)
-      self._cmd_buf = self.dev._gpu_alloc(max(need, _CMD_BUF_MIN))
     task_need = n * ctypes.sizeof(rk.struct_rknpu_task)
-    if self._task_buf is None or self._task_buf.size < task_need:
-      if self._task_buf is not None: self.dev._gpu_free(self._task_buf)
-      self._task_buf = self.dev._gpu_alloc(max(task_need, _TASK_BUF_MIN), rk.RKNPU_MEM_KERNEL_MAPPING)
-    cmd, task = self._cmd_buf, self._task_buf
+    self._cmd_buf = cmd = self._submit_buffer(self._cmd_buf, need, _CMD_BUF_MIN)
+    self._task_buf = task = self._submit_buffer(self._task_buf, task_need, _TASK_BUF_MIN, rk.RKNPU_MEM_KERNEL_MAPPING)
     ctypes.memset(int(cmd.va_addr), 0, need)
     base_dma = self._dma(cmd)
     for i, body in enumerate(bodies):
@@ -62,9 +61,9 @@ class RockchipProgram(Program['RockchipDevice']):
       ctypes.memmove(int(cmd.va_addr) + base*8, (ctypes.c_uint64 * len(body))(*body), len(body)*8)
       next_addr = (base_dma + offsets[i+1]*8) & 0xfffffff0 if i+1 < n else 0
       next_amount = len(bodies[i+1]) if i+1 < n else 0
-      tail = (_pc(rk.TARGET_PC_REG, rk.REG_PC_BASE_ADDRESS, next_addr),
-              _pc(rk.TARGET_PC_REG, rk.REG_PC_REGISTER_AMOUNTS, next_amount),
-              _pc(rk.TARGET_VERSION, 0), _pc(rk.TARGET_PC, rk.REG_PC_OPERATION_ENABLE, 0x18))
+      tail = (rk_cmd(rk.TARGET_PC_REG, rk.REG_PC_BASE_ADDRESS, next_addr),
+              rk_cmd(rk.TARGET_PC_REG, rk.REG_PC_REGISTER_AMOUNTS, next_amount),
+              rk_cmd(rk.TARGET_VERSION, 0, 0), rk_cmd(rk.TARGET_PC, rk.REG_PC_OPERATION_ENABLE, 0x18))
       ctypes.memmove(int(cmd.va_addr) + (base+len(body))*8, (ctypes.c_uint64 * _PC_TAIL)(*tail), _PC_TAIL*8)
       desc = rk.struct_rknpu_task(0, 4, 0x18, 0x300, 0x1ffff, 0, len(body)+_PC_TAIL, 0, base_dma+base*8)
       ctypes.memmove(int(task.va_addr) + i*ctypes.sizeof(desc), ctypes.addressof(desc), ctypes.sizeof(desc))
@@ -78,14 +77,10 @@ class RockchipProgram(Program['RockchipDevice']):
 
   def _submit_standalone(self, body:tuple[int, ...]) -> None:
     """Submit a stateful DPU stage with the direct PC tail used by the vendor examples."""
-    commands = body + (_pc(rk.TARGET_PC, rk.REG_PC_OPERATION_ENABLE, 0x18),)
+    commands = body + (rk_cmd(rk.TARGET_PC, rk.REG_PC_OPERATION_ENABLE, 0x18),)
     need = len(commands) * 8
-    if self._cmd_buf is None or self._cmd_buf.size < need:
-      if self._cmd_buf is not None: self.dev._gpu_free(self._cmd_buf)
-      self._cmd_buf = self.dev._gpu_alloc(max(need, _CMD_BUF_MIN))
-    if self._task_buf is None:
-      self._task_buf = self.dev._gpu_alloc(_TASK_BUF_MIN, rk.RKNPU_MEM_KERNEL_MAPPING)
-    cmd, task = self._cmd_buf, self._task_buf
+    self._cmd_buf = cmd = self._submit_buffer(self._cmd_buf, need, _CMD_BUF_MIN)
+    self._task_buf = task = self._submit_buffer(self._task_buf, ctypes.sizeof(rk.struct_rknpu_task), _TASK_BUF_MIN, rk.RKNPU_MEM_KERNEL_MAPPING)
     ctypes.memmove(int(cmd.va_addr), (ctypes.c_uint64 * len(commands))(*commands), need)
     desc = rk.struct_rknpu_task(0, 4, 0x18, 0x300, 0x1ffff, 0, len(commands), 0, self._dma(cmd))
     ctypes.memmove(int(task.va_addr), ctypes.addressof(desc), ctypes.sizeof(desc))
@@ -175,20 +170,20 @@ class RockchipProgram(Program['RockchipDevice']):
 
 class RockchipDevice(Compiled):
   def __init__(self, device:str):
-    self.fd_ctl = FileIOInterface(os.getenv("ROCKCHIP_DRM", "/dev/dri/card1"), os.O_RDWR)
+    self.fd_ctl = FileIOInterface(getenv("ROCKCHIP_DRM", "/dev/dri/card1"), os.O_RDWR)
     self.npu_lock_fd = os.open(temp("rockchip_npu.lock"), os.O_RDWR|os.O_CREAT|os.O_CLOEXEC, 0o666)
     self.submit_count = 0
     super().__init__(device, RockchipAllocator(self), [RockchipRenderer], RockchipProgram)
   def _gpu_alloc(self, size:int, flags:int=0) -> HCQBuffer:
-    alloc = max(4096, (size+4095)&-4096)
+    alloc = max(4096, round_up(size, 4096))
     meta = rk.DRM_IOCTL_RKNPU_MEM_CREATE(self.fd_ctl, size=alloc, flags=flags|rk.RKNPU_MEM_NON_CACHEABLE)
     mapping = rk.DRM_IOCTL_RKNPU_MEM_MAP(self.fd_ctl, handle=meta.handle, reserved=0, offset=0)
     return HCQBuffer(self.fd_ctl.mmap(0, alloc, mmap.PROT_READ|mmap.PROT_WRITE, mmap.MAP_SHARED, mapping.offset), size, meta=meta)
   def _gpu_free(self, buf:HCQBuffer):
-    FileIOInterface.munmap(int(buf.base.va_addr), max(4096, (buf.base.size+4095)&-4096))
+    FileIOInterface.munmap(int(buf.base.va_addr), max(4096, round_up(buf.base.size, 4096)))
     rk.DRM_IOCTL_RKNPU_MEM_DESTROY(self.fd_ctl, handle=buf.meta.handle, reserved=0, obj_addr=buf.meta.obj_addr)
   def reset_npu(self):
-    try: rk.DRM_IOCTL_RKNPU_ACTION(self.fd_ctl, flags=13, value=0)  # RKNPU_ACT_CLR_TOTAL_RW_AMOUNT
+    try: rk.DRM_IOCTL_RKNPU_ACTION(self.fd_ctl, flags=_RKNPU_ACT_CLR_TOTAL_RW_AMOUNT, value=0)
     except OSError: pass
     try: rk.DRM_IOCTL_RKNPU_ACTION(self.fd_ctl, flags=rk.RKNPU_ACT_RESET, value=0)
     except OSError: pass
