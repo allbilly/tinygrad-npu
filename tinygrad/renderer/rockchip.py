@@ -343,18 +343,58 @@ def _gather_plan(src_index:int, dst_scratch:int, out_index:UOp, load_index:UOp, 
         return RKGather(src_index, dst_scratch, count, load_affine[0], tuple(axes))
   return RKGather(src_index, dst_scratch, count, offsets=_gather_offsets(out_index, load_index, gate, count), fill_bits=fill_bits)
 
-def _ew_leaf(u:UOp, out_index:UOp, count:int, oslot:int) -> RKArg|RKStatic|float|tuple[UOp, UOp, UOp|None, int]|None:
+def _selection_gather(u:UOp, out_index:UOp, count:int, oslot:int) -> RKGather|None:
+  """Collapse a static WHERE/ADD tree of mutually exclusive gated loads into raw gather offsets."""
+  if not any(x.op is Ops.WHERE or (x.op is Ops.LOAD and len(x.src) > 2) for x in u.toposort()): return None
+  out_ranges = _index_ranges(out_index)
+  src_slot:int|None = None
+  def selected(x:UOp, env:dict[UOp, int]) -> tuple[int, int]|None:
+    nonlocal src_slot
+    if x.op is Ops.CONST and x.dtype.scalar() is dtypes.half:
+      if float(x.arg) == 0.0: return None
+      raise ValueError
+    if x.op is Ops.CAST and x.dtype.scalar() is dtypes.half: return selected(x.src[0], env)
+    if x.op is Ops.WHERE:
+      if not _is_static_expr(x.src[0]): raise ValueError
+      return selected(x.src[1] if _eval_int(x.src[0], env) else x.src[2], env)
+    if x.op is Ops.ADD:
+      lhs, rhs = selected(x.src[0], env), selected(x.src[1], env)
+      if lhs is not None and rhs is not None: raise ValueError
+      return lhs if lhs is not None else rhs
+    if x.op is not Ops.LOAD or x.src[0].op is not Ops.INDEX or x.src[0].src[0].op is not Ops.PARAM: raise ValueError
+    param, index, gate = x.src[0].src[0], x.src[0].src[1], x.src[2] if len(x.src) > 2 else None
+    if (param.dtype.scalar() is not dtypes.half or param.arg.slot == oslot or param.src[0].op is not Ops.CONST or
+        any(r not in out_ranges for r in _index_ranges(index) + ([] if gate is None else _index_ranges(gate)))): raise ValueError
+    if gate is not None:
+      if not _is_static_expr(gate): raise ValueError
+      if not _eval_int(gate, env): return selected(x.src[1], env) if len(x.src) > 1 else None
+    if src_slot is not None and src_slot != param.arg.slot: raise ValueError
+    src_slot = param.arg.slot
+    return param.arg.slot, _eval_int(index, env)
+  offsets = [-2] * count
+  try:
+    for env in _iter_range_env(out_ranges):
+      dst, choice = _eval_int(out_index, env), selected(u, env)
+      if not 0 <= dst < count: raise ValueError
+      offset = -1 if choice is None else choice[1]
+      if offsets[dst] not in (-2, offset): raise ValueError
+      offsets[dst] = offset
+  except (RuntimeError, ValueError): return None
+  if src_slot is None or any(offset == -2 for offset in offsets): return None
+  return RKGather(src_slot, 0, count, offsets=tuple(offsets))
+
+def _ew_leaf(u:UOp, out_index:UOp, count:int, oslot:int) -> RKArg|RKStatic|RKGather|float|tuple[UOp, UOp, UOp|None, int]|None:
   if u.op is Ops.CONST and u.dtype.scalar() is dtypes.half: return float(u.arg)
   if u.dtype.scalar() is dtypes.half and _is_static_expr(u): return RKStatic(u)
   if u.op is Ops.CAST and u.dtype.scalar() is dtypes.half: return _ew_leaf(u.src[0], out_index, count, oslot)
   if u.op is Ops.LOAD and u.src[0].op is Ops.INDEX and u.src[0].src[0].op is Ops.PARAM:
     param, index, gate = u.src[0].src[0], u.src[0].src[1], u.src[2] if len(u.src) > 2 else None
-    if len(u.src) > 1 and u.src[1].op is not Ops.CONST: return None
+    if len(u.src) > 1 and u.src[1].op is not Ops.CONST: return _selection_gather(u, out_index, count, oslot)
     fill_bits = struct.unpack("<H", struct.pack("<e", float(u.src[1].arg) if len(u.src) > 1 else 0.0))[0]
     if param.dtype.scalar() is not dtypes.half or param.arg.slot == oslot or param.src[0].op is not Ops.CONST: return None
     if gate is None and index.key == out_index.key and int(param.src[0].arg) == count: return RKArg(RKBufferKind.ARG, param.arg.slot)
     return param, index, gate, fill_bits
-  return None
+  return _selection_gather(u, out_index, count, oslot) if u.dtype.scalar() is dtypes.half else None
 
 def _unsupported_ew_ops(uops:list[UOp], out_index:UOp, count:int, oslot:int, supported:dict) -> list[str]:
   bad:list[str] = []
@@ -531,19 +571,23 @@ def lower_ew(uops:list[UOp]) -> RKImage:
       ret = RKArg(RKBufferKind.SCRATCH, static_scratch[static])
     elif isinstance(leaf, RKArg): ret = leaf
     else:
-      param, index, gate, fill_bits = leaf
-      plan = _gather_plan(param.arg.slot, 0, out_index, index, gate, count, fill_bits)
+      if isinstance(leaf, RKGather): plan = leaf
+      else:
+        param, index, gate, fill_bits = leaf
+        plan = _gather_plan(param.arg.slot, 0, out_index, index, gate, count, fill_bits)
+      source = next((x for x in u.toposort() if x.op is Ops.PARAM and x.arg.slot == plan.src_index), None)
+      if source is None or source.src[0].op is not Ops.CONST: raise RuntimeError("RKPLAN_REJECT:gather_index")
       if plan.offsets: low, high = min(plan.offsets, default=0), max(plan.offsets, default=-1)
       else:
         low = high = plan.base
         for _, limit, stride in plan.axes:
           if stride < 0: low += (limit-1)*stride
           else: high += (limit-1)*stride
-      if low < -1 or high >= int(param.src[0].arg): raise RuntimeError("RKPLAN_REJECT:gather_index")
-      key = param.arg.slot, plan.count, plan.base, plan.axes, plan.offsets, plan.fill_bits
+      if low < -1 or high >= int(source.src[0].arg): raise RuntimeError("RKPLAN_REJECT:gather_index")
+      key = plan.src_index, plan.count, plan.base, plan.axes, plan.offsets, plan.fill_bits
       if key not in gather_scratch:
         gather_scratch[key] = scratch_count
-        gathers.append(RKGather(param.arg.slot, scratch_count, plan.count, plan.base, plan.axes, plan.offsets, plan.fill_bits))
+        gathers.append(RKGather(plan.src_index, scratch_count, plan.count, plan.base, plan.axes, plan.offsets, plan.fill_bits))
         scratch_count += 1
       ret = RKArg(RKBufferKind.SCRATCH, gather_scratch[key])
     leaves[u] = ret

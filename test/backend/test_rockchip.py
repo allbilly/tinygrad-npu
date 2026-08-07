@@ -154,6 +154,13 @@ class TestRockchip(unittest.TestCase):
     ref = torch.nn.functional.interpolate(torch.from_numpy(x.numpy()), size=(2,4,3), mode="trilinear").numpy()
     self._check(3, x.interpolate((2,4,3), mode="linear"), ref, **_FP16)
 
+  def test_padding_modes_submit(self):
+    xn = np.arange(125, dtype=np.float16).reshape(5,5,5)
+    for mode in ("reflect", "replicate", "circular"):
+      with self.subTest(mode=mode):
+        ref = torch.nn.functional.pad(torch.from_numpy(xn), (0,2), mode=mode).numpy()
+        self._check(1, Tensor(xn).pad((0,2), mode=mode), ref, **_FP16)
+
   # ---- GEMM / MATMUL (from test_ops, fp16 tol) ----
   def test_matmul_simple(self):
     helper_test_op([(4), (4,4)], lambda x,y: x.matmul(y), Tensor.dot, **_FP16)
@@ -421,6 +428,20 @@ class TestRockchipWhereOps(unittest.TestCase):
                   forward_only=True)
     _fp16_test_op([(32,10)], lambda x: x.masked_fill(x < .1, -math.inf), lambda x: x.masked_fill(x < .1, -math.inf),
                   forward_only=True)
+
+@unittest.skipUnless(Device.DEFAULT == "ROCKCHIP", "ROCKCHIP device only")
+class TestRockchipPaddingOps(unittest.TestCase):
+  """Constant, reflect, replicate, and circular padding modes from test_ops."""
+  helper_test_exception = _test_ops.TestOps.helper_test_exception
+
+  @classmethod
+  def setUpClass(cls): _test_ops.helper_test_op = _fp16_test_op
+
+  @classmethod
+  def tearDownClass(cls): _test_ops.helper_test_op = _TEST_OPS_HELPER
+
+for _name in ("test_pad", "test_pad_reflect_mode", "test_pad_replicate_mode", "test_pad_circular_mode"):
+  setattr(TestRockchipPaddingOps, _name, getattr(_test_ops.TestOps, _name))
 
 if __name__ == "__main__":
   unittest.main()

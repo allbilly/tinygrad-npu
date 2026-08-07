@@ -644,3 +644,34 @@ Verification with `FORWARD_ONLY=1 DEFAULT_FLOAT=HALF DEV=ROCKCHIP ROCKCHIP_EW_RE
 - `sz.py`: renderer 659 executable lines, runtime 180; comments and docstrings retained.
 - Tolerances remain exactly the existing FP16 ceiling (`atol=rtol=grad_atol=grad_rtol=5e-3`).
 - No CPU floating-point tensor arithmetic, CMAC, CNA, or PPU execution path was added.
+
+---
+
+## 2026-08-07 — Group 4: FP16 padding modes through gather + DPU EW
+
+All constant, reflect, replicate, and circular padding cases mirrored from `test/backend/test_ops.py` now pass at the unchanged
+`test_gemm_fp16` tolerance (`atol=rtol=grad_atol=grad_rtol=5e-3`). This covers positive and negative padding, finite and infinite
+constant fills, 1D/2D/3D reflect and replicate layouts, circular wrapping, and the original invalid-argument checks.
+
+Reflect and replicate edges are represented by tinygrad as chains of gated loads whose fallback is another load. The renderer now
+proves these predicates and indexes from static output geometry and collapses each mutually exclusive load tree into one raw gather
+map. Runtime preparation remains an integer address selection and `uint16` copy. A final DPU EW add-zero pass-through realizes the
+output on the NPU; input values are never examined or arithmetically transformed by the host.
+
+Direct realization of the focused `(5,5,5)` / `(0,2)` cases:
+
+| Mode | Wall time | NPU submits | Maximum absolute error |
+|---|---:|---:|---:|
+| reflect | 0.227 s | 1 | 0 |
+| replicate | 0.046 s | 1 | 0 |
+| circular | 0.038 s | 1 | 0 |
+
+Verification with `FORWARD_ONLY=1 DEFAULT_FLOAT=HALF DEV=ROCKCHIP ROCKCHIP_EW_REDUCE=twoproduct`:
+
+- Padding census: **4 passed** in 14.74 s with `-n12`; the four methods execute 32 numeric helper cases plus their exception checks.
+- Focused submit regression: **1 passed, 3 subtests passed**; each mode submits exactly once.
+- Complete Rockchip census: **145 passed, 9 skipped, 99 subtests passed in 366.76 s** with `-n12`.
+- Full Ruff: pass.
+- `mypy tinygrad/`: pass (216 source files).
+- `sz.py`: renderer 701 executable lines, runtime 180; comments and docstrings retained.
+- No host floating-point tensor arithmetic, tolerance relaxation, CMAC, CNA, or PPU execution was added.
