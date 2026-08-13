@@ -3754,7 +3754,7 @@ Verification:
 ### 167. Keep large MAX on the mapped reduce loop — WIP checkpoint
 
 - Compile-only profiling after 166, without opening `/dev/dri`, ranked 512-element `cummin` indices as the slowest
-  remaining family: 8.84 s, 5,623+6,157 linearized UOps. The mapped-MAX specializer already compact the image (598 EW),
+  remaining family: 8.84 s, 5,623+6,157 linearized UOps. The mapped-MAX specializer already compacted the image (598 EW),
   but rewrite still expanded the fully unrolled 512-term MAX tree. `std_mean` now succeeds (4.26 s) via mapped-add of
   13,125 lanes; it is no longer a reject.
 - The Rockchip heuristic now skips unroll for ADD and MAX whose reduce-axis product exceeds 64. Small MAX still unrolls:
@@ -3777,3 +3777,22 @@ Verification:
 - `ALLOW_DEVICE_USAGE=0 DEV=NPY .venv/bin/python -m pytest test/backend/test_rockchip.py --collect-only -q`: 445 tests collected.
 - `git diff --check`: pass.
 - Hardware execution remains pending the required manual power cycle; no all-445 pass is claimed.
+
+### 168. First 445 hardware replay after NPU health check
+
+- Vendor `~/rk3588/examples/elementwise.py` passed. The census ran serially with `-n0`.
+- First 295 methods: 272 passed, 11 skipped, 12 failed. `test_all_large` aborted in `reset_npu` (`ioctl`, exit 134).
+  After another green elementwise probe, the remaining 149 methods excluding `test_all_large`: 143 passed, 1 skipped,
+  5 failed. Elementwise health was green again after that batch.
+- Observed: **415 passed, 12 skipped, 17 failed, 1 aborted**. Not an all-445 pass.
+- Weighted NLL and `std_mean` now compile through mapped-add but fail at runtime with unbound RKImage argument slots.
+  Fancy indexing still rejects. `test_all_large` is an NPU reset abort, not a numeric mismatch.
+
+Verification:
+
+- `FORWARD_ONLY=1 DEFAULT_FLOAT=HALF DEV=ROCKCHIP .venv/bin/python -m pytest test/backend/test_rockchip.py -q -n0`:
+  aborted in `test_all_large` after 295 methods.
+- Remaining 149 excluding `test_all_large`: 143 passed, 1 skipped, 5 failed.
+- Combined: 415 passed / 12 skipped / 17 failed / 1 aborted.
+- `.venv/bin/python ~/rk3588/examples/elementwise.py`: pass before the suite, after the abort, and after the remainder.
+- No all-445 pass is claimed.

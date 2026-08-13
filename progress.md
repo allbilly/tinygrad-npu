@@ -5862,3 +5862,28 @@ used.
 Renderer size is **3,564** (down 22); `heuristic.py` remains **142**; total tree size is **29,139**. This is a
 performance WIP, not the 3,400-line checkpoint or an all-445 hardware-pass claim. Hardware execution remains pending
 the required manual power cycle.
+
+## 2026-08-13 — first 445 hardware replay after NPU health check
+
+Vendor `~/rk3588/examples/elementwise.py` passed, then the census ran serially:
+
+`FORWARD_ONLY=1 DEFAULT_FLOAT=HALF DEV=ROCKCHIP .venv/bin/python -m pytest test/backend/test_rockchip.py -q -n0`
+
+The first 295 methods produced 272 passes, 11 skips, and 12 failures. `test_all_large` then aborted Python in
+`reset_npu` (`ioctl`, exit 134). After a second green elementwise probe, the remaining 149 methods excluding
+`test_all_large` produced 143 passes, 1 skip, and 5 failures. NPU health was green again afterward.
+
+Observed census: **415 passed, 12 skipped, 17 failed, 1 aborted** (445 collected). This is not an all-445 pass.
+
+Failures:
+
+- Fancy indexing (6): `RKPLAN_REJECT:generic_uops` on bool-gated INT32 gathers.
+- `test_softmax_argmax`, `test_acosh`, `test_asinh`: `eval with wrong dtype` in symbolic.
+- `test_cross_entropy_reductions`: numeric, 4.152 vs 4.11.
+- `test_nll_loss_weight`, `test_nll_loss_3d_weight`: `RKImage argument slot 6 is not bound`.
+- `test_std_mean`: `RKImage argument slot 3 is not bound`.
+- `test_sum_dtype_arg`: `RKPLAN_REJECT` on a float local ADD loop.
+- `test_sum_full`: submit-count assert `342 != 1`.
+- `test_where_permute`: submit-count assert `6 != 4`.
+- `test_relu6`: numeric, about half the (45,65) lanes stayed 0.
+- `test_all_large`: process abort in `reset_npu`, not a pytest failure.
