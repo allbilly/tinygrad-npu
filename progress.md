@@ -5846,3 +5846,19 @@ the existing polynomials and generic pooling UOps.
 Renderer size is **3,586** (down 9); `heuristic.py` is **142** (down 2); total tree size is **29,161**. This is a
 performance WIP, not the 3,400-line checkpoint or an all-445 hardware-pass claim. Hardware execution remains pending
 the required manual power cycle.
+
+## 2026-08-13 — keep large MAX on the mapped reduce loop
+
+Compile-only profiling after the weighted-NLL checkpoint ranked 512-element `cummin` indices as the slowest remaining
+family: 8.84 s from rewriting 5,623+6,157 unrolled MAX UOps. The image was already compact (598 EW); the cost was the
+unroll. `std_mean` now compiles successfully in 4.26 s through mapped-add of 13,125 lanes.
+
+Rockchip MAX reductions whose axis product exceeds 64 now stay a REDUCE, matching ADD. The existing mapped-MAX
+specializer's local-loop path lowers 512-element prefix extrema: 48 UOps and 1.25 s for `cummin` indices, 0.63 s for
+`cummax`. 32-element max and 2×2 pool still unroll. Exact cumulative-index hashes are updated to those loop-mapped
+native images. The 1,022-term synthetic scalar-local image and cos/tan hashes stay byte-identical. LUT/PPU were not
+used.
+
+Renderer size is **3,564** (down 22); `heuristic.py` remains **142**; total tree size is **29,139**. This is a
+performance WIP, not the 3,400-line checkpoint or an all-445 hardware-pass claim. Hardware execution remains pending
+the required manual power cycle.

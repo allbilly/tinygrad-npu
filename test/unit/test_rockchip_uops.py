@@ -227,15 +227,16 @@ def _physical_ew_tasks(image:RKImage) -> int:
     return ceildiv(op.count, _MAX_EW_ELEMS_FP16)
   return sum(map(count, image.ew_ops))
 
-def _cumulative_index_image(kind:str) -> RKImage:
-  source = Tensor.empty(512, dtype=dtypes.half, device="ROCKCHIP")
+def _cumulative_index_image(kind:str) -> tuple[list[UOp], RKImage, bytes]:
+  source = Tensor.empty(512, dtype=dtypes.half)
   _,indices = getattr(source, kind)(0)
   renderer = RockchipRenderer(Target("ROCKCHIP"))
   for call in indices.schedule_linear().src:
     if not call.src or call.src[0].op is not Ops.SINK: continue
     uops = line_rewrite(linearize(full_rewrite_to_sink(call.src[0], renderer)), pm_linearize_cleanups)
     if _output_store(uops, dtypes.int, allow_local=True) is not None:
-      return decode_image(base64.b64decode(renderer.render(uops)))
+      binary = base64.b64decode(renderer.render(uops))
+      return uops, decode_image(binary), binary
   raise AssertionError("cumulative index kernel not found")
 
 def _scalar_half_kernel(tensor:Tensor) -> tuple[list[UOp], RKImage, bytes]:
@@ -1460,12 +1461,12 @@ def test_mean_512_keeps_mapped_reduce_loop():
 
 def test_expanded_cumulative_indices_use_exact_compact_native_images():
   expected = {
-    "cummin":(50_640, "7ea956a31fc7f18885c0e3a87a4fa717fe72214391ec9b70f811ac740d04442e", 598, 1_033),
-    "cummax":(50_600, "d17f7515518f0ec5114fffab8f7aed445e1d921e9155ecf1326b5141e1e2c9d4", 597, 1_028),
+    "cummin":(50_554, "cf14491dc69ea5fe36119e57bacec9704d49bc1d9c721d0790cf220ffebf65bb", 596, 1_023),
+    "cummax":(50_514, "0b2ddc250e377444f48a3533ebec6399d216bafe7fc31d26f7d0e12f1555de66", 595, 1_018),
   }
   for kind,(size,digest,stages,tasks) in expected.items():
-    image = _cumulative_index_image(kind)
-    raw = encode_image(image)
+    uops, image, raw = _cumulative_index_image(kind)
+    assert _lower_mapped_scalar_local_reduction(uops) is not None and len(uops) < 80
     assert image.execution_class is RKExecutionClass.NATIVE and not image.host_gathers and not image.host_scatters
     assert (len(raw), hashlib.sha256(raw).hexdigest(), len(image.ew_ops), len(image.gathers), len(image.mid_gathers),
             _physical_ew_tasks(image)) == (size, digest, stages, 10, 512, tasks)

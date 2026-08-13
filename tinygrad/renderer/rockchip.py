@@ -1862,25 +1862,23 @@ def _fp32_expr_to_half(u:UOp) -> UOp:
   """Represent a float ADD/MUL expression with a three-half expansion at its FP16 storage boundary."""
   if u.dtype.scalar() is dtypes.half: return u
   if u.dtype.scalar() is not dtypes.float: raise _RKGenericReject
-  if u.op is Ops.CAST and len(u.src) == 1 and u.src[0].dtype.scalar() is dtypes.half: return u.src[0]
-  if u.op is Ops.CAST and len(u.src) == 1 and u.src[0].dtype.scalar() in (dtypes.int, dtypes.int16, dtypes.bool):
-    return u.src[0].cast(dtypes.half)
+  src_dt = u.src[0].dtype.scalar() if u.op is Ops.CAST and len(u.src) == 1 else None
+  if src_dt is dtypes.half: return u.src[0]
+  if src_dt in (dtypes.int, dtypes.int16, dtypes.bool): return u.src[0].cast(dtypes.half)
   if u.op is Ops.LOAD: return u.cast(dtypes.half)
   if u.op is Ops.CONST: return UOp.const(float(u.arg), dtypes.half)
   if _is_static_expr(u): return u.cast(dtypes.half)
   if u.op in (Ops.EXP2, Ops.LOG2, Ops.SQRT, Ops.SIN, Ops.NEG) and len(u.src) == 1:
     return UOp(u.op, dtypes.half, src=(_fp32_expr_to_half(u.src[0]),), arg=u.arg)
-  if u.op in (Ops.MUL, Ops.SUB, Ops.MAX) and len(u.src) == 2:
+  if (u.op in (Ops.MUL, Ops.SUB, Ops.MAX) and len(u.src) == 2) or (u.op is Ops.ADD and any(
+      node.op is Ops.CONST and node.dtype.scalar() in (dtypes.half, dtypes.float) and not math.isfinite(float(node.arg))
+      for node in u.toposort())):
     return UOp(u.op, dtypes.half, src=tuple(_fp32_expr_to_half(src) for src in u.src), arg=u.arg)
   if u.op is Ops.WHERE and len(u.src) == 3:
     return UOp(Ops.WHERE, dtypes.half, src=(u.src[0], _fp32_expr_to_half(u.src[1]), _fp32_expr_to_half(u.src[2])), arg=u.arg)
   if u.op is Ops.TRUNC and len(u.src) == 1:
     return _fold_trunc(UOp(Ops.TRUNC, dtypes.half, src=(_fp32_expr_to_half(u.src[0]),)))
-  if u.op is Ops.ADD:
-    if any(node.op is Ops.CONST and node.dtype.scalar() in (dtypes.half, dtypes.float) and
-           not math.isfinite(float(node.arg)) for node in u.toposort()):
-      return UOp(Ops.ADD, dtypes.half, src=tuple(_fp32_expr_to_half(src) for src in u.src), arg=u.arg)
-    return _precise_mul_sum(_fp32_add_terms(u))
+  if u.op is Ops.ADD: return _precise_mul_sum(_fp32_add_terms(u))
   raise _RKGenericReject(f"FP32 storage {u.op.name}")
 
 def _nested_fp32_storage_cast(x:UOp) -> UOp|None:
@@ -2273,18 +2271,11 @@ class RKContext:
       self._emit(negative_mask, negative, negative, _EW_CFG[Ops.MAX], compare=True)
       self._emit(positive_mask, lhs, lhs, _EW_CFG[Ops.MAX], compare=True)
       return self._emit(self._dst(u, dtypes.half, RKLayout.FP16), positive_mask, negative_mask, _EW_CFG[Ops.SUB])
-    if u.op is Ops.MAX and u.arg == _NATIVE_MIN:
-      if expected is RKLayout.FP16: return self._native_min(u, lhs, rhs)
-      dst = self._dst(u, dtype, RKLayout.INT16)
-      return self._emit(dst, lhs, rhs, _EW_CFG_MIN)
-    if u.op is Ops.MAX and u.arg == _NATIVE_RAW_MIN:
-      dst = self._dst(u, dtype, expected)
-      return self._emit(dst, lhs, rhs, _EW_CFG_MIN)
-    cfg = _EW_CFG_ABS if u.op is Ops.MAX and u.arg == _NATIVE_ABS else \
-      _EW_CFG_FLOOR if u.op is Ops.MAX and u.arg == _NATIVE_FLOOR else \
-      _EW_CFG_CEIL if u.op is Ops.MAX and u.arg == _NATIVE_CEIL else \
-      _EW_CFG_RELU6 if u.op is Ops.MAX and u.arg == _NATIVE_RELU6 else \
-      _EW_CFG_LEAKY_RELU if u.op is Ops.MUL and u.arg == _NATIVE_LEAKY_RELU else _EW_CFG[u.op]
+    if u.op is Ops.MAX and u.arg in (_NATIVE_MIN, _NATIVE_RAW_MIN):
+      if expected is RKLayout.FP16 and u.arg == _NATIVE_MIN: return self._native_min(u, lhs, rhs)
+      return self._emit(self._dst(u, dtype, RKLayout.INT16 if u.arg == _NATIVE_MIN else expected), lhs, rhs, _EW_CFG_MIN)
+    cfg = {(Ops.MAX, _NATIVE_ABS):_EW_CFG_ABS, (Ops.MAX, _NATIVE_FLOOR):_EW_CFG_FLOOR, (Ops.MAX, _NATIVE_CEIL):_EW_CFG_CEIL,
+           (Ops.MAX, _NATIVE_RELU6):_EW_CFG_RELU6, (Ops.MUL, _NATIVE_LEAKY_RELU):_EW_CFG_LEAKY_RELU}.get((u.op, u.arg), _EW_CFG[u.op])
     compare = u.op is Ops.MAX and u.arg == _NATIVE_POSITIVE_MASK
     layout = RKLayout.BOOL_MASK if compare else expected
     out_dtype = dtypes.bool if compare else dtype
@@ -2439,17 +2430,13 @@ class RKContext:
     if shift is not None and shift.layout is not RKLayout.INT32: raise _RKGenericReject
     shift_part = None if shift is None else self._raw_parts(shift)[0]
     raw_after = len(self.ew_ops)
-    for byte,part in enumerate(value_parts):
-      self.mid_gathers.append(RKGather(part.arg.index, raw.index, self.count, base=part.arg.addend//2,
-        axes=((1, self.count, 1),), dst_addend=byte*vector_lanes,
-        src_kind=part.arg.kind, after=raw_after))
+    packed = (*value_parts, *((shift_part,) if shift_part is not None else ()))
+    self.mid_gathers.extend(RKGather(part.arg.index, raw.index, self.count, base=part.arg.addend//2,
+      axes=((1, self.count, 1),), dst_addend=byte*vector_lanes, src_kind=part.arg.kind, after=raw_after)
+      for byte,part in enumerate(packed))
     if shift_part is None:
       self.mid_gathers.append(RKGather(self.out_param.arg.slot, raw.index, self.count,
         values=(int(u.src[1].arg)&0xff,)*self.count, dst_addend=4*vector_lanes, after=raw_after))
-    else:
-      self.mid_gathers.append(RKGather(shift_part.arg.index, raw.index, self.count, base=shift_part.arg.addend//2,
-        axes=((1, self.count, 1),), dst_addend=4*vector_lanes,
-        src_kind=shift_part.arg.kind, after=raw_after))
     constants = {number:pre_allocate() for number in (0, 1, 2, 3, 4, 7, 8, 15, 16, 31, 32, 63, 64, 127, 128)}
     for number,dst in constants.items():
       self.gathers.append(RKGather(self.out_param.arg.slot, dst.index, pre_lanes,
@@ -2850,12 +2837,11 @@ class RKContext:
       value = self._static(u)
     elif u.op is Ops.LOAD: value = self._load(u)
     elif u.op is Ops.BITCAST and len(u.src) == 1:
-      source = self.lower(u.src[0])
-      if dtype is dtypes.int16 and u.src[0].dtype.scalar() is dtypes.half and source.layout is RKLayout.FP16:
-        value = RKValue(source.arg, dtype, self.count, RKLayout.INT16)
-      elif dtype is dtypes.half and u.src[0].dtype.scalar() is dtypes.int16 and source.layout is RKLayout.INT16:
-        value = RKValue(source.arg, dtype, self.count, RKLayout.FP16)
-      else: raise _RKGenericReject(f"bitcast {u.src[0].dtype.scalar()}->{dtype}")
+      source, src_dt = self.lower(u.src[0]), u.src[0].dtype.scalar()
+      if dtype is dtypes.int16 and src_dt is dtypes.half and source.layout is RKLayout.FP16: layout = RKLayout.INT16
+      elif dtype is dtypes.half and src_dt is dtypes.int16 and source.layout is RKLayout.INT16: layout = RKLayout.FP16
+      else: raise _RKGenericReject(f"bitcast {src_dt}->{dtype}")
+      value = RKValue(source.arg, dtype, self.count, layout)
       if u is self.root and value.arg != self.out:
         self.mid_gathers.append(RKGather(value.arg.index, self.out_param.arg.slot, self.count,
           base=value.arg.addend//2, axes=((1, self.count, 1),), dst_kind=RKBufferKind.ARG,
@@ -2896,16 +2882,15 @@ class RKContext:
         value = RKValue(source.arg, dtype, self.count, RKLayout.INT16)
       elif dtype is dtypes.int and source.layout in (RKLayout.FP16, RKLayout.BOOL_MASK):
         if self.int_layout is RKLayout.INT_FP16:
-          if source.layout is RKLayout.BOOL_MASK: value = RKValue(source.arg, dtype, self.count, self.int_layout)
-          else:
-            value = RKValue(self.lower(_int_fp16_expr(u)).arg, dtype, self.count, self.int_layout)
+          value = RKValue(source.arg if source.layout is RKLayout.BOOL_MASK else self.lower(_int_fp16_expr(u)).arg,
+                          dtype, self.count, self.int_layout)
         elif self.int_layout is RKLayout.INT16:
           value = self._scratch(dtype, self.int_layout)
           self.ew_ops.append(RKEWOp(value.arg, source.arg, source.arg, self.count, _EW_CFG[Ops.MAX], stateful=True, int16_output=True))
         else: raise _RKGenericReject
-      elif dtype is dtypes.int and source_dtype is dtypes.uint and source.layout is RKLayout.INT32:
-        value = RKValue(source.arg, dtype, self.count, source.layout)
-      elif dtype is dtypes.int: value = self._widen_int16(u, source)
+      elif dtype is dtypes.int:
+        value = RKValue(source.arg, dtype, self.count, source.layout) if source_dtype is dtypes.uint and source.layout is RKLayout.INT32 \
+          else self._widen_int16(u, source)
       else: raise _RKGenericReject(f"cast {source.layout.name}->{dtype}")
     elif u.op is Ops.ADD and dtype is dtypes.half and u.arg is None and self.accurate_adds:
       try: value = self.lower(_accurate_add_recipe(u))
@@ -2943,18 +2928,17 @@ class RKContext:
       self.accurate_adds = accurate_adds
     result = self.lower(self.root)
     dtype = self.out_param.dtype.scalar()
-    if dtype is dtypes.half and result.layout in (RKLayout.FP16, RKLayout.BOOL_MASK, RKLayout.INT_FP16):
-      if result.arg != self.out: self._emit(RKValue(self.out, dtype, self.count, RKLayout.FP16), result, result, _EW_CFG[Ops.MAX])
-    elif dtype is dtypes.int16 and result.layout is RKLayout.INT16:
-      if result.arg != self.out: self._emit(RKValue(self.out, dtype, self.count, RKLayout.INT16), result, result, _EW_CFG[Ops.MAX])
-    elif dtype is dtypes.uchar and result.layout is RKLayout.INT16:
+    if (dtype is dtypes.half and result.layout in (RKLayout.FP16, RKLayout.BOOL_MASK, RKLayout.INT_FP16) or
+        dtype is dtypes.int16 and result.layout is RKLayout.INT16):
+      if result.arg != self.out:
+        self._emit(RKValue(self.out, dtype, self.count, RKLayout.INT16 if dtype is dtypes.int16 else RKLayout.FP16),
+                   result, result, _EW_CFG[Ops.MAX])
+    elif dtype is dtypes.uchar and result.layout is RKLayout.INT16 or dtype is dtypes.bool and result.layout is RKLayout.BOOL_INT16:
       self.mid_gathers.append(_int16_low_bytes(result.arg, self.out_param.arg.slot, self.count))
     elif dtype is dtypes.bool and result.layout is RKLayout.BOOL_MASK:
       tiles = self._scratch(dtypes.int, RKLayout.INT32, _int32_tiles_bytes(self.count))
       self.ew_ops.append(RKEWOp(self.out, result.arg, tiles.arg, self.count, _EW_CFG[Ops.MAX],
         stateful=True, int32_output=True, bool_output=True))
-    elif dtype is dtypes.bool and result.layout is RKLayout.BOOL_INT16:
-      self.mid_gathers.append(_int16_low_bytes(result.arg, self.out_param.arg.slot, self.count))
     elif dtype is dtypes.int and result.layout is RKLayout.INT32:
       if result.arg != self.out:
         self.mid_gathers.append(RKGather(result.arg.index, self.out_param.arg.slot, self.count,
@@ -3015,14 +2999,10 @@ def _expand_math_uops(root:UOp, nodes:dict[UOp, None], *, accurate_adds:bool=Tru
   def rewrite(u:UOp) -> UOp:
     if u in cache: return cache[u]
     if (src:=_half_storage(u)) is not None:
-      mapped = rewrite(physical_recipe(_dpu_sin(src.src[0]), (src.src[0],))) if src.op is Ops.SIN else _canonical_half_storage(src)
-      cache[u] = mapped
-      return mapped
+      cache[u] = rewrite(physical_recipe(_dpu_sin(src.src[0]), (src.src[0],))) if src.op is Ops.SIN else _canonical_half_storage(src)
+      return cache[u]
     if accurate_adds and bounded_recipes and u.op is Ops.ADD and u.dtype.scalar() is dtypes.half and u.arg is None:
-      try:
-        mapped = _accurate_add_recipe(u)
-        cache[u] = mapped
-        return mapped
+      try: cache[u] = _accurate_add_recipe(u); return cache[u]
       except _RKGenericReject: pass
     mapped = u.replace(src=tuple(rewrite(src) for src in u.src))
     if mapped.op is Ops.WHERE and (absolute:=_fold_where_abs(mapped)) is not None: mapped = rewrite(absolute)
@@ -3817,10 +3797,8 @@ def _dpu_sin(source:UOp) -> UOp:
         if (low:=float(u.arg)-high) != 0.0: residuals.append(UOp.const(low, dtypes.half))
       else: terms.append(_fp32_expr_to_half(u))
     reduced_parts = [_dpu_periodic_reduce_parts(term, 1/(2*math.pi), period_split, math.pi) for term in terms]
-    reduced_terms = [part[0] for part in reduced_parts]
-    residuals.extend(part[1] for part in reduced_parts)
-    reduced, addition_residual = _precise_sum_parts(reduced_terms)
-    residuals.append(addition_residual)
+    reduced_terms, extra = zip(*reduced_parts); residuals.extend(extra)
+    reduced, addition_residual = _precise_sum_parts(list(reduced_terms)); residuals.append(addition_residual)
     for _ in range(3):
       correction = _positive_mask(reduced.alu(Ops.SUB, UOp.const(math.pi, dtypes.half))).alu(
         Ops.SUB, _positive_mask(UOp.const(-math.pi, dtypes.half).alu(Ops.SUB, reduced)))

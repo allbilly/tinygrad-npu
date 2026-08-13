@@ -3750,3 +3750,30 @@ Verification:
 - `ALLOW_DEVICE_USAGE=0 DEV=NPY .venv/bin/python -m pytest test/backend/test_rockchip.py --collect-only -q`: 445 tests collected.
 - `git diff --check`: pass.
 - Hardware execution remains pending the required manual power cycle; no all-445 pass is claimed.
+
+### 167. Keep large MAX on the mapped reduce loop — WIP checkpoint
+
+- Compile-only profiling after 166, without opening `/dev/dri`, ranked 512-element `cummin` indices as the slowest
+  remaining family: 8.84 s, 5,623+6,157 linearized UOps. The mapped-MAX specializer already compact the image (598 EW),
+  but rewrite still expanded the fully unrolled 512-term MAX tree. `std_mean` now succeeds (4.26 s) via mapped-add of
+  13,125 lanes; it is no longer a reject.
+- The Rockchip heuristic now skips unroll for ADD and MAX whose reduce-axis product exceeds 64. Small MAX still unrolls:
+  32-element max, 2×2 pool. The existing local-loop branch of `_mapped_max_descriptor` owns 512-element prefix extrema.
+- Compile-only `cummin` indices: 8.84 s → 1.25 s, 48 UOps, 596 EW stages. `cummax` indices: 7.87 s → 0.63 s. The 1,022-term
+  synthetic scalar-local image and cos/tan hashes stay byte-identical. Cumulative-index exact images are updated to the
+  loop-mapped native forms and the helper no longer constructs `device="ROCKCHIP"` tensors.
+- Renderer compaction is incidental (`finish` copy-out, `_fp32_expr_to_half`, `_int32_shift` gathers, `_alu` native cfg).
+  LUT/PPU were not adopted; they add encoder surface versus existing polynomials and generic pooling UOps.
+- Renderer executable size **3,586 → 3,564**; `heuristic.py` remains **142**; total production size **29,161 → 29,139**.
+  This is a performance WIP, not the 3,400-line cleanup milestone.
+
+Verification:
+
+- `.venv/bin/python -m pytest test/unit/test_rockchip_uops.py -x -q -n0`: 142 passed.
+- Exact 512-element cummin/cummax images: 50,554/50,514 bytes, 596/595 EW, mapped-max loop, <80 UOps.
+- 1,022-term scalar-local and cos/tan images: byte-identical to the previous checkpoint.
+- `.venv/bin/python -m ruff check .`: pass.
+- `.venv/bin/python -m mypy tinygrad/`: 216 source files passed.
+- `ALLOW_DEVICE_USAGE=0 DEV=NPY .venv/bin/python -m pytest test/backend/test_rockchip.py --collect-only -q`: 445 tests collected.
+- `git diff --check`: pass.
+- Hardware execution remains pending the required manual power cycle; no all-445 pass is claimed.

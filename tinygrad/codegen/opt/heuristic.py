@@ -141,11 +141,11 @@ def hand_coded_optimizations(k:Scheduler) -> Scheduler:
 
   # if last reduce dim is small(ish), loop unroll the reduce
   # NOTE: this can fail on multireduce with mismatching dimensions, this is okay
-  # ROCKCHIP DPU EW has no reduce loop. ADD reductions whose axis product exceeds 64 stay a REDUCE so the
-  # mapped-add specializer owns large sums/means. Other reductions, including 512-element MAX, still unroll.
+  # ROCKCHIP DPU EW has no reduce loop. ADD/MAX reductions whose axis product exceeds 64 stay a REDUCE so
+  # mapped specializers own large sums and prefix extrema. Small MAX, including 5x5 pools, still unrolls.
   try:
     if is_rockchip:
-      if not (k.reduceop is not None and k.reduceop.arg[0] is Ops.ADD and
+      if not (k.reduceop is not None and k.reduceop.arg[0] in (Ops.ADD, Ops.MAX) and
               prod(k.full_shape[axis] for axis in k.unrollable_dims) > 64):
         while k.unrollable_dims:
           s = k.full_shape[k.unrollable_dims[-1]]
