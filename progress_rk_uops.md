@@ -3721,3 +3721,32 @@ Verification:
 - `ALLOW_DEVICE_USAGE=0 DEV=NPY .venv/bin/python -m pytest test/backend/test_rockchip.py --collect-only -q`: 445 tests collected.
 - `git diff --check`: pass.
 - Hardware execution remains pending the required manual power cycle; no all-445 pass is claimed.
+
+### 166. Map large ADD reduces and weighted NLL FDIV — WIP checkpoint
+
+- Compile-only profiling after 165, without opening `/dev/dri`, ranked `std_mean` k1 reject (~10 s), 512-element
+  cummin rewrite (~8.8 s), and `test_nll_loss_3d_weight` as the slowest successful family: 4.8 s, 83 UOps after the
+  product>512 skip, but generic lowering still expanded 16×27=432 gathers into 82,952 EW stages and 432 host gathers.
+  512-element mean/sum were 2.1–2.4 s on fully unrolled ADD trees.
+- The Rockchip heuristic now skips unroll for every ADD whose reduce-axis product exceeds 64. MAX keeps the per-axis
+  `else 32` path, so 512-element cummin/cummax images stay byte-identical. 5×5 average pool (25) and 2D NLL (32) still
+  unroll.
+- `_lower_mapped_add_loop_reduction` now maps each local ADD on its own index ranges, including FDIV of two locals.
+  Range cleaning drops END/AFTER parents so a trailing 432-weight sum is not flattened as 16×27×432. CAST-wrapped
+  `sum*1/n` peels to `post_scale`. `_append_inplace_image` preserves the first image's host gathers.
+- Weighted 3D NLL compile-only: 0.78 s, 987 EW stages, one host gather. Mean-512: 0.07 s, 512 EW. Sum-512: 0.04 s.
+  Unweighted 3D NLL remains mapped (554 EW, one host gather). Horner/`_half_storage` helpers recover some renderer
+  lines. LUT/PPU were not adopted; they add encoder surface.
+- Renderer executable size **3,595 → 3,586**; `heuristic.py` **144 → 142**; total production size **29,172 → 29,161**.
+  This is a performance WIP, not the 3,400-line cleanup milestone.
+
+Verification:
+
+- `.venv/bin/python -m pytest test/unit/test_rockchip_uops.py -x -q -n12`: 142 passed.
+- `test_nll_loss_3d_weight_keeps_mapped_reduce_loop` and `test_mean_512_keeps_mapped_reduce_loop`.
+- Exact 512-element cummin/cummax and cos/tan images: byte-identical to the previous checkpoint.
+- `.venv/bin/python -m ruff check .`: pass.
+- `.venv/bin/python -m mypy tinygrad/`: 216 source files passed.
+- `ALLOW_DEVICE_USAGE=0 DEV=NPY .venv/bin/python -m pytest test/backend/test_rockchip.py --collect-only -q`: 445 tests collected.
+- `git diff --check`: pass.
+- Hardware execution remains pending the required manual power cycle; no all-445 pass is claimed.

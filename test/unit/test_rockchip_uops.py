@@ -1443,6 +1443,21 @@ def test_nll_loss_3d_mean_keeps_mapped_reduce_loop():
   assert len(image.host_gathers) <= 1 and not image.host_scatters
   assert decode_image(raw) == image
 
+def test_nll_loss_3d_weight_keeps_mapped_reduce_loop():
+  logits = Tensor.empty(16, 10, 3, 3, 3, dtype=dtypes.half)
+  target = Tensor.empty(16, 3, 3, 3, dtype=dtypes.int)
+  weight = Tensor.empty(10, dtype=dtypes.half)
+  uops, image, raw = _scalar_half_kernel(logits.log_softmax(axis=1).nll_loss(target, weight))
+  assert _lower_mapped_add_loop_reduction(uops) is not None
+  assert len(uops) < 200 and len(image.ew_ops) < 4000 and len(image.host_gathers) <= 1
+  assert decode_image(raw) == image
+
+def test_mean_512_keeps_mapped_reduce_loop():
+  uops, image, raw = _scalar_half_kernel(Tensor.empty(512, dtype=dtypes.half).mean())
+  assert _lower_mapped_add_loop_reduction(uops) is not None
+  assert len(uops) < 80 and not image.host_gathers and not image.host_scatters
+  assert decode_image(raw) == image
+
 def test_expanded_cumulative_indices_use_exact_compact_native_images():
   expected = {
     "cummin":(50_640, "7ea956a31fc7f18885c0e3a87a4fa717fe72214391ec9b70f811ac740d04442e", 598, 1_033),

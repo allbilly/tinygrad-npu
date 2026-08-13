@@ -875,10 +875,11 @@ def _append_inplace_image(first:RKImage, second:RKImage) -> RKImage|None:
   scratch = (first.scratch[:first_constants] + second.scratch[:second_constants] + first.scratch[first_constants:] +
              second.scratch[second_constants:])
   return RKImage(scratch, first.constants+second.constants,
-                 gathers=first.gathers, ew_ops=first_ops+tuple(second_ops), mid_gathers=first.mid_gathers+second_mid)
+                 gathers=first.gathers, ew_ops=first_ops+tuple(second_ops), mid_gathers=first.mid_gathers+second_mid,
+                 host_gathers=first.host_gathers, host_scatters=first.host_scatters)
 
 def _lower_mapped_add_loop_reduction(uops:list[UOp]) -> RKImage|None:
-  """Evaluate one fused FP16 map over the whole reduction domain, then reduce its materialized lanes."""
+  """Evaluate fused FP16 maps over each local ADD reduction, then reduce the materialized lanes."""
   if (output:=_output_store(uops, dtypes.half, allow_local=True)) is None: return None
   store, out, rows, out_index, root = output
   out_ranges = _index_ranges(out_index)
@@ -888,50 +889,59 @@ def _lower_mapped_add_loop_reduction(uops:list[UOp]) -> RKImage|None:
   except RuntimeError: return None
   if len(envs) != rows or any(int(_eval_expr(out_index, typing_cast(dict[UOp,_StaticValue], env), {})) != i for i,env in enumerate(envs)): return None
   updates = [u for u in uops if u.op is Ops.STORE and _root_param(u.src[0]) is None and any(r in u.toposort() for r in reduce_ranges)]
-  if len(updates) != 1: return None
-  value, post_root, post_local = root, None, None
-  if _local_load(value) is not None: post_scale = 1.0
-  elif value.op is Ops.MUL and (load:=next((x for x in value.src if _local_load(x) is not None), None)) is not None and \
+  if not updates: return None
+  post_root, post_scale, value = None, 1.0, root
+  while value.op is Ops.CAST: value = value.src[0]
+  if len(updates) == 1 and _local_load(value) is not None: pass
+  elif len(updates) == 1 and value.op is Ops.MUL and (load:=next((x for x in value.src if _local_load(x) is not None), None)) is not None and \
        (scale:=value.src[1 if value.src[0] is load else 0]).op is Ops.CONST: post_scale = float(scale.arg)
   else:
-    # Keep the reduction structural, then feed its materialized result through the ordinary UOp executor.  Select the
-    # highest CAST boundary around the local accumulator so physical FP16 output is not reinterpreted as local FP32.
-    local_refs = [u for u in root.toposort() if _local_load(u) is not None]
-    if not local_refs: return None
-    post_local = next((u for u in local_refs if u.dtype.scalar() is out.dtype.scalar()), local_refs[-1])
-    post_root, post_scale = root, 1.0
+    if not any(_local_load(u) is not None for u in root.toposort()): return None
+    post_root = root
   if not math.isfinite(post_scale): return None
-  update = _strip_cast(updates[0].src[1])
-  if update.dtype.scalar() is not dtypes.float or update.op is not Ops.ADD or \
-     (acc:=next((x for x in update.src if _local_load(x) is not None), None)) is None:
-    return None
-  term = update.src[1 if update.src[0] is acc else 0]
-  flat, groups = _flat_static_ranges(reduce_ranges)
-  lanes, out_slot = rows*groups, out.arg.slot
-  linear_index = flat.alu(Ops.MUL, flat.const_like(rows)).alu(Ops.ADD, out_index)
-  fake_out = out.replace(src=(out.src[0].const_like(lanes),))
-  fake_index = store.src[0].replace(src=(fake_out, linear_index))
-  fake_store = store.replace(src=(fake_index, term, *store.src[2:]))
-  map_uops = _fp16_rewrite(list(UOp(Ops.SINK, src=(fake_store,)).toposort()))
-  mapped = _lower_uop_program(map_uops, vectorize_reductions=False, recipes_ready=True)
-  if mapped is None: return None
-  reduced = _finish_mapped_add_reduction(mapped, out_slot, rows, groups, post_scale)
-  if reduced is None or post_root is None or post_local is None: return reduced
-  fake_slot = 1+max((u.arg.slot for u in uops if u.op is Ops.PARAM), default=out_slot)
-  fake_source = UOp.param(fake_slot, dtypes.half, (rows,))
+  next_slot = 1+max((u.arg.slot for u in uops if u.op is Ops.PARAM), default=out.arg.slot)
   range_substitutions = {axis:axis.replace(src=(axis.src[0],)) for axis in _index_ranges(out_index) if len(axis.src) > 1}
   post_index = store.src[0].substitute(range_substitutions) if range_substitutions else store.src[0]
-  fake_index = post_index.replace(src=(fake_source, *post_index.src[1:]))
-  post_load = UOp(Ops.LOAD, dtypes.half, src=(fake_index,))
-  if post_local.dtype.scalar() is not dtypes.half: post_load = post_load.cast(post_local.dtype.scalar())
-  post_value = post_root.substitute({post_local:post_load, **range_substitutions})
-  post_store = store.replace(src=(post_index, post_value, *store.src[2:]))
-  post_uops = _fp16_rewrite(list(UOp(Ops.SINK, src=(post_store,)).toposort()))
-  post = _lower_uop_program(post_uops, vectorize_reductions=False, recipes_ready=True)
+  combined, replacements = None, dict[UOp, UOp]()
+  for update_store in updates:
+    update = _strip_cast(update_store.src[1])
+    if update.dtype.scalar() is not dtypes.float or update.op is not Ops.ADD or \
+       (acc:=next((x for x in update.src if _local_load(x) is not None), None)) is None: return None
+    term = update.src[1 if update.src[0] is acc else 0]
+    axes = [r for r in reduce_ranges if r in _index_ranges(term)] if len(updates) > 1 else reduce_ranges
+    if not axes: return None
+    if len(updates) > 1:
+      clean = {r:r.replace(src=(r.src[0],)) for r in axes if len(r.src) > 1}
+      if clean: term, axes = term.substitute(clean), [clean.get(r, r) for r in axes]
+    flat, groups = _flat_static_ranges(axes)
+    target = out.arg.slot if len(updates) == 1 else next_slot
+    if len(updates) != 1: next_slot += 1
+    lanes = rows*groups
+    linear_index = flat.alu(Ops.MUL, flat.const_like(rows)).alu(Ops.ADD, out_index)
+    fake_out = out.replace(src=(out.src[0].const_like(lanes),)) if target == out.arg.slot else UOp.param(target, dtypes.half, (lanes,))
+    fake_store = store.replace(src=(store.src[0].replace(src=(fake_out, linear_index)), term, *store.src[2:]))
+    mapped = _lower_uop_program(_fp16_rewrite(list(UOp(Ops.SINK, src=(fake_store,)).toposort())),
+                                vectorize_reductions=False, recipes_ready=True)
+    if mapped is None or (reduced:=_finish_mapped_add_reduction(mapped, target, rows, groups,
+        post_scale if post_root is None else 1.0)) is None: return None
+    combined = reduced if combined is None else _append_inplace_image(combined, reduced)
+    if combined is None: return None
+    if post_root is None: continue
+    buffer = _local_buffer(acc)
+    post_local = next((u for u in reversed(list(post_root.toposort())) if _local_load(u) is not None and
+                       (ref:=_local_buffer(u)) is not None and buffer is not None and ref.key == buffer.key), None)
+    if post_local is None: return None
+    load_slot = next_slot if len(updates) == 1 else target
+    post_load = UOp(Ops.LOAD, dtypes.half, src=(post_index.replace(src=(UOp.param(load_slot, dtypes.half, (rows,)), *post_index.src[1:])),))
+    replacements[post_local] = post_load if post_local.dtype.scalar() is dtypes.half else post_load.cast(post_local.dtype.scalar())
+  if post_root is None: return combined
+  if combined is None: return None
+  post_store = store.replace(src=(post_index, post_root.substitute({**replacements, **range_substitutions}), *store.src[2:]))
+  post = _lower_uop_program(_fp16_rewrite(list(UOp(Ops.SINK, src=(post_store,)).toposort())),
+                            vectorize_reductions=False, recipes_ready=True)
   if post is None: return None
-  post = _alias_image_args(post, {fake_slot:RKArg(RKBufferKind.ARG, out_slot)})
-  appended = _append_inplace_image(reduced, post)
-  return appended
+  if len(updates) == 1: post = _alias_image_args(post, {next_slot:RKArg(RKBufferKind.ARG, out.arg.slot)})
+  return _append_inplace_image(combined, post)
 
 
 def _lower_vectorized_mul_add_reduction(uops:list[UOp]) -> RKImage|None:
@@ -1695,8 +1705,7 @@ def _ieee_comparison_mask(root:UOp) -> UOp|None:
       delta = lhs.alu(Ops.SUB, rhs)
       return UOp(Ops.MAX, dtypes.half, src=(delta, delta), arg=_NATIVE_ABS)
     return None
-  result = mask(root)
-  return result
+  return mask(root)
 
 def _fp16_nonzero_mask(root:UOp) -> UOp|None:
   """Recognize a direct FP16-to-bool cast; ABS then positivity is exact for zero, infinity, and NaN."""
@@ -1845,6 +1854,10 @@ def _runtime_affine_index(u:UOp, out_index:UOp, count:int) -> tuple[UOp, UOp, in
   if zero != tuple(zero[0]+lane*lane_stride for lane in range(count)): return None
   return load, param, itemsize, lane_offset, zero[0], scales[0], lane_stride
 
+def _half_storage(u:UOp) -> UOp|None:
+  return u.src[0] if u.op is Ops.CAST and len(u.src) == 1 and u.dtype.scalar() is dtypes.half and \
+    u.src[0].dtype.scalar() is dtypes.float else None
+
 def _fp32_expr_to_half(u:UOp) -> UOp:
   """Represent a float ADD/MUL expression with a three-half expansion at its FP16 storage boundary."""
   if u.dtype.scalar() is dtypes.half: return u
@@ -1855,18 +1868,14 @@ def _fp32_expr_to_half(u:UOp) -> UOp:
   if u.op is Ops.LOAD: return u.cast(dtypes.half)
   if u.op is Ops.CONST: return UOp.const(float(u.arg), dtypes.half)
   if _is_static_expr(u): return u.cast(dtypes.half)
-  if u.op in (Ops.EXP2, Ops.LOG2, Ops.SQRT, Ops.SIN) and len(u.src) == 1:
+  if u.op in (Ops.EXP2, Ops.LOG2, Ops.SQRT, Ops.SIN, Ops.NEG) and len(u.src) == 1:
     return UOp(u.op, dtypes.half, src=(_fp32_expr_to_half(u.src[0]),), arg=u.arg)
-  if u.op is Ops.MUL and len(u.src) == 2:
-    return UOp(Ops.MUL, dtypes.half, src=tuple(_fp32_expr_to_half(src) for src in u.src))
-  if u.op in (Ops.SUB, Ops.MAX) and len(u.src) == 2:
+  if u.op in (Ops.MUL, Ops.SUB, Ops.MAX) and len(u.src) == 2:
     return UOp(u.op, dtypes.half, src=tuple(_fp32_expr_to_half(src) for src in u.src), arg=u.arg)
   if u.op is Ops.WHERE and len(u.src) == 3:
     return UOp(Ops.WHERE, dtypes.half, src=(u.src[0], _fp32_expr_to_half(u.src[1]), _fp32_expr_to_half(u.src[2])), arg=u.arg)
   if u.op is Ops.TRUNC and len(u.src) == 1:
     return _fold_trunc(UOp(Ops.TRUNC, dtypes.half, src=(_fp32_expr_to_half(u.src[0]),)))
-  if u.op is Ops.NEG and len(u.src) == 1:
-    return UOp(Ops.NEG, dtypes.half, src=(_fp32_expr_to_half(u.src[0]),))
   if u.op is Ops.ADD:
     if any(node.op is Ops.CONST and node.dtype.scalar() in (dtypes.half, dtypes.float) and
            not math.isfinite(float(node.arg)) for node in u.toposort()):
@@ -1906,9 +1915,8 @@ def _fp32_ratio_to_half(u:UOp) -> UOp|None:
   if u.op is not Ops.FDIV or u.dtype.scalar() is not dtypes.half or len(u.src) != 2: return None
   sums:list[UOp] = []
   for source in u.src:
-    if source.op is not Ops.CAST or source.dtype.scalar() is not dtypes.half or len(source.src) != 1 or \
-       source.src[0].dtype.scalar() is not dtypes.float or source.src[0].op is not Ops.ADD: return None
-    sums.append(source.src[0])
+    if (src:=_half_storage(source)) is None or src.op is not Ops.ADD: return None
+    sums.append(src)
   numerator_high,numerator_low = _precise_sum_parts(_fp32_add_terms(sums[0]))
   denominator_high,denominator_low = _precise_sum_parts(_fp32_add_terms(sums[1]))
   numerator = numerator_high.alu(Ops.ADD, numerator_low)
@@ -1923,9 +1931,7 @@ def _fp32_ratio_to_half(u:UOp) -> UOp|None:
 def _accurate_add_recipe(u:UOp) -> UOp:
   terms:list[UOp] = []
   for x in _flatten_binary(u, Ops.ADD, plain=True):
-    if x.op is Ops.CAST and x.dtype.scalar() is dtypes.half and len(x.src) == 1 and x.src[0].dtype.scalar() is dtypes.float and \
-       x.src[0].op is Ops.ADD:
-      terms.extend(_fp32_add_terms(x.src[0]))
+    if (src:=_half_storage(x)) is not None and src.op is Ops.ADD: terms.extend(_fp32_add_terms(src))
     else: terms.append(x)
   if sum(term.op is Ops.MUL and term.arg is None for term in terms) < 2: raise _RKGenericReject
   if any(node.op in (Ops.EXP2, Ops.LOG2, Ops.SQRT, Ops.SIN) for node in UOp(Ops.SINK, src=tuple(terms)).toposort()):
@@ -2420,11 +2426,14 @@ class RKContext:
     vector_bytes, vector_lanes, matrix_lanes = _stripe_layout(self.count, 32)
     pre_lanes = vector_lanes*5
     if self.count < 1 or matrix_lanes > _MAX_EW_ELEMS_FP16: raise _RKGenericReject
-    pre_arena,pre_row = self._scratch(dtypes.int16, RKLayout.INT16, 51*pre_lanes*2).arg,0
-    def pre_allocate() -> RKArg:
-      nonlocal pre_row
-      result = replace(pre_arena, addend=pre_row*pre_lanes*2); pre_row += 1
-      return result
+    def arena(size:int, stride:int) -> Callable[[], RKArg]:
+      base, row = self._scratch(dtypes.int16, RKLayout.INT16, size).arg, 0
+      def allocate() -> RKArg:
+        nonlocal row
+        result = replace(base, addend=row*stride); row += 1
+        return result
+      return allocate
+    pre_allocate, post_allocate = arena(51*pre_lanes*2, pre_lanes*2), arena(20*matrix_lanes*2, matrix_lanes*2)
     raw, value_parts = pre_allocate(), self._raw_parts(value)
     shift = None if u.src[1].op is Ops.CONST else self.lower(u.src[1])
     if shift is not None and shift.layout is not RKLayout.INT32: raise _RKGenericReject
@@ -2447,11 +2456,6 @@ class RKContext:
         values=(number,)*pre_lanes, dst_addend=dst.addend//2))
     planes = _int16_byte_bits(self.ew_ops, pre_allocate, constants, raw, pre_lanes)
 
-    post_arena,post_row = self._scratch(dtypes.int16, RKLayout.INT16, 20*matrix_lanes*2).arg,0
-    def post_allocate() -> RKArg:
-      nonlocal post_row
-      result = replace(post_arena, addend=post_row*matrix_lanes*2); post_row += 1
-      return result
     bits, masks, sign, zero, weights = post_allocate(), tuple(post_allocate() for _ in range(5)), \
                                        post_allocate(), post_allocate(), post_allocate()
     post_after = len(self.ew_ops)
@@ -2909,9 +2913,8 @@ class RKContext:
     elif u.op in (Ops.ADD, Ops.SUB, Ops.MUL, Ops.MAX, Ops.FDIV, Ops.NEG, Ops.RECIPROCAL): value = self._alu(u)
     elif u.op in (Ops.CMPLT, Ops.CMPNE, Ops.CMPEQ): value = self._compare(u)
     elif u.op in (Ops.AND, Ops.OR, Ops.XOR) and dtype is dtypes.bool:
-      if all(src.dtype.scalar() is dtypes.bool for src in u.src): value = self._bool_binary(u)
-      elif (ieee_recipe:=_ieee_comparison_mask(u)) is not None: value = self._ieee_bool(ieee_recipe)
-      else: value = self._bool_binary(u)
+      recipe = None if all(src.dtype.scalar() is dtypes.bool for src in u.src) else _ieee_comparison_mask(u)
+      value = self._ieee_bool(recipe) if recipe is not None else self._bool_binary(u)
     elif u.op in (Ops.AND, Ops.OR, Ops.XOR) and dtype in (dtypes.int16, dtypes.int): value = self._integer_bitwise(u)
     elif u.op in (Ops.SHL, Ops.SHR) and dtype in (dtypes.int, dtypes.uint): value = self._int32_shift(u)
     elif u.op in (Ops.CDIV, Ops.CMOD) and dtype is dtypes.int:
@@ -2996,9 +2999,8 @@ def _expand_math_uops(root:UOp, nodes:dict[UOp, None], *, accurate_adds:bool=Tru
   """Expand semantic math UOps before physical allocation so the complete recipe has one liveness graph."""
   bounded_recipes = len(nodes) <= _MAX_OPTIONAL_RECIPE_NODES
   if not bounded_recipes and not any(u.op in (Ops.WHERE, Ops.SQRT, Ops.EXP2, Ops.LOG2, Ops.SIN, Ops.TRUNC) or
-    u.op is Ops.CAST and u.dtype.scalar() is dtypes.half and u.src[0].dtype.scalar() is dtypes.float for u in nodes): return root
-  composite_math = _fold_inverse_hyperbolic(root) if bounded_recipes else None
-  if composite_math is None and bounded_recipes: composite_math = _fold_atan(root)
+    _half_storage(u) is not None for u in nodes): return root
+  composite_math = (_fold_inverse_hyperbolic(root) or _fold_atan(root)) if bounded_recipes else None
   cache:dict[UOp, UOp] = {}
   exact_static_selection = root.op is Ops.WHERE and _is_static_expr(root.src[0]) and not any(
     node.op is Ops.CONST and node.dtype.scalar() in (dtypes.half, dtypes.float) and not math.isfinite(float(node.arg))
@@ -3012,9 +3014,8 @@ def _expand_math_uops(root:UOp, nodes:dict[UOp, None], *, accurate_adds:bool=Tru
   if composite_math is not None: root = physical_recipe(composite_math)
   def rewrite(u:UOp) -> UOp:
     if u in cache: return cache[u]
-    if u.op is Ops.CAST and u.dtype.scalar() is dtypes.half and len(u.src) == 1 and u.src[0].dtype.scalar() is dtypes.float:
-      mapped = rewrite(physical_recipe(_dpu_sin(u.src[0].src[0]), (u.src[0].src[0],))) if u.src[0].op is Ops.SIN else \
-        _canonical_half_storage(u.src[0])
+    if (src:=_half_storage(u)) is not None:
+      mapped = rewrite(physical_recipe(_dpu_sin(src.src[0]), (src.src[0],))) if src.op is Ops.SIN else _canonical_half_storage(src)
       cache[u] = mapped
       return mapped
     if accurate_adds and bounded_recipes and u.op is Ops.ADD and u.dtype.scalar() is dtypes.half and u.arg is None:
@@ -3030,11 +3031,11 @@ def _expand_math_uops(root:UOp, nodes:dict[UOp, None], *, accurate_adds:bool=Tru
     if mapped.op is Ops.SQRT:
       if (recipe:=_dpu_sqrt(mapped.src[0])) is None: raise _RKGenericReject
       mapped = rewrite(physical_recipe(recipe, (mapped.src[0],)))
-    elif mapped.op is Ops.EXP2: mapped = rewrite(physical_recipe(_dpu_exp2(mapped.src[0]), (mapped.src[0],)))
-    elif mapped.op is Ops.LOG2:
-      if mapped.src[0].op is Ops.WHERE: raise _RKGenericReject
-      mapped = rewrite(physical_recipe(_dpu_log2(mapped.src[0]), (mapped.src[0],)))
-    elif mapped.op is Ops.SIN: mapped = rewrite(physical_recipe(_dpu_sin(mapped.src[0]), (mapped.src[0],)))
+    elif mapped.op in (Ops.EXP2, Ops.LOG2, Ops.SIN):
+      if mapped.op is Ops.LOG2 and mapped.src[0].op is Ops.WHERE: raise _RKGenericReject
+      recipe = _dpu_exp2(mapped.src[0]) if mapped.op is Ops.EXP2 else _dpu_log2(mapped.src[0]) if mapped.op is Ops.LOG2 else \
+        _dpu_sin(mapped.src[0])
+      mapped = rewrite(physical_recipe(recipe, (mapped.src[0],)))
     elif mapped.op is Ops.TRUNC and mapped.dtype.scalar() is dtypes.half and not _is_static_expr(mapped):
       mapped = rewrite(_fold_trunc(mapped))
     cache[u] = mapped
@@ -3356,20 +3357,17 @@ def _lower_uop_program(uops:list[UOp], *, vectorize_reductions:bool=True, recipe
       storage_sink = sink
       if (storage_output:=_output_store(uops, dtypes.half, allow_local=True)) is not None:
         storage_root = storage_output[4]
-        root_storage = storage_root.op is Ops.CAST and len(storage_root.src) == 1 and storage_root.dtype.scalar() is dtypes.half and \
-          storage_root.src[0].dtype.scalar() is dtypes.float
-        storage_product_adds = any(boundary.op is Ops.CAST and boundary.dtype.scalar() is dtypes.half and len(boundary.src) == 1 and
-          boundary.src[0].dtype.scalar() is dtypes.float and _fp32_add_has_product_terms(boundary.src[0]) and
-          (boundary is not storage_root or len(boundary.src[0].toposort()) > 64) for boundary in storage_root.toposort())
+        root_storage = _half_storage(storage_root) is not None
+        storage_product_adds = any((src:=_half_storage(boundary)) is not None and _fp32_add_has_product_terms(src) and
+          (boundary is not storage_root or len(src.toposort()) > 64) for boundary in storage_root.toposort())
         # A later half FDIV/WHERE/etc. can own several independent FP32 reduction boundaries. Commit each CAST
         # before the bottom-up generic rewrite erases the semantic FP32 ADD tree, including pure denominator sums.
         if (ratio:=_fp32_ratio_to_half(storage_root)) is not None: storage_sink = storage_sink.substitute({storage_root:ratio})
         else:
           nested_storage:dict[UOp, UOp] = {}
           for boundary in storage_root.toposort():
-            if boundary is storage_root or boundary.op is not Ops.CAST or boundary.dtype.scalar() is not dtypes.half or \
-               len(boundary.src) != 1 or boundary.src[0].dtype.scalar() is not dtypes.float or boundary.src[0].op is not Ops.ADD: continue
-            try: nested_storage[boundary] = _canonical_half_storage(boundary.src[0])
+            if boundary is storage_root or (src:=_half_storage(boundary)) is None or src.op is not Ops.ADD: continue
+            try: nested_storage[boundary] = _canonical_half_storage(src)
             except _RKGenericReject: pass
           if nested_storage: storage_sink = storage_sink.substitute(nested_storage)
         if root_storage:
@@ -3836,9 +3834,7 @@ def _dpu_sin(source:UOp) -> UOp:
     _, _, reduced = _dpu_periodic_reduce(source, 1/(2*math.pi), period_split, math.pi)
     invalid = source.alu(Ops.MUL, UOp.const(0.0, dtypes.half))
   angle, square, reflected = _dpu_reflected_angle(reduced, one)
-  polynomial = UOp.const(1/362880, dtypes.half)
-  for coefficient in (-1/5040, 1/120, -1/6, 1.0):
-    polynomial = polynomial.alu(Ops.MUL, square).alu(Ops.ADD, UOp.const(coefficient, dtypes.half))
+  polynomial = _poly_horner(square, (1.0, -1/6, 1/120, -1/5040, 1/362880))
   sign = one.alu(Ops.SUB, _positive_mask(UOp.const(0.0, dtypes.half).alu(Ops.SUB, reduced)).alu(
     Ops.MUL, UOp.const(2.0, dtypes.half)))
   result = angle.alu(Ops.MUL, polynomial).alu(Ops.MUL, sign)
@@ -3865,11 +3861,8 @@ def _dpu_pow2_integer(exponent:UOp) -> UOp:
 
 def _dpu_exp2_bounded(bounded:UOp) -> UOp:
   integer = _native_floor(bounded)
-  fraction = bounded.alu(Ops.SUB, integer)
-  polynomial = UOp.const(0.0013333558, dtypes.half)
-  for coefficient in (0.0096181291, 0.0555041087, 0.2402265069, 0.6931471806, 1.0):
-    polynomial = polynomial.alu(Ops.MUL, fraction).alu(Ops.ADD, UOp.const(coefficient, dtypes.half))
-  return polynomial.alu(Ops.MUL, _dpu_pow2_integer(integer))
+  return _poly_horner(bounded.alu(Ops.SUB, integer),
+    (1.0, 0.6931471806, 0.2402265069, 0.0555041087, 0.0096181291, 0.0013333558)).alu(Ops.MUL, _dpu_pow2_integer(integer))
 
 def _dpu_exp2(source:UOp) -> UOp:
   """Approximate FP16 EXP2 without LUTs using native FLOOR, Horner arithmetic, and exact exponent scaling."""
@@ -3890,23 +3883,20 @@ def _dpu_log2(source:UOp) -> UOp:
   zero, one = UOp.const(0.0, dtypes.half), UOp.const(1.0, dtypes.half)
   mantissa = _native_min(source.alu(Ops.MAX, UOp.const(2**-24, dtypes.half)), UOp.const(65504.0, dtypes.half))
   exponent = zero
-  for factor,shift in ((256.0, 8.0), (16.0, 4.0), (4.0, 2.0), (2.0, 1.0)):
-    predecessor = struct.unpack("<e", struct.pack("<H", _fp16_bits(factor)-1))[0]
-    mask = _finite_positive_mask(mantissa.alu(Ops.SUB, UOp.const(predecessor, dtypes.half)))
-    divisor = one.alu(Ops.ADD, mask.alu(Ops.MUL, UOp.const(factor-1.0, dtypes.half)))
-    mantissa = mantissa.alu(Ops.FDIV, divisor)
-    exponent = exponent.alu(Ops.ADD, mask.alu(Ops.MUL, UOp.const(shift, dtypes.half)))
-  for factor,shift in ((256.0, 8.0), (256.0, 8.0), (256.0, 8.0), (16.0, 4.0), (4.0, 2.0), (2.0, 1.0)):
-    mask = _finite_positive_mask(UOp.const(2.0/factor, dtypes.half).alu(Ops.SUB, mantissa))
-    multiplier = one.alu(Ops.ADD, mask.alu(Ops.MUL, UOp.const(factor-1.0, dtypes.half)))
-    mantissa = mantissa.alu(Ops.MUL, multiplier)
-    exponent = exponent.alu(Ops.SUB, mask.alu(Ops.MUL, UOp.const(shift, dtypes.half)))
+  def rescale(pairs:tuple[tuple[float, float], ...], divide:bool) -> None:
+    nonlocal mantissa, exponent
+    for factor,shift in pairs:
+      threshold = struct.unpack("<e", struct.pack("<H", _fp16_bits(factor)-1))[0] if divide else 2.0/factor
+      mask = _finite_positive_mask((mantissa if divide else UOp.const(threshold, dtypes.half)).alu(
+        Ops.SUB, UOp.const(threshold, dtypes.half) if divide else mantissa))
+      scale = one.alu(Ops.ADD, mask.alu(Ops.MUL, UOp.const(factor-1.0, dtypes.half)))
+      mantissa = mantissa.alu(Ops.FDIV if divide else Ops.MUL, scale)
+      exponent = exponent.alu(Ops.ADD if divide else Ops.SUB, mask.alu(Ops.MUL, UOp.const(shift, dtypes.half)))
+  rescale(((256.0, 8.0), (16.0, 4.0), (4.0, 2.0), (2.0, 1.0)), True)
+  rescale(((256.0, 8.0), (256.0, 8.0), (256.0, 8.0), (16.0, 4.0), (4.0, 2.0), (2.0, 1.0)), False)
   z = mantissa.alu(Ops.SUB, one).alu(Ops.FDIV, mantissa.alu(Ops.ADD, one))
-  z2 = z.alu(Ops.MUL, z)
-  polynomial = UOp.const(1.0/9.0, dtypes.half)
-  for coefficient in (1.0/7.0, 1.0/5.0, 1.0/3.0, 1.0):
-    polynomial = polynomial.alu(Ops.MUL, z2).alu(Ops.ADD, UOp.const(coefficient, dtypes.half))
-  result = exponent.alu(Ops.ADD, z.alu(Ops.MUL, polynomial).alu(Ops.MUL, UOp.const(2.0/math.log(2.0), dtypes.half)))
+  result = exponent.alu(Ops.ADD, z.alu(Ops.MUL, _poly_horner(z.alu(Ops.MUL, z), (1.0, 1/3, 1/5, 1/7, 1/9))).alu(
+    Ops.MUL, UOp.const(2.0/math.log(2.0), dtypes.half)))
   nonzero = mask_fn(source).alu(Ops.MAX, mask_fn(zero.alu(Ops.SUB, source)))
   zero_correction = UOp.const(-1.0, dtypes.half).alu(Ops.FDIV, nonzero).alu(Ops.ADD, one)
   valid = one.alu(Ops.SUB, mask_fn(zero.alu(Ops.SUB, source)))

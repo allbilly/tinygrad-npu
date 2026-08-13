@@ -5826,3 +5826,23 @@ Renderer size remains **3,595**; `heuristic.py` grows by one executable line and
 Rockchip UOp suite passes 140 tests with `-n12`, full Ruff and mypy pass, and exactly 445 backend cases collect. This is
 a performance WIP, not the 3,400-line checkpoint or an all-445 hardware-pass claim. Hardware execution remains pending
 the required manual power cycle.
+
+## 2026-08-13 — map large ADD reduces and weighted NLL FDIV
+
+Compile-only profiling after the oversized-sum checkpoint ranked remaining families as `std_mean` k1 reject (~10 s),
+512-element cummin rewrite (~8.8 s), and `test_nll_loss_3d_weight` (~4.8 s, 82,952 EW stages, 432 host gathers). The
+weighted case is 16×27=432 terms, so it still fully unrolled under the 512 scaled-sum budget. 512-element mean and sum
+were in the same class.
+
+Rockchip ADD reductions whose axis product exceeds 64 now stay a REDUCE. MAX, including 512-element cummin/cummax,
+still unrolls so those exact images stay byte-identical. The mapped-add specializer now lowers every local ADD in a
+kernel, including the weighted-NLL pair `sum(loss*weight) / sum(weight)`, then runs the FDIV as ordinary post-UOps.
+`_append_inplace_image` keeps the first image's host gathers so the INT32 class index stays one `HOST_ADDRESS` gather.
+
+Compile-only: weighted 3D NLL 4.8 s → 0.78 s (83 UOps, 987 EW, one host gather); 512-element mean 2.16 s → 0.07 s;
+512-element sum → 0.04 s. Unweighted 3D NLL stays mapped. LUT/PPU were not used: both would add encoder surface versus
+the existing polynomials and generic pooling UOps.
+
+Renderer size is **3,586** (down 9); `heuristic.py` is **142** (down 2); total tree size is **29,161**. This is a
+performance WIP, not the 3,400-line checkpoint or an all-445 hardware-pass claim. Hardware execution remains pending
+the required manual power cycle.
