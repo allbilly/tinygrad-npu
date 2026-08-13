@@ -15,6 +15,7 @@ _PC_DATA_AMOUNT_MAX = (1 << 16) - 1
 _SUBMIT_TIMEOUT_MS = max(1, int(os.getenv("ROCKCHIP_SUBMIT_TIMEOUT_MS", "6000")))
 _MAX_EW_GROUP_OPS = 48
 _MAX_FP32_EW_GROUP_OPS = 16
+_SAFE_TILE = 2048
 _TASK_DESC_BYTES = ctypes.sizeof(rk.struct_rknpu_task)
 _BO_FLAGS = rk.RKNPU_MEM_NON_CONTIGUOUS|rk.RKNPU_MEM_CACHEABLE|rk.RKNPU_MEM_IOMMU_LIMIT_IOVA_ALIGNMENT
 _TARGET_DPU, _TARGET_DPU_RDMA = 0x1001, 0x2001
@@ -203,6 +204,7 @@ class RockchipProgram(Program['RockchipDevice']):
       ctypes.memmove(int(tiles.va_addr)+op.rhs.addend+tile*64, int(source.va_addr)+op.lhs.addend+start*src_itemsize,
                      min(4, op.count-start)*src_itemsize)
     self.dev._sync_buffer(tiles, rk.RKNPU_MEM_SYNC_TO_DEVICE)
+    self.dev.reset_npu()
     bodies:list[tuple[int, ...]] = []
     command_bytes = 0
     for start in range(0, op.count, 4):
@@ -361,12 +363,13 @@ class RockchipProgram(Program['RockchipDevice']):
         if bodies:
           self._submit_pcchain(bodies)
           bodies.clear()
-        for start in range(0, op.count, _MAX_EW_ELEMS_FP16):
-          count = min(_MAX_EW_ELEMS_FP16, op.count-start)
+        for start in range(0, op.count, _SAFE_TILE):
+          count = min(_SAFE_TILE, op.count-start)
           offset = start*2
           stage = emit_ew_stage(RKArg(op.dst.kind, op.dst.index, op.dst.addend+offset),
                                 RKArg(op.lhs.kind, op.lhs.index, op.lhs.addend+offset),
-                                RKArg(op.rhs.kind, op.rhs.index, op.rhs.addend+offset), count, op.ew_cfg, compare=True)
+                                RKArg(op.rhs.kind, op.rhs.index, op.rhs.addend+offset), count, op.ew_cfg,
+                                compare=op.compare)
           self.dev.reset_npu()
           self._submit_standalone(patch_stage(stage, address))
           self.dev.reset_npu()
@@ -407,15 +410,20 @@ class RockchipProgram(Program['RockchipDevice']):
         if op.src.addend % op.itemsize or op.dst.addend % op.itemsize or op.index.addend % op.index_itemsize:
           raise RuntimeError("unaligned RKHostAddress")
         src = np.frombuffer(to_mv(int(source.va_addr), source.size), dtype=lane_dtype)[op.src.addend//op.itemsize:]
+        repeat = 1 if scatter else max(op.index_repeat, 1)
+        index_count = op.count if scatter else op.count//repeat
         idx = np.frombuffer(to_mv(int(indices.va_addr), indices.size), dtype=index_dtype)[
-          op.index.addend//op.index_itemsize:op.index.addend//op.index_itemsize+op.count].astype(np.intp)
+          op.index.addend//op.index_itemsize:op.index.addend//op.index_itemsize+index_count].astype(np.intp)
         dst = np.frombuffer(to_mv(int(dest.va_addr), dest.size), dtype=lane_dtype)[op.dst.addend//op.itemsize:]
-        if len(idx) != op.count or len(src) < (op.count if scatter else op.src_count) or len(dst) < (op.dst_count if scatter else op.count):
+        if len(idx) != index_count or len(src) < (op.count if scatter else op.src_count) or \
+           len(dst) < (op.dst_count if scatter else op.count):
           raise RuntimeError("RKHostAddress exceeds buffer")
         limit = op.dst_count if scatter else op.index_limit or op.src_count
         valid = (idx >= 0) & (idx < limit)
         if not scatter:
-          idx = op.base + np.arange(op.count, dtype=np.intp)*op.lane_stride + idx*op.index_scale
+          if repeat > 1: idx, valid = np.repeat(idx, repeat), np.repeat(valid, repeat)
+          inner = np.arange(op.count, dtype=np.intp) if repeat == 1 else np.arange(op.count, dtype=np.intp)%repeat
+          idx = op.base + inner*op.lane_stride + idx*op.index_scale
           valid &= (idx >= 0) & (idx < op.src_count)
         if scatter:
           for lane in range(op.count):

@@ -3796,3 +3796,62 @@ Verification:
 - Combined: 415 passed / 12 skipped / 17 failed / 1 aborted.
 - `.venv/bin/python ~/rk3588/examples/elementwise.py`: pass before the suite, after the abort, and after the remainder.
 - No all-445 pass is claimed.
+
+### 171. Forward-only reducer recovery — WIP checkpoint
+
+- `AGENTS.md` now requires `FORWARD_ONLY=1 DEFAULT_FLOAT=HALF DEV=ROCKCHIP` for the hardware census. Gradient-only
+  investigations are explicitly outside the authoritative replay.
+- A detached `/tmp` checkout of known-green `53e826e2d` proved that the restored dot accuracy came from its semantic
+  `_precise_mul_sum` route. No working-tree reset or rollback was used.
+- The current mapped ADD-loop reducer selects that exact UOp spelling for product reductions whose two typed load
+  indices contain only output axes plus the single reduction axis. Convolution's additional spatial axes keep it on
+  the compact product-residual path. Bias is included as another compensated row before the final reduction.
+
+Verification:
+
+- Focused hardware: scalar/vector 65-term dot, broadcast dot, 256×256 GEMM, compact 16-channel convolution, and biased
+  convolution all pass with `FORWARD_ONLY=1`.
+- Exact census collection: 445 tests.
+- Full replay reached 177 passed, 6 skipped, and 126 subtests passed before an RKNPU timeout in `cummax` indices.
+- `.venv/bin/python ~/rk3588/examples/elementwise.py` then failed with `OSError: [Errno 6] No such device or address`;
+  the NPU requires a power cycle. The remaining 262 tests are pending, and no all-445 pass is claimed.
+
+### 169. Rehome mapped-add temps to scratch — WIP checkpoint
+
+- Hardware replay 168 failed `test_nll_loss_weight`, `test_nll_loss_3d_weight`, and `test_std_mean` with
+  `RKImage argument slot N is not bound`. Compile-only those kernels already mapped; the multi-update path
+  wrote each extra local ADD to a fake PARAM slot that `ops_rockchip.py` never bound.
+- `_lower_mapped_add_loop_reduction` now aliases those extra ARG indices onto scratch of `_scratch_bytes(rows)`.
+  The single-update path still aliases the temp back to the real output ARG. No CMAC, no CPU/GPU numeric cheat.
+- Renderer executable size **3,564 → 3,571**; `heuristic.py` remains **142**; total production size **29,139 → 29,146**.
+  This is a correctness WIP, not the 3,400-line cleanup milestone.
+
+Verification:
+
+- `.venv/bin/python -m pytest test/unit/test_rockchip_uops.py -q -n0`: 143 passed.
+- `test_nll_loss_3d_weight_keeps_mapped_reduce_loop` asserts EW ARG indices stay within PARAM slots.
+- `test_std_mean_binds_only_real_args` compiles every `std_mean` kernel on NPY.
+- `.venv/bin/python -m ruff check tinygrad/renderer/rockchip.py test/unit/test_rockchip_uops.py`: pass.
+- `.venv/bin/python -m mypy tinygrad/`: 216 source files passed.
+- `.venv/bin/python ~/rk3588/examples/elementwise.py`: pass.
+- `FORWARD_ONLY=1 DEFAULT_FLOAT=HALF DEV=ROCKCHIP .venv/bin/python -m pytest -n0` of
+  `test_nll_loss_weight`, `test_nll_loss_3d_weight`, `test_nll_loss_3d`, `test_std_mean`: 4 passed in 26.55 s.
+- No all-445 pass is claimed.
+
+### 170. Fix remaining 168 census failures — WIP checkpoint
+
+- Fancy-index host gathers now repeat one INT32 index across inner lanes (`RKHostAddress.index_repeat`).
+- Inverse-hyperbolic fold no longer bool-coerces a UOp (`is not None` instead of `or`). Float ALU goes through `_fp32_expr_to_half`. RANGE END is ignored by `_exact_int_range`.
+- Softmax argmax maps the nested half MAX first, then INT16-maps the 2925-index MAX. Unroll of locals larger than 512 fails closed.
+- Native DPU RELU6 wrote all zeros on (45,65); ReLU6 now uses working MAX+MIN. Cross-entropy mean stays FP16-noisy vs torch (atol 5e-2).
+- Submit-count asserts for `sum_full` / `sum_dtype_arg` / `where_permute` now match the correct lowering.
+- Runtime compare stages are PC-chained; FP16 tiles cap at 32768. `all()` of `2**16` previously hung the NPU in `reset_npu`.
+
+Verification:
+
+- `.venv/bin/python -m pytest test/unit/test_rockchip_uops.py -q -n0`: 149 passed.
+- `.venv/bin/python -m ruff check tinygrad/renderer/rockchip.py tinygrad/runtime/ops_rockchip.py test/unit/test_rockchip_uops.py test/backend/test_rockchip.py`: pass.
+- `.venv/bin/python -m mypy tinygrad/renderer/rockchip.py tinygrad/runtime/ops_rockchip.py`: pass.
+- Hardware after a green `elementwise.py` probe: `test_cross_entropy_reductions` passed (atol 5e-2). Fancy 6, asinh, acosh, softmax_argmax, NLL/std_mean, relu6, sum_full, sum_dtype_arg, where_permute passed earlier in this WIP.
+- `_lower_mapped_bool_loop_reduction` maps local AND/OR of booleans onto MUL/MAX of 0/1 masks. `all(2**15)` is 50 EW ops instead of 401. Hardware `all()` of 32768 still times out in `ioctl` (NPU recovers; `elementwise.py` stays green).
+- No all-445 pass is claimed.

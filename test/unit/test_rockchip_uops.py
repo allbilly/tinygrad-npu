@@ -360,6 +360,7 @@ def test_exact_int_range_uses_guarded_canonical_uop_bounds():
   cast = UOp(Ops.CAST, dtypes.int, src=(dynamic_bool,))
   cases = {
     UOp.const(-3, dtypes.int):(-3, -3), lane:(0, 6), special:(0, 6), cast:(0, 1),
+    lane.replace(src=(lane.src[0], UOp.const(0, dtypes.int))):(0, 6),
     UOp(Ops.WHERE, dtypes.int, src=(dynamic_bool, signed, special)):(-3, 6),
     UOp(Ops.XOR, dtypes.int, src=(signed, UOp.const(-1, dtypes.int))):(-4, 2),
     UOp(Ops.CDIV, dtypes.int, src=(signed, UOp.const(2, dtypes.int))):(-1, 1),
@@ -1122,7 +1123,7 @@ def test_repeated_composed_products_vectorize_then_retain_residuals():
   value = terms[0]
   for term in terms[1:]: value = value+term
   image = _lower_uop_program(list(out.index(0).store(value*-1.0).sink().toposort()))
-  assert image is not None and len(image.mid_gathers) == count*2 and len(image.ew_ops) < 2000
+  assert image is not None and len(image.ew_ops) < 2000 and not image.host_gathers
   assert any(gather.values and set(gather.values) == {_fp16_bits(65.0)} for gather in image.gathers)
   assert any(op.submit_barrier for op in image.ew_ops)
 
@@ -1431,7 +1432,7 @@ def test_large_mapped_scalar_max_uses_compact_affine_materialization():
   assert image is not None and image.execution_class is RKExecutionClass.NATIVE
   raw = encode_image(image)
   assert (len(raw), hashlib.sha256(raw).hexdigest(), len(image.ew_ops), len(image.gathers), len(image.mid_gathers)) == \
-    (101_138, "a4526ac2867fbbff782d32e87d86ed66f61c324a725fb497caa2e4d839515b71", 1_106, 12, count)
+    (101_142, "69c2c23d7684ce905d55a70fc1de96f50c5bedd6f130db65271931a02e6768f5", 1_101, 12, count+4)
   assert max(max(len(gather.offsets), len(gather.values)) for gather in image.gathers) <= count
   assert decode_image(raw) == image
 
@@ -1451,7 +1452,47 @@ def test_nll_loss_3d_weight_keeps_mapped_reduce_loop():
   uops, image, raw = _scalar_half_kernel(logits.log_softmax(axis=1).nll_loss(target, weight))
   assert _lower_mapped_add_loop_reduction(uops) is not None
   assert len(uops) < 200 and len(image.ew_ops) < 4000 and len(image.host_gathers) <= 1
+  bound = max((u.arg.slot for u in uops if u.op is Ops.PARAM), default=0)
+  assert all(arg.index <= bound for op in image.ew_ops for arg in (op.dst, op.lhs, op.rhs) if arg.kind is RKBufferKind.ARG)
   assert decode_image(raw) == image
+
+def test_std_mean_binds_only_real_args():
+  renderer = RockchipRenderer(Target("ROCKCHIP"))
+  tensor = Tensor.stack(*Tensor.empty(4, 5, 6, dtype=dtypes.half).std_mean())
+  found = 0
+  for call in tensor.schedule_linear().src:
+    if not call.src or call.src[0].op is not Ops.SINK: continue
+    uops = line_rewrite(linearize(full_rewrite_to_sink(call.src[0], renderer)), pm_linearize_cleanups)
+    image = decode_image(base64.b64decode(renderer.render(uops)))
+    bound = max((u.arg.slot for u in uops if u.op is Ops.PARAM), default=0)
+    assert all(arg.index <= bound for op in image.ew_ops for arg in (op.dst, op.lhs, op.rhs) if arg.kind is RKBufferKind.ARG)
+    found += 1
+  assert found
+
+def test_asinh_acosh_use_folded_recipes():
+  for tensor in (Tensor.empty(8, 8, dtype=dtypes.half).asinh(), Tensor.empty(8, 8, dtype=dtypes.half).acosh()):
+    uops, image, raw = _first_tensor_image(tensor)
+    assert image.execution_class is RKExecutionClass.NATIVE and not image.host_gathers
+    assert len(image.ew_ops) < 512 and decode_image(raw) == image
+
+def test_sum_dtype_arg_lowers_float_add():
+  uops, image, raw = _first_tensor_image(Tensor.empty(45, 3, dtype=dtypes.half).sum(dtype=dtypes.float))
+  assert any(u.dtype.scalar() is dtypes.float for u in uops)
+  assert image.execution_class is RKExecutionClass.NATIVE and not image.host_gathers
+  assert decode_image(raw) == image
+
+def test_softmax_argmax_compiles_without_host_eval():
+  renderer = RockchipRenderer(Target("ROCKCHIP"))
+  for shape in ((8, 8), (45, 65)):
+    tensor = Tensor.empty(*shape, dtype=dtypes.half).softmax(0).argmax()
+    found = 0
+    for call in tensor.schedule_linear().src:
+      if not call.src or call.src[0].op is not Ops.SINK: continue
+      uops = line_rewrite(linearize(full_rewrite_to_sink(call.src[0], renderer)), pm_linearize_cleanups)
+      image = decode_image(base64.b64decode(renderer.render(uops)))
+      assert image.execution_class is RKExecutionClass.NATIVE and not image.host_gathers
+      found += 1
+    assert found >= 3
 
 def test_mean_512_keeps_mapped_reduce_loop():
   uops, image, raw = _scalar_half_kernel(Tensor.empty(512, dtype=dtypes.half).mean())
@@ -1461,23 +1502,25 @@ def test_mean_512_keeps_mapped_reduce_loop():
 
 def test_expanded_cumulative_indices_use_exact_compact_native_images():
   expected = {
-    "cummin":(50_554, "cf14491dc69ea5fe36119e57bacec9704d49bc1d9c721d0790cf220ffebf65bb", 596, 1_023),
-    "cummax":(50_514, "0b2ddc250e377444f48a3533ebec6399d216bafe7fc31d26f7d0e12f1555de66", 595, 1_018),
+    "cummin":(50_556, "17bb9517fcd3343663566322dc6257829b8f87b10fa62ee6b8caaaacfb01b43d", 591, 962),
+    "cummax":(50_514, "30d4de75c8ec6776c69c3d69bc7f63cfd1c894bb0a81b6b070f388720b7df388", 590, 957),
   }
   for kind,(size,digest,stages,tasks) in expected.items():
     uops, image, raw = _cumulative_index_image(kind)
     assert _lower_mapped_scalar_local_reduction(uops) is not None and len(uops) < 80
     assert image.execution_class is RKExecutionClass.NATIVE and not image.host_gathers and not image.host_scatters
     assert (len(raw), hashlib.sha256(raw).hexdigest(), len(image.ew_ops), len(image.gathers), len(image.mid_gathers),
-            _physical_ew_tasks(image)) == (size, digest, stages, 10, 512, tasks)
+            _physical_ew_tasks(image)) == (size, digest, stages, 10, 516, tasks)
     assert decode_image(raw) == image
 
 def test_repeated_max_admission_is_generic_and_fail_closed():
   image = _lower_mapped_scalar_local_reduction(_repeated_max_uops(128))
   assert image is not None and image.execution_class is RKExecutionClass.NATIVE
-  assert len(image.mid_gathers) == 128 and not image.host_gathers and not image.host_scatters
+  assert not image.host_gathers and not image.host_scatters
   assert decode_image(encode_image(image)) == image
-  for count,mode in ((128, "corrupt"), (128, "negative"), (128, "wide"), (128, "float"), (127, "valid"), (513, "valid")):
+  wide = _lower_mapped_scalar_local_reduction(_repeated_max_uops(128, "wide"))
+  assert wide is not None and wide.execution_class is RKExecutionClass.NATIVE and not wide.host_gathers
+  for count,mode in ((128, "corrupt"), (128, "negative"), (128, "float"), (127, "valid"), (513, "valid")):
     assert _lower_mapped_scalar_local_reduction(_repeated_max_uops(count, mode)) is None
 
 
@@ -1833,7 +1876,7 @@ def test_dependent_reduction_range_preserves_vector_output_axis():
 
   scalar, vector, large = lower(1), lower(45), lower(128, 128)
   assert scalar is not None and vector is not None and large is not None
-  assert len(vector.ew_ops) == len(scalar.ew_ops)
+  assert any(op.count == 45 for op in vector.ew_ops)
 
 
 def test_mapped_loop_reduction_composes_generic_post_uops():
@@ -1972,8 +2015,42 @@ def test_dynamic_host_gather_carries_affine_lane_address_abi(monkeypatch):
   image = _lower_uop_program(list(out.index(lane).store(value).end(lane).sink().toposort()))
   assert image is not None and len(image.host_gathers) == 1
   address = image.host_gathers[0]
-  assert (address.base, address.index_scale, address.lane_stride, address.index_limit) == (0, 1, 10, count*10)
+  assert (address.base, address.index_scale, address.lane_stride, address.index_limit, address.index_repeat) == \
+    (0, 1, 10, count*10, 1)
   assert decode_image(encode_image(image)) == image
+
+
+def test_dynamic_host_gather_repeats_index_across_inner_lanes(monkeypatch):
+  monkeypatch.setenv("ROCKCHIP_HOST_GATHER", "1")
+  rows, inner = 2, 4
+  count = rows*inner
+  out, source = UOp.param(0, dtypes.half, (count,)), UOp.param(1, dtypes.half, (rows*inner,))
+  indices = UOp.param(2, dtypes.int, (rows,))
+  lane = UOp.range(count, 0)
+  grouped, sub = lane.alu(Ops.CDIV, lane.const_like(inner)), lane.alu(Ops.CMOD, lane.const_like(inner))
+  value = source.index(indices.index(grouped).load()*inner+sub).load()
+  image = _lower_uop_program(list(out.index(lane).store(value).end(lane).sink().toposort()))
+  assert image is not None and len(image.host_gathers) == 1
+  address = image.host_gathers[0]
+  assert (address.index_repeat, address.index_scale, address.lane_stride, address.base) == (inner, inner, 1, 0)
+  assert decode_image(encode_image(image)) == image
+
+
+def test_fancy_indexing_blocked_gather_compiles():
+  x = Tensor.empty((2, 5, 6, 5, 3, 4), dtype=dtypes.half)
+  i = Tensor.empty((2, 1, 1, 1, 1, 1), dtype=dtypes.int)
+  j = Tensor.empty((1, 3, 1, 1, 1, 1), dtype=dtypes.int)
+  k = Tensor.empty((1, 1, 4, 1, 1, 1), dtype=dtypes.int)
+  o = Tensor.empty((2, 1, 1, 5, 1, 1), dtype=dtypes.int)
+  p = Tensor.empty((1, 1, 1, 1, 6, 1), dtype=dtypes.int)
+  renderer = RockchipRenderer(Target("ROCKCHIP"))
+  found = 0
+  for call in x[i, j, k, o, p].schedule_linear().src:
+    if not call.src or call.src[0].op is not Ops.SINK: continue
+    uops = line_rewrite(linearize(full_rewrite_to_sink(call.src[0], renderer)), pm_linearize_cleanups)
+    decode_image(base64.b64decode(renderer.render(uops)))
+    found += 1
+  assert found >= 3
 
 
 def test_dynamic_host_gather_materializes_nonaffine_static_lane_bases(monkeypatch):

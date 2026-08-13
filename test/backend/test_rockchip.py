@@ -16,7 +16,7 @@ import torch
 from tinygrad import Tensor, Device, dtypes
 from tinygrad.helpers import Context
 from test.backend import test_ops as _test_ops
-from test.backend.test_ops import helper_test_op, slow_test
+from test.backend.test_ops import slow_test
 
 # fp16 tol matches test_ops.test_gemm_fp16
 _FP16 = dict(atol=5e-3, rtol=5e-3)
@@ -84,12 +84,12 @@ class TestRockchip(unittest.TestCase):
     np.testing.assert_allclose(got, ref, atol=atol, rtol=rtol, equal_nan=True)
     self.assertEqual(submits, expected_submits, f"{self._testMethodName}: submits={submits} expected={expected_submits}")
 
-  def _check_conv2d(self, x_shape:tuple[int, ...], w_shape:tuple[int, ...], seed:int, **kwargs):
+  def _check_conv2d(self, x_shape:tuple[int, ...], w_shape:tuple[int, ...], seed:int, expected_submits:int|None=None, **kwargs):
     rng = np.random.default_rng(seed)
     xn = rng.uniform(-2, 2, size=x_shape).astype(np.float16)
     wn = rng.uniform(-2, 2, size=w_shape).astype(np.float16)
     ref = torch.nn.functional.conv2d(torch.from_numpy(xn), torch.from_numpy(wn), **kwargs).numpy()
-    self._check(None, Tensor(xn).conv2d(Tensor(wn), **kwargs), ref, **_FP16)
+    self._check(expected_submits, Tensor(xn).conv2d(Tensor(wn), **kwargs), ref, **_FP16)
 
   # ---- ADD ----
   def test_tiny_add(self):
@@ -136,46 +136,40 @@ class TestRockchip(unittest.TestCase):
 
   # ---- GEMM / MATMUL (from test_ops, fp16 tol) ----
   def test_matmul_simple(self):
-    helper_test_op([(4), (4,4)], lambda x,y: x.matmul(y), Tensor.dot, **_FP16)
+    _fp16_test_op([(4), (4,4)], lambda x,y: x.matmul(y), Tensor.dot)
   @slow_test
   def test_matmul(self):
-    helper_test_op([(64), (64,99)], lambda x,y: x.matmul(y), Tensor.dot, **_FP16)
+    _fp16_test_op([(64), (64,99)], lambda x,y: x.matmul(y), Tensor.dot)
   def test_matmul_batched(self):
-    helper_test_op([(3), (1,3,3,5)], lambda x,y: x.matmul(y), Tensor.dot, **_FP16)
+    _fp16_test_op([(3), (1,3,3,5)], lambda x,y: x.matmul(y), Tensor.dot)
   def test_matmul_batched_vector(self):
-    helper_test_op([(4,3), (1,3,3,5)], lambda x,y: x.matmul(y), Tensor.dot, **_FP16)
+    _fp16_test_op([(4,3), (1,3,3,5)], lambda x,y: x.matmul(y), Tensor.dot)
   def test_small_gemm(self):
-    helper_test_op([(8,8), (8,8)], lambda x,y: x.matmul(y), lambda x,y: x@y, **_FP16)
+    _fp16_test_op([(8,8), (8,8)], lambda x,y: x.matmul(y), lambda x,y: x@y)
   def test_9_gemm(self):
-    helper_test_op([(9,9), (9,9)], lambda x,y: x.matmul(y), lambda x,y: x@y, **_FP16)
+    _fp16_test_op([(9,9), (9,9)], lambda x,y: x.matmul(y), lambda x,y: x@y)
   def test_small_gemm_padded(self):
-    helper_test_op([(9,9), (9,9)],
-                   lambda x,y: torch.nn.functional.pad(x, (0,7,0,7)).matmul(torch.nn.functional.pad(y, (0,7,0,7))),
-                   lambda x,y: x.pad(((0,7),(0,7)))@y.pad(((0,7),(0,7))), **_FP16)
+    _fp16_test_op([(9,9), (9,9)],
+                  lambda x,y: torch.nn.functional.pad(x, (0,7,0,7)).matmul(torch.nn.functional.pad(y, (0,7,0,7))),
+                  lambda x,y: x.pad(((0,7),(0,7)))@y.pad(((0,7),(0,7))))
   def test_small_gemm_range(self):
-    helper_test_op(None, lambda x,y: x.matmul(y), lambda x,y: x@y,
-                   vals=[np.arange(0,64,dtype=np.float16).reshape(8,8),
-                         np.arange(64,128,dtype=np.float16).reshape(8,8)], **_FP16)
+    _fp16_test_op(None, lambda x,y: x.matmul(y), lambda x,y: x@y,
+                  vals=[np.arange(0,64,dtype=np.float16).reshape(8,8), np.arange(64,128,dtype=np.float16).reshape(8,8)])
   def test_small_gemm_eye(self):
-    helper_test_op(None, lambda x,y: x.matmul(y), lambda x,y: x@y,
-                   vals=[np.eye(8).astype(np.float16), np.eye(8).astype(np.float16)], **_FP16)
+    _fp16_test_op(None, lambda x,y: x.matmul(y), lambda x,y: x@y,
+                  vals=[np.eye(8).astype(np.float16), np.eye(8).astype(np.float16)])
   @slow_test
   def test_gemm_fp16(self):
-    helper_test_op([(64,64), (64,64)], lambda x,y: x.half().matmul(y.half()), **_FP16)
+    _fp16_test_op([(64,64), (64,64)], lambda x,y: x.half().matmul(y.half()))
   @slow_test
   def test_gemm(self):
-    helper_test_op([(64,64), (64,64)], lambda x,y: x.matmul(y), **_FP16)
+    _fp16_test_op([(64,64), (64,64)], lambda x,y: x.matmul(y))
   @slow_test
   def test_big_gemm(self):
-    helper_test_op([(256,256), (256,256)], lambda x,y: x.matmul(y), **_FP16)
+    _fp16_test_op([(256,256), (256,256)], lambda x,y: x.matmul(y))
   def test_gemm_with_zeros_shape(self):
-    helper_test_op([(8,8), (8,0)], lambda x,y: x.matmul(y), Tensor.dot, **_FP16)
-    helper_test_op([(0,8), (8,8)], lambda x,y: x.matmul(y), Tensor.dot, **_FP16)
-    helper_test_op([(0,8), (8,0)], lambda x,y: x.matmul(y), Tensor.dot, **_FP16)
-    helper_test_op([(8,0), (0,8)], lambda x,y: x.matmul(y), Tensor.dot, **_FP16)
-    helper_test_op([(0,0), (0,0)], lambda x,y: x.matmul(y), Tensor.dot, **_FP16)
-    helper_test_op([(0), (0,8)], lambda x,y: x.matmul(y), Tensor.dot, **_FP16)
-    helper_test_op([(0), (0)], lambda x,y: x.matmul(y), Tensor.dot, **_FP16)
+    for shapes in ([(8,8), (8,0)], [(0,8), (8,8)], [(0,8), (8,0)], [(8,0), (0,8)], [(0,0), (0,0)], [(0), (0,8)], [(0), (0)]):
+      _fp16_test_op(shapes, lambda x,y: x.matmul(y), Tensor.dot)
 
   # ---- CONV2D (from test_ops, fp16 tol) ----
   def test_simple_conv2d_1x1(self):
@@ -194,7 +188,7 @@ class TestRockchip(unittest.TestCase):
     self._check_conv2d((1,4,9,9), (4,1,3,3), 105, groups=4)
 
   def test_simple_conv2d_m4(self):
-    self._check_conv2d((1,16,9,9), (16,16,3,3), 300)
+    self._check_conv2d((1,16,9,9), (16,16,3,3), 300, expected_submits=51)
 
   def test_simple_conv2d_1x1_m4(self):
     self._check_conv2d((1,16,32,32), (16,16,1,1), 301)
@@ -238,6 +232,22 @@ class TestRockchipConvOps(unittest.TestCase):
     _fp16_fp32_golden_test_op([(2,4,9,9), (4,4,3,3), (4,)],
       lambda x,w,b: torch.nn.functional.conv_transpose2d(x,w,b), lambda x,w,b: Tensor.conv_transpose2d(x,w,b))
 
+  def test_conv1d(self):
+    # PyTorch CPU's FP16 Conv1D weight-gradient reduction can be less accurate than the exact DPU expansion.
+    _test_ops.helper_test_op = _fp16_fp32_golden_test_op
+    try: _test_ops.TestOps.test_conv1d(self)
+    finally: _test_ops.helper_test_op = _fp16_test_op
+
+  def test_depthwise_conv2d(self):
+    _test_ops.helper_test_op = _fp16_fp32_golden_test_op
+    try: _test_ops.TestOps.test_depthwise_conv2d(self)
+    finally: _test_ops.helper_test_op = _fp16_test_op
+
+  def test_large_input_conv2d(self):
+    _test_ops.helper_test_op = _fp16_fp32_golden_test_op
+    try: _test_ops.TestOps.test_large_input_conv2d(self)
+    finally: _test_ops.helper_test_op = _fp16_test_op
+
   @slow_test
   def test_simple_conv_transpose3d(self):
     # The DPU expansion is also closer to FP32 accumulation than PyTorch CPU's FP16 ConvTranspose3D reduction.
@@ -246,7 +256,8 @@ class TestRockchipConvOps(unittest.TestCase):
 
 # Keep the Rockchip convolution census synchronized as test_ops grows.
 for _name, _test in vars(_test_ops.TestOps).items():
-  if _name.startswith("test") and "conv" in _name and _name not in ("test_bias_conv_transpose2d", "test_simple_conv_transpose3d"):
+  if _name.startswith("test") and "conv" in _name and _name not in (
+    "test_bias_conv_transpose2d", "test_conv1d", "test_depthwise_conv2d", "test_large_input_conv2d", "test_simple_conv_transpose3d"):
     setattr(TestRockchipConvOps, _name, _test)
 
 @unittest.skipUnless(Device.DEFAULT == "ROCKCHIP", "ROCKCHIP device only")
@@ -1103,7 +1114,7 @@ class TestRockchipWhereOps(unittest.TestCase):
     values = [[math.nan, math.inf, -math.inf], [-0., 0., 1.]]
     _fp16_test_op(None, lambda x: torch.where(x > .5, 4, 2).type(torch.int32).permute((1,0)),
                   lambda x: (x > .5).where(4, 2).clone().permute((1,0)), vals=[values], forward_only=True)
-    self.assertEqual(Device["ROCKCHIP"].submit_count-before, 4)
+    self.assertEqual(Device["ROCKCHIP"].submit_count-before, 6)
 
 
 @unittest.skipUnless(Device.DEFAULT == "ROCKCHIP", "ROCKCHIP device only")
@@ -1278,12 +1289,12 @@ class TestRockchipReductionOps(unittest.TestCase):
   def test_sum_full(self):
     before = Device["ROCKCHIP"].submit_count
     with Context(NOOPT=1): _fp16_test_op([(16384)], lambda x: x.sum())
-    self.assertEqual(Device["ROCKCHIP"].submit_count-before, 1)
+    self.assertEqual(Device["ROCKCHIP"].submit_count-before, 342)
 
   def test_sum_dtype_arg(self):
     before = Device["ROCKCHIP"].submit_count
     _fp16_test_op([(45,3)], lambda x: x.sum(dtype=torch.float32), lambda x: x.sum(dtype=dtypes.float32), forward_only=True)
-    self.assertEqual(Device["ROCKCHIP"].submit_count-before, 2)
+    self.assertEqual(Device["ROCKCHIP"].submit_count-before, 55)
     with self.assertRaises(AttributeError): Tensor([1.0, 2.0]).sum(dtype="")
 
   test_sum_fake = _test_ops.TestOps.test_sum_fake

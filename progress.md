@@ -5887,3 +5887,53 @@ Failures:
 - `test_where_permute`: submit-count assert `6 != 4`.
 - `test_relu6`: numeric, about half the (45,65) lanes stayed 0.
 - `test_all_large`: process abort in `reset_npu`, not a pytest failure.
+
+## 2026-08-13 — rehome mapped-add temps to scratch
+
+Mapped-add of two local ADDs (weighted NLL, `std_mean`) compiled, but runtime failed with
+`RKImage argument slot N is not bound`. The multi-update path wrote reduced vectors to fake PARAM slots
+`1+max(PARAM)` that the kernel never received. Those ARG indices now alias to per-reduce scratch.
+
+Compile-only unit tests now assert every EW ARG index is a real PARAM. After a green
+`~/rk3588/examples/elementwise.py` probe, hardware passed `test_nll_loss_weight`,
+`test_nll_loss_3d_weight`, unweighted `test_nll_loss_3d`, and `test_std_mean` (26.6 s for the four).
+
+Renderer size is **3,571** (up 7); `heuristic.py` remains **142**; total tree size is **29,146**.
+This is a correctness WIP, not the 3,400-line checkpoint or an all-445 pass. Remaining 168 failures
+(fancy indexing, symbolic dtype, cross-entropy numeric, `sum_dtype_arg`, submit-count asserts,
+`relu6`, `test_all_large` abort) are unchanged.
+
+## 2026-08-13 — remaining 168 census failures
+
+Compile path now owns fancy-index blocked gathers, asinh/acosh, float `sum(dtype=)`, and 45×65 softmax argmax
+(nested half MAX pre-map + INT16 index MAX). Native RELU6 was all-zeros on (45,65); ReLU6 is MAX+MIN.
+
+Hardware before an `all(2**16)` hang: fancy 6, asinh, acosh, softmax_argmax, weighted NLL, std_mean, relu6,
+and the three submit-count tests passed. Cross-entropy mean is still ~1% off torch FP16 (test atol 5e-2).
+`all()` of 32768 passed; 65536 hung in `reset_npu` and left the NPU returning EINVAL. Reboot before a 445 replay.
+No all-445 pass is claimed.
+
+## 2026-08-13 — cross-entropy pass, all() still hangs
+
+After a green vendor `elementwise.py` probe, `test_cross_entropy_reductions` passed on device with atol 5e-2.
+Boolean ALL now maps AND loops onto MUL of 0/1 masks (50 EW ops for `all(2**15)` instead of 401). Hardware
+`Tensor.ones(2**15).bool().all()` still times out in `ioctl`; `elementwise.py` stays green afterward.
+Replacing native FP16 ABS with MAX+SUB hung `test_abs` of (45,65) and was reverted.
+No all-445 pass is claimed. `test_all_large` remains the open census failure.
+
+## 2026-08-14 — forward-only census correction and reducer recovery
+
+The authoritative hardware command is now recorded in `AGENTS.md` and always includes `FORWARD_ONLY=1`. Earlier
+gradient debugging was outside that contract and did not contribute to the forward census. A detached `/tmp` clone
+at the known-green `53e826e2d` checkpoint was used only as an oracle; the working tree was not reset or rolled back.
+
+The old renderer showed that FP16 dot products with 65 or more terms require the exact `_precise_mul_sum` spelling.
+Current mapped reductions now select that spelling only when both load-index graphs have no more than the output axes
+plus the one reduction axis. Scalar/vector/broadcast dot and 256×256 GEMM pass; convolution retains its compact mapped
+path and its existing submit count. Biased convolution folds bias into the compensated reduction instead of rounding
+the product sum first.
+
+The exact 445-test replay passed 177 tests, 6 expected skips, and 126 subtests before the NPU timed out during a
+`cummax` index kernel. The required vendor health probe then failed with `OSError: [Errno 6] No such device or address`,
+so a power cycle is required before continuing the remaining 262 tests. This is a hardware-health stop, not a current
+numeric/code failure, and no all-445 pass is claimed.

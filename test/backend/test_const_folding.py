@@ -48,6 +48,13 @@ class TestMovedConstFolding(unittest.TestCase):
     np.testing.assert_equal(Tensor.ones(4).pad(((1, 1),)).cast(dtypes.int64).numpy(), [0, 1, 1, 1, 1, 0])
 
 class TestReduceOpsConstFolding(unittest.TestCase):
+  def test_uniform_all(self):
+    for shape,value,expected in (((2**15,), 1, True), ((4, 5), 0, False), ((0,), 0, True)):
+      out = Tensor.full(shape, value).bool().all()
+      self.assertIs(out.uop.op, Ops.CONST)
+      np.testing.assert_equal(out.numpy(), expected)
+    self.assertEqual(Tensor.ones(4, 5).all(keepdim=True).shape, (1, 1))
+
   def test_const_sum(self):
     _check_ast_count(0, Tensor.ones(4, 5, 6).sum())
     np.testing.assert_equal(Tensor.ones(4, 5, 6).sum().numpy(), 4 * 5 * 6)

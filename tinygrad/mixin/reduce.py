@@ -135,4 +135,12 @@ class ReduceMixin(DTypeMixin, MovementMixin):
     print(t.all(axis=1, keepdim=True).numpy())
     ```
     """
+    u = self._uop.src[0] if self._uop.op is Ops.CAST and self._uop.dtype.scalar() is dtypes.bool else self._uop
+    if axis is None and all(isinstance(s, int) for s in self.shape) and u.op is Ops.AFTER and len(u.src) == 2 and \
+       u.src[1].op is Ops.STORE and len(u.src[1].src) == 2 and u.src[1].src[0].key == u.src[0].key:
+      value = u.src[1].src[1]
+      while value.op in (Ops.EXPAND, Ops.RESHAPE): value = value.src[0]
+      if value.op is Ops.CONST:
+        ret = self._wrap_uop(value.const_like(True if 0 in self.shape else bool(value.arg), dtypes.bool))
+        return ret.reshape((1,)*self.ndim) if keepdim else ret
     return self.bool().prod(axis, keepdim)
