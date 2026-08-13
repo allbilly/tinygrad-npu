@@ -141,15 +141,17 @@ def hand_coded_optimizations(k:Scheduler) -> Scheduler:
 
   # if last reduce dim is small(ish), loop unroll the reduce
   # NOTE: this can fail on multireduce with mismatching dimensions, this is okay
-  # ROCKCHIP DPU EW has no reduce loop. Scaled sums (average pooling) may unroll to 512; other reductions keep the proven 64-term bound.
+  # ROCKCHIP DPU EW has no reduce loop. Scaled sums (average pooling) may unroll to 512 terms total; other
+  # reductions keep the proven 64-term bound. A scaled sum whose reduce-axis product exceeds 512 stays a loop.
   try:
     if is_rockchip:
       scaled_sum = k.reduceop is not None and k.reduceop.arg[0] is Ops.ADD and \
                    any(u.op is Ops.MUL and k.reduceop in u.backward_slice for u in k.ast.backward_slice)
       unroll_limit = 512 if scaled_sum else 64
-      while k.unrollable_dims:
-        s = k.full_shape[k.unrollable_dims[-1]]
-        k.apply_opt(Opt(OptOps.UNROLL, len(k.unrollable_dims)-1, 0 if s <= unroll_limit else 32))
+      if not (scaled_sum and prod(k.full_shape[axis] for axis in k.unrollable_dims) > unroll_limit):
+        while k.unrollable_dims:
+          s = k.full_shape[k.unrollable_dims[-1]]
+          k.apply_opt(Opt(OptOps.UNROLL, len(k.unrollable_dims)-1, 0 if s <= unroll_limit else 32))
     elif k.unrollable_dims and (k.upcast_size() <= 4 or not k.axes_of(AxisType.UNROLL)) and (k.upcast_size() < 64):
       if (s:=k.full_shape[k.unrollable_dims[-1]]) <= 32:
         k.apply_opt(Opt(OptOps.UNROLL, len(k.unrollable_dims)-1, 0))

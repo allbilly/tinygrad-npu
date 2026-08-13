@@ -15,7 +15,8 @@ from tinygrad.renderer.rockchip import (RKArg, RKBufferKind, RKContext, RKExecut
   _bool_tautology, _bounded_int32_fp16_root, _canonical_half_storage, _exact_int_range, _finite_max_neutrals, _fp16_bits,
   _image_u16_safe,
   _eval_expr, _fp16_rewrite, _fp32_expr_to_half, _gather_plan, _iter_range_env,
-  _hoist_leading_vector_materialization, _lower_dynamic_typed_load, _lower_mapped_scalar_local_reduction, _lower_uop_program, _output_store,
+  _hoist_leading_vector_materialization, _lower_dynamic_typed_load, _lower_mapped_add_loop_reduction, _lower_mapped_scalar_local_reduction,
+  _lower_uop_program, _output_store,
   _reuse_linear_scratch,
   _semantic_local_loads, _static_int_vector, RockchipRenderer, decode_image, encode_image)
 from tinygrad.runtime import ops_rockchip as rockchip_runtime
@@ -236,6 +237,16 @@ def _cumulative_index_image(kind:str) -> RKImage:
     if _output_store(uops, dtypes.int, allow_local=True) is not None:
       return decode_image(base64.b64decode(renderer.render(uops)))
   raise AssertionError("cumulative index kernel not found")
+
+def _scalar_half_kernel(tensor:Tensor) -> tuple[list[UOp], RKImage, bytes]:
+  renderer = RockchipRenderer(Target("ROCKCHIP"))
+  for call in tensor.schedule_linear().src:
+    if not call.src or call.src[0].op is not Ops.SINK: continue
+    uops = line_rewrite(linearize(full_rewrite_to_sink(call.src[0], renderer)), pm_linearize_cleanups)
+    if (output:=_output_store(uops, dtypes.half, allow_local=True)) is not None and output[2] == 1:
+      binary = base64.b64decode(renderer.render(uops))
+      return uops, decode_image(binary), binary
+  raise AssertionError("scalar half kernel not found")
 
 def _first_tensor_image(tensor:Tensor) -> tuple[list[UOp], RKImage, bytes]:
   renderer = RockchipRenderer(Target("ROCKCHIP"))
@@ -1421,6 +1432,15 @@ def test_large_mapped_scalar_max_uses_compact_affine_materialization():
   assert (len(raw), hashlib.sha256(raw).hexdigest(), len(image.ew_ops), len(image.gathers), len(image.mid_gathers)) == \
     (101_138, "a4526ac2867fbbff782d32e87d86ed66f61c324a725fb497caa2e4d839515b71", 1_106, 12, count)
   assert max(max(len(gather.offsets), len(gather.values)) for gather in image.gathers) <= count
+  assert decode_image(raw) == image
+
+def test_nll_loss_3d_mean_keeps_mapped_reduce_loop():
+  logits = Tensor.empty(32, 10, 3, 3, 3, dtype=dtypes.half)
+  target = Tensor.empty(32, 3, 3, 3, dtype=dtypes.int)
+  uops, image, raw = _scalar_half_kernel(logits.log_softmax(axis=1).nll_loss(target))
+  assert _lower_mapped_add_loop_reduction(uops) is not None
+  assert len(uops) < 200 and len(image.ew_ops) < 2000 and len(image.gathers) < 32
+  assert len(image.host_gathers) <= 1 and not image.host_scatters
   assert decode_image(raw) == image
 
 def test_expanded_cumulative_indices_use_exact_compact_native_images():

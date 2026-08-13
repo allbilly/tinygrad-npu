@@ -5808,3 +5808,21 @@ checkpoint; runtime remains **508**, the mixin grows by one line, and total tree
 Rockchip UOp suite passes 139 tests with `-n12`, the null/UOp mixin suite passes 216, full Ruff and mypy pass, and exactly
 445 backend cases collect. Independent review verified both changes, with only the pre-existing early-return audit and
 the deliberately pending hardware replay noted as caveats. No all-445 hardware-pass claim is made.
+
+## 2026-08-13 — keep oversized scaled sums on the mapped reduce loop
+
+Compile-only profiling of the remaining backend families, without opening `/dev/dri`, found `test_nll_loss_3d` as the
+slowest case: 29.4 seconds, 20,642 linearized UOps, 148,597 EW stages, and 864 host gathers. The compact 53-node AST is
+a class gather plus a 32×3×3×3 mean. The Rockchip heuristic treated the 512-term scaled-sum budget as a per-axis limit,
+so each of 32, 3, 3, and 3 fully unrolled and `devectorize2` expanded the gather 864 times.
+
+The budget is now the product of reduce axes. A scaled ADD whose product exceeds 512 stays a REDUCE loop and is lowered
+by the existing mapped-add specializer: 63 UOps, 986 EW stages, six gathers, and one host gather for the INT32 class
+index. End-to-end compile-only time falls to 0.59 seconds. 512-element mean, 5×5 average pool, 32-element 2D NLL, and
+the exact 512-element cummin/cummax images are unchanged. The weighted 3D NLL fixture is 16×3×3×3=432 terms and still
+unrolls under the 512 budget.
+
+Renderer size remains **3,595**; `heuristic.py` grows by one executable line and total tree size is **29,172**. The
+Rockchip UOp suite passes 140 tests with `-n12`, full Ruff and mypy pass, and exactly 445 backend cases collect. This is
+a performance WIP, not the 3,400-line checkpoint or an all-445 hardware-pass claim. Hardware execution remains pending
+the required manual power cycle.
