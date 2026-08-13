@@ -1597,10 +1597,17 @@ def _lower_dynamic_typed_load(output:RKOutput, dtype:DType) -> RKImage|None:
     external = (bool_param.arg.slot, bool_offsets)
   try:
     index_offsets = tuple(evaluator.offsets(dynamic.src[0].src[1], None) for dynamic in loads)
-    plans = tuple(_gather_plan(data_param.arg.slot, 0, out_index, data_index.substitute(mapping),
-      gate.substitute(mapping | ({bool_loads[0]:bool_loads[0].const_like(True)} if bool_loads else {})), count, index_evaluator=evaluator)
-      for values in combinations for mapping in ({dynamic:dynamic.const_like(value) for dynamic,value in zip(loads, values)},))
-    plan_offsets = tuple(_plan_offsets(plan) for plan in plans)
+    vector_env, dst = evaluator._prepare(); shape = (candidates, len(dst))
+    static_env = {axis:values.reshape(1, -1) for axis,values in vector_env.items()}
+    load_values = {dynamic:np.asarray([values[axis] for values in combinations], dtype=np.int64).reshape(-1, 1)
+                   for axis,dynamic in enumerate(loads)}
+    if bool_load is not None: load_values[bool_load] = np.ones((1, 1), dtype=np.bool_)
+    def static_load(u:UOp) -> np.ndarray: return load_values[u]
+    cache:dict[UOp, _StaticValue] = {}
+    source_offsets = np.broadcast_to(_eval_expr(data_index, typing_cast(dict[UOp,_StaticValue], static_env), cache, True, static_load), shape)
+    valid = np.broadcast_to(_eval_expr(gate, typing_cast(dict[UOp,_StaticValue], static_env), cache, True, static_load), shape)
+    unordered = np.where(valid, source_offsets, -1).astype(np.int64); ordered = np.empty_like(unordered); ordered[:, dst] = unordered
+    plan_offsets = tuple(tuple(row) for row in ordered.tolist())
   except RuntimeError: return None
   if (any(not 0 <= offset < int(param.src[0].arg) or offset*4+3 > dtypes.int.max
           for offsets,param in zip(index_offsets, params) for offset in offsets) or
