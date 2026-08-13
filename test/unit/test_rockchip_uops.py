@@ -1561,7 +1561,7 @@ def test_static_local_unroll_preflight_reducer_steps(monkeypatch):
   result = local.after(update.end(*axes)).index(0).load()
   uops = list(UOp.sink(initialize, update, out.index(0).store(result)).toposort())
   def unexpected_iteration(*_args, **_kwargs): raise AssertionError("loop environments escaped the fallback step preflight")
-  monkeypatch.setattr("tinygrad.renderer.rockchip._iter_selected_range_env", unexpected_iteration)
+  monkeypatch.setattr("tinygrad.renderer.rockchip._iter_range_env", unexpected_iteration)
   assert _lower_uop_program(uops) is None
 
 def test_packed_bool_load_uses_canonical_int16_lanes():

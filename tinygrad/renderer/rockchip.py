@@ -361,10 +361,6 @@ def _reduction_stride(count:int) -> int: return round_up(count*2, 64)
 def _int32_tiles_bytes(count:int) -> int: return ceildiv(count, 4) * 64
 def _fp16_bits(value:float|int) -> int: return struct.unpack("<H", struct.pack("<e", float(value)))[0]
 def _int16_bits(value:int|float|bool) -> int: return int(value) & 0xffff
-def _int16_low_bytes(source:RKArg, out_slot:int, count:int, stride:int=2) -> RKGather:
-  return RKGather(source.index, out_slot, count, base=source.addend, axes=((1, count, stride),),
-                  dst_kind=RKBufferKind.ARG, src_kind=RKBufferKind.SCRATCH, itemsize=1)
-
 def _finish_ew_stage(regs:tuple[tuple[int, int, int], ...], dst:RKArg, lhs:RKArg, rhs:RKArg, rdma_feature:int) -> RKStage:
   commands = tuple(_cmd(*x) for x in regs)
   bindings = ((_DPU,rk.REG_DPU_DST_BASE_ADDR,dst),(_RDMA,rk.REG_DPU_RDMA_RDMA_SRC_BASE_ADDR,lhs),(_RDMA,rk.REG_DPU_RDMA_RDMA_EW_BASE_ADDR,rhs))
@@ -550,30 +546,25 @@ def _output_store(uops:list[UOp], dtype:DType|tuple[DType, ...], *, allow_local:
   if out_param.dtype.scalar() not in accepted or out_param.src[0].op is not Ops.CONST or store.src[0].op is not Ops.INDEX: return None
   return store, out_param, int(out_param.src[0].arg), store.src[0].src[1], store.src[1]
 
-def _iter_range_env(ranges:list[UOp], max_envs:int=_MAX_STATIC_RANGE_ENVS) -> list[dict[UOp, int]]:
+def _iter_range_env(ranges:list[UOp], max_envs:int|None=_MAX_STATIC_RANGE_ENVS, dependencies:bool=True) -> list[dict[UOp, int]]:
   if not ranges: return [{}]
-  order:list[UOp] = []
-  seen:set[UOp] = set()
-  def add(r:UOp) -> None:
-    if r in seen: return
-    for src in r.src[1:]:
-      if src.op is Ops.RANGE: add(src)
-    seen.add(r); order.append(r)
-  for r in ranges: add(r)
+  if dependencies:
+    order:list[UOp] = []
+    seen:set[UOp] = set()
+    def add(r:UOp) -> None:
+      if r in seen: return
+      for src in r.src[1:]:
+        if src.op is Ops.RANGE: add(src)
+      seen.add(r); order.append(r)
+    for r in ranges: add(r)
+  else: order = ranges
   envs:list[dict[UOp, int]] = [{}]
   for r in order:
     if r.src[0].op is not Ops.CONST: raise RuntimeError("RKPLAN_REJECT:unsupported_index")
     bound = int(r.src[0].arg)
-    if bound < 0 or bound and len(envs) > max_envs//bound: raise RuntimeError("RKPLAN_REJECT:static_index_budget")
+    if max_envs is not None and (bound < 0 or bound and len(envs) > max_envs//bound):
+      raise RuntimeError("RKPLAN_REJECT:static_index_budget")
     envs = [{**env, r: i} for env in envs for i in range(bound)]
-  return envs
-
-def _iter_selected_range_env(ranges:list[UOp]) -> list[dict[UOp, int]]:
-  """Enumerate only the selected structural axes, preserving dependent output axes as vector lanes."""
-  envs:list[dict[UOp, int]] = [{}]
-  for r in ranges:
-    if r.src[0].op is not Ops.CONST: raise RuntimeError("RKPLAN_REJECT:unsupported_index")
-    envs = [{**env, r:i} for env in envs for i in range(int(r.src[0].arg))]
   return envs
 
 def _static_int_vector(out_index:UOp, expr:UOp, count:int) -> tuple[int, ...]:
@@ -924,7 +915,7 @@ def _lower_mapped_add_loop_reduction(uops:list[UOp]) -> RKImage|None:
        all(len(_index_ranges(_strip_cast(src).src[0].src[1])) <= len(out_ranges)+1 for src in direct.src):
       try:
         terms = [direct.substitute({axis:axis.const_like(value) for axis,value in env.items()})
-                 for env in _iter_selected_range_env(axes)]
+                 for env in _iter_range_env(axes, None, False)]
         precise_store = store.replace(src=(store.src[0], _precise_mul_sum(terms), *store.src[2:]))
         if (precise:=_lower_uop_program(_fp16_rewrite(list(UOp(Ops.SINK, src=(precise_store,)).toposort())),
                                        vectorize_reductions=False, recipes_ready=True)) is not None: return precise
@@ -1172,12 +1163,6 @@ def _flatten_binary(root:UOp, op:Ops, *, plain:bool=False) -> list[UOp]:
 def _stripe_layout(count:int, rows:int) -> tuple[int, int, int]:
   vector_bytes = (count*2+63)&-64
   return vector_bytes, vector_bytes//2, rows*vector_bytes//2
-
-def _stripe_gathers(src_slot:int, dst_slot:int, count:int, rows:Iterable[Iterable[int]], vector_lanes:int, *,
-                    values:bool=False, itemsize:int=2) -> tuple[RKGather, ...]:
-  """Pack candidate or repeated-current rows into one aligned lane matrix."""
-  return tuple(RKGather(src_slot, dst_slot, count, offsets=() if values else tuple(row), values=tuple(row) if values else (),
-                        dst_addend=i*vector_lanes, itemsize=itemsize) for i,row in enumerate(rows))
 
 def _physical_lists(minimum:int=0) -> tuple[list[int], Callable[[int], int], list[RKGather], list[RKEWOp]]:
   scratch_sizes:list[int] = []; gathers:list[RKGather] = []; ops:list[RKEWOp] = []
@@ -1537,8 +1522,8 @@ def _lower_bounded_integer_predicate_coordinates(output:RKOutput, dtype:DType) -
   total_vector, output_coordinate, zero, one, coordinate_matrix = (scratch(matrix_lanes*2) for _ in range(5))
   mid = (RKGather(total.index, total_vector, count, offsets=(total.addend//2,)*count,
                   src_kind=RKBufferKind.SCRATCH, after=gather_after),)
-  gathers.extend(_stripe_gathers(source.arg.slot, coordinate_matrix, count,
-    tuple(tuple(_int16_bits(value) for value in row) for row in coordinate_rows), vector_lanes, values=True))
+  gathers.extend(RKGather(source.arg.slot, coordinate_matrix, count, values=tuple(_int16_bits(value) for value in row),
+    dst_addend=i*vector_lanes) for i,row in enumerate(coordinate_rows))
   gathers.extend((RKGather(source.arg.slot, output_coordinate, count, values=tuple(range(count))),
                   RKGather(source.arg.slot, zero, matrix_lanes, values=(0,)*matrix_lanes),
                   RKGather(source.arg.slot, one, matrix_lanes, values=(1,)*matrix_lanes)))
@@ -1704,11 +1689,6 @@ def _fp16_nonzero_mask(root:UOp) -> UOp|None:
   if (load:=_nonzero_load(root)) is None: return None
   magnitude = UOp(Ops.MAX, dtypes.half, src=(load, load), arg=_NATIVE_ABS)
   return _positive_mask(magnitude)
-
-def _half_backed(values:tuple[UOp, ...]) -> bool:
-  return all(value.dtype.scalar() in (dtypes.half, dtypes.float) and all(load.src and load.src[0].op is Ops.INDEX and
-    (param:=_root_param(load.src[0])) is not None and param.dtype.scalar() is dtypes.half
-    for load in value.toposort() if load.op is Ops.LOAD) for value in values)
 
 def _exact_int_range(root:UOp) -> tuple[int, int]|None:
   """Conservatively bound an integer UOp before choosing its exact physical scratch layout."""
@@ -2525,7 +2505,9 @@ class RKContext:
       value = self.lower(int16_recipe)
       if value.layout is not RKLayout.INT16: raise _RKGenericReject
       return RKValue(value.arg, dtypes.bool, self.count, RKLayout.BOOL_INT16)
-    if _half_backed(u.src):
+    if all(src.dtype.scalar() in (dtypes.half, dtypes.float) and all(load.src and load.src[0].op is Ops.INDEX and
+           (param:=_root_param(load.src[0])) is not None and param.dtype.scalar() is dtypes.half
+           for load in src.toposort() if load.op is Ops.LOAD) for src in u.src):
       return self._compare(u.replace(src=tuple(src if src.dtype.scalar() is dtypes.half else src.cast(dtypes.half) for src in u.src)))
     raise _RKGenericReject
 
@@ -2948,7 +2930,8 @@ class RKContext:
         self._emit(RKValue(self.out, dtype, self.count, RKLayout.INT16 if dtype is dtypes.int16 else RKLayout.FP16),
                    result, result, _EW_CFG[Ops.MAX])
     elif dtype is dtypes.uchar and result.layout is RKLayout.INT16 or dtype is dtypes.bool and result.layout is RKLayout.BOOL_INT16:
-      self.mid_gathers.append(_int16_low_bytes(result.arg, self.out_param.arg.slot, self.count))
+      self.mid_gathers.append(RKGather(result.arg.index, self.out_param.arg.slot, self.count, base=result.arg.addend,
+        axes=((1, self.count, 2),), dst_kind=RKBufferKind.ARG, src_kind=RKBufferKind.SCRATCH, itemsize=1))
     elif dtype is dtypes.bool and result.layout is RKLayout.BOOL_MASK:
       tiles = self._scratch(dtypes.int, RKLayout.INT32, _int32_tiles_bytes(self.count))
       self.ew_ops.append(RKEWOp(self.out, result.arg, tiles.arg, self.count, _EW_CFG[Ops.MAX],
@@ -3085,7 +3068,7 @@ def _unroll_static_reduces(root:UOp) -> UOp:
       iterations = math.prod(int(r.src[0].arg) for r in ranges)
       if iterations > _MAX_GENERIC_UNROLL or iterations*len(mapped.src[0].toposort()) > _MAX_GENERIC_EXPANDED_NODES:
         raise _RKGenericReject
-      envs = _iter_selected_range_env(ranges)
+      envs = _iter_range_env(ranges, None, False)
       if not envs: raise _RKGenericReject
       terms = [_substitute_static_ranges(mapped.src[0], {r:r.const_like(env[r]) for r in ranges}) for env in envs]
       mapped = _structural_reduce(reduce_op, u.dtype, terms)
@@ -3141,7 +3124,7 @@ def _unroll_static_local(uops:list[UOp], root:UOp) -> UOp:
     steps = math.prod(int(loop.src[0].arg) for loop in definition.loops)
     if steps > budget[0]: raise _RKGenericReject
     budget[0] -= steps
-    for loop_env in _iter_selected_range_env(list(definition.loops)):
+    for loop_env in _iter_range_env(list(definition.loops), None, False):
       term = expand_dependencies(definition.term, buffer, {**env, **loop_env})
       accumulator = UOp(definition.update_op, buffer.dtype, src=(accumulator, term))
     expanded[key] = accumulator
