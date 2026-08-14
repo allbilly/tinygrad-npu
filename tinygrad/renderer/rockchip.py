@@ -930,7 +930,7 @@ def _lower_mapped_add_loop_reduction(uops:list[UOp]) -> RKImage|None:
       mapped = RKImage(gathers=(replace(plan, dst_kind=RKBufferKind.ARG),), ew_ops=tuple(
         RKEWOp(replace(arg, addend=start*2), replace(arg, addend=start*2), replace(arg, addend=start*2),
                min(_MAX_EW_ELEMS_FP16, lanes-start), _EW_CFG[Ops.MAX]) for start in range(0, lanes, _MAX_EW_ELEMS_FP16)))
-      kahan = True
+      kahan |= rows > 1
     else:
       direct_load = next((_strip_cast(src) for src in direct.src if _strip_cast(src).op is Ops.LOAD), None) if direct.op is Ops.MUL else None
       mapped_term = direct.src[1] if direct_load is not None and _strip_cast(direct.src[0]) is direct_load else \
@@ -1309,6 +1309,128 @@ def _ordered_byte_less(ops:list[RKEWOp], allocate:Callable[[], RKArg], zero:RKAr
                 RKEWOp(next_equal, equal, same, lanes, _EW_CFG[Ops.MUL], **_INT16_EW)))
     less, equal = next_less, next_equal
   return less
+
+RKDynamicEquality = tuple[int, int, tuple[tuple[int, ...], ...], tuple[int, ...]]
+
+def _load_equality(predicate:UOp) -> tuple[UOp, UOp]|None:
+  """Recognize Tinygrad's boolean inversion of one CMPNE pair of loaded lanes."""
+  if predicate.op is not Ops.CMPNE: return None
+  truths = [x for x in predicate.src if x.op is Ops.CONST and x.dtype.scalar() is dtypes.bool and bool(x.arg)]
+  inequalities = [x for x in predicate.src if x.op is Ops.CMPNE]
+  pair = inequalities[0].src if len(truths) == len(inequalities) == 1 else ()
+  return pair if len(pair) == 2 and all(x.op is Ops.LOAD and x.src[0].op is Ops.INDEX for x in pair) else None
+
+def _loaded_equality_rows(out_index:UOp, count:int, pairs:tuple[tuple[UOp, UOp], ...], *,
+                          same_source:bool=False) -> RKDynamicEquality|None:
+  """Resolve one common INT32 load and its candidate loads into bounded rows."""
+  if not pairs or len(common:=set(pairs[0]).intersection(*(set(pair) for pair in pairs[1:]))) != 1: return None
+  current = next(iter(common)); candidates = tuple(next((x for x in pair if x is not current), None) for pair in pairs)
+  if any(x is None for x in candidates): return None
+  loads = typing_cast(tuple[UOp, ...], candidates)+(current,)
+  params = tuple(_root_param(load.src[0]) for load in loads)
+  if any(param is None or param.dtype.scalar() is not dtypes.int or param.src[0].op is not Ops.CONST for param in params): return None
+  concrete = typing_cast(tuple[UOp, ...], params); candidate_params, current_param = concrete[:-1], concrete[-1]
+  if len({param.arg.slot for param in candidate_params}) != 1 or same_source and candidate_params[0].arg.slot != current_param.arg.slot: return None
+  evaluator = RKStaticIndexEvaluator(out_index, count)
+  try:
+    candidate_offsets = tuple(evaluator.offsets(load.src[0].src[1], None) for load in loads[:-1])
+    current_offsets = evaluator.offsets(current.src[0].src[1], None)
+  except RuntimeError: return None
+  if (any(not 0 <= offset < int(param.src[0].arg) for offsets,param in zip(candidate_offsets, candidate_params) for offset in offsets) or
+      any(not 0 <= offset < int(current_param.src[0].arg) for offset in current_offsets)): return None
+  return candidate_params[0].arg.slot, current_param.arg.slot, candidate_offsets, current_offsets
+
+def _int32_weighted_equality_image(out_slot:int, count:int, axes:tuple[RKDynamicEquality, ...],
+                                   weight_rows:tuple[tuple[int, ...], ...]) -> RKImage|None:
+  """Reduce weighted conjunctions of exact INT32 equalities in native INT16 byte lanes."""
+  window = len(weight_rows)
+  if (not axes or not window or any(len(rows) != window for _,_,rows,_ in axes) or
+      any(len(row) != count for row in weight_rows)): return None
+  vector_bytes, vector_lanes, matrix_lanes = _stripe_layout(count, window)
+  if matrix_lanes > _MAX_EW_ELEMS_FP16: return None
+  scratch_sizes, scratch, gathers, ops = _physical_lists()
+  def allocate() -> RKArg: return _scratch_arg(scratch(_scratch_bytes(matrix_lanes)))
+  one, weights = allocate(), allocate()
+  gathers.extend((RKGather(axes[0][0], one.index, matrix_lanes, values=(1,)*matrix_lanes),
+                  *(RKGather(axes[0][0], weights.index, count, values=row, dst_addend=i*vector_lanes)
+                    for i,row in enumerate(weight_rows))))
+  combined = one
+  for candidate_slot,current_slot,candidate_offsets,current_offsets in axes:
+    candidates, currents = tuple(allocate() for _ in range(4)), tuple(allocate() for _ in range(4))
+    for byte in range(4):
+      for row,offsets in enumerate(candidate_offsets):
+        gathers.extend((RKGather(candidate_slot, candidates[byte].index, count,
+                                  offsets=tuple(offset*4+byte for offset in offsets), dst_stride=2,
+                                  dst_addend=row*vector_bytes, itemsize=1),
+                        RKGather(current_slot, currents[byte].index, count,
+                                  offsets=tuple(offset*4+byte for offset in current_offsets), dst_stride=2,
+                                  dst_addend=row*vector_bytes, itemsize=1)))
+      diff, magnitude, unequal, equal, selected = (allocate() for _ in range(5))
+      ops.extend((RKEWOp(diff, candidates[byte], currents[byte], matrix_lanes, _EW_CFG[Ops.SUB], **_INT16_EW),
+                  RKEWOp(magnitude, diff, diff, matrix_lanes, _EW_CFG_ABS, **_INT16_EW),
+                  RKEWOp(unequal, magnitude, one, matrix_lanes, _EW_CFG_MIN, **_INT16_EW),
+                  RKEWOp(equal, one, unequal, matrix_lanes, _EW_CFG[Ops.SUB], **_INT16_EW),
+                  RKEWOp(selected, combined, equal, matrix_lanes, _EW_CFG[Ops.MUL], **_INT16_EW)))
+      combined = selected
+  weighted = allocate(); ops.append(RKEWOp(weighted, combined, weights, matrix_lanes, _EW_CFG[Ops.MUL], **_INT16_EW))
+  total = _reduce_rows(ops, [replace(weighted, addend=weighted.addend+row*vector_bytes) for row in range(window)],
+                       count, _EW_CFG[Ops.ADD])
+  tiles = scratch(_int32_tiles_bytes(count))
+  ops.append(RKEWOp(RKArg(RKBufferKind.ARG, out_slot), total, _scratch_arg(tiles), count, _EW_CFG[Ops.MAX],
+                    int16_input=True, int32_output=True))
+  image = RKImage(tuple(RKScratch(size) for size in scratch_sizes), gathers=tuple(gathers), ew_ops=tuple(ops))
+  return image if _image_u16_safe(image) else None
+
+def _lower_occurrence_count(output:RKOutput) -> RKImage|None:
+  """Collapse stable-sort's unrolled INT32 prefix equality count into one candidate matrix."""
+  store, out_param, count, out_index, _ = output
+  if count <= 0: return RKImage()
+  parsed:list[tuple[tuple[UOp, UOp], UOp|None]] = []
+  for term in _flatten_binary(store.src[1], Ops.ADD):
+    if term.op is not Ops.CAST or term.dtype.scalar() is not dtypes.int: return None
+    predicate, gate = term.src[0], None
+    if predicate.op is Ops.AND:
+      equalities, gates = [x for x in predicate.src if not _is_static_expr(x)], [x for x in predicate.src if _is_static_expr(x)]
+      if len(equalities) != 1 or len(gates) != 1: return None
+      predicate, gate = equalities[0], gates[0]
+    if (pair:=_load_equality(predicate)) is None or any(x.dtype.scalar() is not dtypes.int for x in pair): return None
+    parsed.append((pair, gate))
+  if not 2 <= len(parsed) <= 255 or \
+     (rows:=_loaded_equality_rows(out_index, count, tuple(pair for pair,_ in parsed), same_source=True)) is None: return None
+  try: weights = tuple(_static_int_vector(out_index, gate, count) if gate is not None else (1,)*count for _,gate in parsed)
+  except RuntimeError: return None
+  candidate_src, current_src, candidate_offsets, current_offsets = rows
+  for dst in range(count):
+    active = [offsets[dst] for offsets,valid in zip(candidate_offsets, weights) if valid[dst] == 1]
+    if not active or len(active) != len(set(active)) or any(valid[dst] not in (0, 1) for valid in weights): return None
+  return _int32_weighted_equality_image(out_param.arg.slot, count,
+    ((candidate_src, current_src, candidate_offsets, current_offsets),), weights)
+
+def _lower_sort_index_selection(output:RKOutput) -> RKImage|None:
+  """Collapse stable-sort's two INT32 equality axes and weighted coordinate sum."""
+  store, out_param, count, out_index, _ = output
+  if count <= 0: return RKImage()
+  parsed:list[tuple[int, tuple[UOp, UOp], tuple[UOp, UOp]]] = []
+  for term in _flatten_binary(store.src[1], Ops.ADD):
+    weight,cast = 1,term
+    if term.op is Ops.MUL:
+      constants,casts = [x for x in term.src if x.op is Ops.CONST and x.dtype.scalar() is dtypes.int], [x for x in term.src if x.op is Ops.CAST]
+      if len(constants) != 1 or len(casts) != 1: return None
+      weight,cast = int(constants[0].arg),casts[0]
+    if weight <= 0 or cast.op is not Ops.CAST or cast.dtype.scalar() is not dtypes.int or cast.src[0].op is not Ops.AND: return None
+    pairs = tuple(pair for x in cast.src[0].src if (pair:=_load_equality(x)) is not None)
+    if len(pairs) != 2 or any(load.dtype.scalar() is not dtypes.int for pair in pairs for load in pair): return None
+    def slots(pair:tuple[UOp, UOp]) -> tuple[int, ...]:
+      return tuple(sorted(param.arg.slot for load in pair if (param:=_root_param(load.src[0])) is not None))
+    ordered = sorted(pairs, key=slots); parsed.append((weight, ordered[0], ordered[1]))
+  if (not parsed or max(weight for weight,_,_ in parsed) > 255 or
+      {weight for weight,_,_ in parsed} != set(range(1, max(weight for weight,_,_ in parsed)+1))): return None
+  parsed.sort(key=lambda item:item[0]); axes:list[RKDynamicEquality] = []
+  for pairs in (tuple(item[1] for item in parsed), tuple(item[2] for item in parsed)):
+    if (rows:=_loaded_equality_rows(out_index, count, pairs)) is None: return None
+    axes.append(rows)
+  return _int32_weighted_equality_image(out_param.arg.slot, count, tuple(axes),
+                                         tuple((weight,)*count for weight,_,_ in parsed))
 
 def _plan_offsets(plan:RKGather) -> tuple[int, ...]:
   if plan.offsets: return plan.offsets
@@ -3385,6 +3507,8 @@ def _lower_uop_program(uops:list[UOp], *, vectorize_reductions:bool=True, recipe
   if vectorize_reductions and (mapped_local:=_lower_mapped_scalar_local_reduction(uops)) is not None: return mapped_local
   if (scatter:=_lower_host_scatter(uops)) is not None: return scatter
   if (int_output:=_output_store(uops, dtypes.int)) is not None:
+    if (occurrence:=_lower_occurrence_count(int_output)) is not None: return occurrence
+    if (selection:=_lower_sort_index_selection(int_output)) is not None: return selection
     if (raw_bitcast:=_lower_raw_fp16_bitcast(int_output)) is not None: return raw_bitcast
   for dtype in (dtypes.half, dtypes.int16, dtypes.int):
     if (direct_load:=_output_store(uops, dtype)) is None: continue

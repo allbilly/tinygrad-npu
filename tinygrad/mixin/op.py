@@ -1764,7 +1764,7 @@ class OpMixin(ElementwiseMixin, ReduceMixin):
     if self.shape != Y.shape:
       if self.max(classes_dim).shape != Y.shape: raise RuntimeError(f"shape mismatch: {self.shape=}, {Y.shape=}")
       Y = Y.unsqueeze(classes_dim)._one_hot_along_dim(num_classes=self.shape[classes_dim], dim=classes_dim)
-    Y = (1 - label_smoothing)*Y + label_smoothing / int(Y.shape[classes_dim])
+    Y = ((1 - label_smoothing)*Y + label_smoothing / int(Y.shape[classes_dim])).cast(self.dtype)
     shifted, _, normalizer = self._softmax(classes_dim)
     return (normalizer.log().squeeze(classes_dim)*Y.sum(classes_dim) - shifted.mul(Y).sum(classes_dim))._do_reduction(reduction)
 

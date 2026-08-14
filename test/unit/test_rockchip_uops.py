@@ -466,6 +466,26 @@ def test_spatially_tiled_path_bounds_native_pc_chains(monkeypatch):
   program._run_ew_ops(lambda *_args:0, lambda *_args:None, ops)
   assert submitted == [48, 1, 48, 1]
 
+def test_three_task_pcchain_splits_at_safe_hardware_boundary(monkeypatch):
+  program = object.__new__(rockchip_runtime.RockchipProgram)
+  program.dev = SimpleNamespace(_forget_program=lambda _program:None)
+  submitted = []
+  monkeypatch.setattr(program, "_submit_pcchain", lambda bodies:submitted.append(len(bodies)))
+  bodies = [(rockchip_runtime._pc(rockchip_runtime._TARGET_DPU, rockchip_runtime.rk.REG_DPU_EW_CFG, _EW_CFG[op]),)
+            for op in (Ops.FDIV, Ops.ADD, Ops.MUL)]
+  rockchip_runtime.RockchipProgram._submit_pcchain(program, bodies)
+  assert submitted == [2, 1]
+
+def test_floor_recipe_pcchain_splits_at_safe_hardware_boundary(monkeypatch):
+  program = object.__new__(rockchip_runtime.RockchipProgram)
+  program.dev = SimpleNamespace(_forget_program=lambda _program:None)
+  submitted = []
+  monkeypatch.setattr(program, "_submit_pcchain", lambda bodies:submitted.append(len(bodies)))
+  configs = next(configs for configs,split in rockchip_runtime._UNSAFE_FP16_EW_CHAINS.items() if split == 1)
+  bodies = [(rockchip_runtime._pc(rockchip_runtime._TARGET_DPU, rockchip_runtime.rk.REG_DPU_EW_CFG, config),) for config in configs]
+  rockchip_runtime.RockchipProgram._submit_pcchain(program, bodies)
+  assert submitted == [1, 18]
+
 
 def test_changed_pcchains_use_fresh_buffers_and_rearm_first_body(monkeypatch):
   events, freed = [], []
@@ -1500,6 +1520,20 @@ def test_mean_512_keeps_mapped_reduce_loop():
   assert len(uops) < 80 and not image.host_gathers and not image.host_scatters
   assert decode_image(raw) == image
 
+def test_sum_16384_keeps_plain_mapped_add_tree():
+  uops, image, raw = _scalar_half_kernel(Tensor.empty(16_384, dtype=dtypes.half).sum())
+  assert _lower_mapped_add_loop_reduction(uops) is not None
+  assert len(image.ew_ops) == 16_383 and not image.mid_gathers and not image.host_gathers and not image.host_scatters
+  assert all(op.ew_cfg == _EW_CFG[Ops.ADD] for op in image.ew_ops)
+  assert image.execution_class is RKExecutionClass.NATIVE and decode_image(raw) == image
+
+def test_cumsum_512_keeps_compensated_mapped_add_rows():
+  uops, image, raw = _first_tensor_image(Tensor.empty(512, dtype=dtypes.half).cumsum(0))
+  assert _lower_mapped_add_loop_reduction(uops) is not None
+  assert len(image.ew_ops) == 2_050 and len(image.mid_gathers) == 512
+  assert any(op.ew_cfg == _EW_CFG[Ops.SUB] for op in image.ew_ops)
+  assert image.execution_class is RKExecutionClass.NATIVE and not image.host_gathers and decode_image(raw) == image
+
 def test_expanded_cumulative_indices_use_exact_compact_native_images():
   expected = {
     "cummin":(50_556, "17bb9517fcd3343663566322dc6257829b8f87b10fa62ee6b8caaaacfb01b43d", 591, 962),
@@ -1522,6 +1556,17 @@ def test_repeated_max_admission_is_generic_and_fail_closed():
   assert wide is not None and wide.execution_class is RKExecutionClass.NATIVE and not wide.host_gathers
   for count,mode in ((128, "corrupt"), (128, "negative"), (128, "float"), (127, "valid"), (513, "valid")):
     assert _lower_mapped_scalar_local_reduction(_repeated_max_uops(count, mode)) is None
+
+def test_integer_topk_indices_keep_compact_native_equality_reductions():
+  renderer, images = RockchipRenderer(Target("ROCKCHIP")), []
+  for call in Tensor.empty(8, dtype=dtypes.int).topk(3)[1].schedule_linear().src:
+    if not call.src or call.src[0].op is not Ops.SINK: continue
+    uops = line_rewrite(linearize(full_rewrite_to_sink(call.src[0], renderer)), pm_linearize_cleanups)
+    images.append(decode_image(base64.b64decode(renderer.render(uops))))
+  assert tuple(len(image.ew_ops) for image in images[-3:]) == (29, 29, 48)
+  assert all(image.execution_class is RKExecutionClass.NATIVE and not image.host_gathers and not image.host_scatters and
+             decode_image(encode_image(image)) == image for image in images[-3:])
+  assert tuple(len(image.mid_gathers) for image in images[-3:]) == (37, 0, 0)
 
 
 def test_nested_static_local_accumulators_materialize_load_addresses():

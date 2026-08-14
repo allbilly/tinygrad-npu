@@ -264,8 +264,10 @@ class TestTensorUOpInterpolate(unittest.TestCase):
 
 class TestTensorUOpLoss(unittest.TestCase):
   def test_cross_entropy(self):
-    t, Y = _t(2, 3).float(), Tensor([1, 2], dtype=dtypes.int32)
-    self.assertIs(t.cross_entropy(Y).uop, t.uop.cross_entropy(Y.uop))
+    Y = Tensor([1, 2], dtype=dtypes.int32)
+    for t in (_t(2, 3).float(), _t(2, 3).half()):
+      self.assertIs(t.cross_entropy(Y).uop, t.uop.cross_entropy(Y.uop))
+      self.assertIs(t.cross_entropy(Y).dtype, t.dtype)
   def test_sparse_categorical_crossentropy(self):
     t, Y = _t(2, 3).float(), Tensor([1, 2], dtype=dtypes.int32)
     self.assertIs(t.sparse_categorical_crossentropy(Y).uop, t.uop.sparse_categorical_crossentropy(Y.uop))

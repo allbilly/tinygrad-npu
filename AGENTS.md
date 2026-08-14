@@ -1,6 +1,8 @@
 # Notes
 
 - Always speak English only
+- Run every Rockchip hardware test with `FORWARD_ONLY=1`
+- Preserve existing branches; prove historical bases and every cleanup experiment in isolated `/tmp` worktrees before creating or updating a working branch
 - comments and docstrings are not counted in sz.py, no need delete them for lines cleanup
 
 - Run tests with `-n12` for speed (e.g. `python -m pytest test/null/test_dtype.py -x -q -n12`)

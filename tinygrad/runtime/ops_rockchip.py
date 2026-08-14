@@ -5,9 +5,10 @@ import numpy as np
 from tinygrad.device import BufferSpec, Compiled, LRUAllocator, Program, TinyELF
 from tinygrad.helpers import from_mv, suppress_finalizing, to_mv
 from tinygrad.renderer.rockchip import (RKBufferKind, RockchipRenderer, decode_image, patch_stage, emit_ew_stage,
-  RKArg, RKGather, RKHostAddress, RKEWOp, _MAX_EW_ELEMS_FP16, _EW_STAGE_FP32_OUT)
+  RKArg, RKGather, RKHostAddress, RKEWOp, _MAX_EW_ELEMS_FP16, _EW_CFG, _EW_CFG_FLOOR, _EW_STAGE_FP32_OUT)
 from tinygrad.runtime.autogen import rockchip as rk
 from tinygrad.runtime.support.hcq import FileIOInterface, HCQBuffer
+from tinygrad.uop.ops import Ops
 
 _PC_TAIL, _CMD_BUF_MIN, _TASK_BUF_MIN = 4, 65536, 16384
 _CMD_PREFETCH_GUARD = mmap.PAGESIZE
@@ -19,6 +20,10 @@ _SAFE_TILE = 2048
 _TASK_DESC_BYTES = ctypes.sizeof(rk.struct_rknpu_task)
 _BO_FLAGS = rk.RKNPU_MEM_NON_CONTIGUOUS|rk.RKNPU_MEM_CACHEABLE|rk.RKNPU_MEM_IOMMU_LIMIT_IOVA_ALIGNMENT
 _TARGET_DPU, _TARGET_DPU_RDMA = 0x1001, 0x2001
+_UNSAFE_FP16_EW_CHAINS:dict[tuple[int|None, ...], int] = {
+  tuple(_EW_CFG[op] for op in (Ops.FDIV, Ops.ADD, Ops.MUL)):2,
+  (_EW_CFG_FLOOR, *tuple(_EW_CFG[op] for op in (Ops.SUB, Ops.MUL, Ops.ADD, Ops.MUL, Ops.ADD, Ops.MUL, Ops.ADD, Ops.MUL,
+    Ops.ADD, Ops.MUL, Ops.ADD, Ops.ADD, Ops.MAX, Ops.SUB, Ops.SUB, Ops.MAX, Ops.SUB, Ops.MUL))):1}
 
 def _pc(target:int, reg:int, value:int=0) -> int: return (target << 48) | ((value & 0xffffffff) << 16) | reg
 def _align_up(value:int, alignment:int) -> int: return (value + alignment - 1) & ~(alignment - 1)
@@ -34,6 +39,9 @@ def _body_precision(body:tuple[int, ...]) -> tuple[int, int]|None:
   value = next(((word >> 16) & 0xffffffff for word in body
                 if word >> 48 == _TARGET_DPU and word & 0xffff == rk.REG_DPU_DATA_FORMAT), None)
   return None if value is None else (value & 7, value >> 29 & 7)
+def _body_ew_cfg(body:tuple[int, ...]) -> int|None:
+  return next(((word >> 16) & 0xffffffff for word in body
+               if word >> 48 == _TARGET_DPU and word & 0xffff == rk.REG_DPU_EW_CFG), None)
 def _pcchain_sizes(body_qwords:list[int]) -> tuple[int, int]:
   """Exact command and descriptor BO sizes for one PC-chain, including prefetch guard."""
   if not body_qwords or any(not 0 < amount <= _PC_DATA_AMOUNT_MAX for amount in body_qwords): raise ValueError("invalid EW PC-chain body")
@@ -125,6 +133,9 @@ class RockchipProgram(Program['RockchipDevice']):
 
   def _submit_pcchain(self, bodies:list[tuple[int, ...]]) -> None:
     """Submit contiguous FP16 EW tasks as one blocking PC chain."""
+    if (split:=_UNSAFE_FP16_EW_CHAINS.get(tuple(map(_body_ew_cfg, bodies)))) is not None:
+      for group in (bodies[:split], bodies[split:]): self._submit_pcchain(group)
+      return
     first, last = _body_precision(bodies[0]), _body_precision(bodies[-1])
     if first is not None and (self.dev._ew_precision, first[0]) in ((4, 1), (4, 2)): self.dev.reset_npu()
     bodies = [_rearm_body(bodies[0]), *bodies[1:]]
