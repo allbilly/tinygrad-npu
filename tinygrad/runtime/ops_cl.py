@@ -67,6 +67,9 @@ class CLProgram(Program['CLDevice']):
     event = cl.cl_event() if wait else None
     check(cl.clEnqueueNDRangeKernel(self.dev.queue, self.kernel, len(global_size), None, (ctypes.c_size_t * len(global_size))(*global_size),
                                     (ctypes.c_size_t * len(local_size))(*local_size), 0, None, event))
+    if self.dev.pending_kernel_limit:
+      self.dev.pending_kernels += 1
+      if self.dev.pending_kernels >= self.dev.pending_kernel_limit: self.dev.synchronize()
     if wait:
       assert event is not None
       check(cl.clWaitForEvents(1, event))
@@ -106,6 +109,9 @@ class CLDevice(Compiled):
                                            buf:=ctypes.create_string_buffer(256), None), buf.value.decode())[1]
     self.driver_version = (cl.clGetDeviceInfo(self.cl_dev, cl.CL_DRIVER_VERSION, 256,
                                               buf:=ctypes.create_string_buffer(256), None), buf.value.decode())[1]
+    # Mali 2.1/Qwen3-0.6B: 128 passed serving; 576 was ~1% faster in one timing round; 608 crashed.
+    self.pending_kernel_limit = 128 if self.device_name == "Mali-LODX r0p0" and self.driver_version == "2.1" else 0
+    self.pending_kernels = 0
     if DEBUG >= 1: print(f"CLDevice: opening {self.device_name} with version {self.driver_version}")
     self.context = checked(cl.clCreateContext(None, 1, self.cl_dev, CC_CB(), None, status := ctypes.c_int32()), status)
     self.queue = checked(cl.clCreateCommandQueue(self.context, self.cl_dev, cl.CL_QUEUE_PROFILING_ENABLE, status), status)
@@ -128,3 +134,4 @@ class CLDevice(Compiled):
   def synchronize(self, timeout:int|None=None):
     check(cl.clFinish(self.queue))
     self.pending_copyin.clear()
+    self.pending_kernels = 0
