@@ -6,6 +6,8 @@ from tinygrad.helpers import getenv, DEBUG, DEV, IMAGE, Context
 from tinygrad import Tensor, Device, dtypes
 from tinygrad.tensor import _to_np_dtype
 from tinygrad.renderer.nir import NIRRenderer
+# Match scalar promotion when DEFAULT_FLOAT selects a non-FP32 test dtype.
+torch.set_default_dtype(getattr(torch, dtypes.default_float.name))
 
 TINY_BACKEND = getenv("TINY_BACKEND")
 if TINY_BACKEND:
