@@ -1476,7 +1476,8 @@ class TestOps(unittest.TestCase):
     helper_test_op(
       [],
       lambda: torch.tensor(1.0).reshape((1,1,1)).expand(2,4,3).mul(torch.tensor(1.0).reshape((1,1,1)).expand(2,4,3)).sum(-1),
-      lambda: Tensor(1.0).reshape((1,1,1)).expand(2,4,3).mul(Tensor(1.0).reshape((1,1,1)).expand(2,4,3)).sum(-1),
+      lambda: Tensor(1.0, dtype=dtypes.default_float).reshape((1,1,1)).expand(2,4,3).mul(
+        Tensor(1.0, dtype=dtypes.default_float).reshape((1,1,1)).expand(2,4,3)).sum(-1),
       forward_only=True
     )
     a = [[1.,1.,1.,1.], [1.,1.,1.,1.]]
