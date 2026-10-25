@@ -3,10 +3,23 @@ from tinygrad import Tensor, Context, Device, dtypes
 from tinygrad.codegen import to_program
 from tinygrad.codegen.opt import Opt, OptOps
 from tinygrad.codegen.late.linearizer import do_split_ends
+from tinygrad.helpers import Target
+from tinygrad.renderer.cstyle import OpenCLRenderer
 from tinygrad.uop.ops import KernelInfo, AxisType, UOp, Ops
+from tinygrad.uop.symbolic import uop_given_valid
 from test.helpers import to_uops_list
 
 class TestLinearizerRewrite(unittest.TestCase):
+  def test_given_valid_preserves_range_bound(self):
+    pos, count = UOp.variable("pos", 0, 28), UOp.variable("count", 1, 4)
+    rng = UOp.range(pos+count, 0)
+    for try_simplex in (False, True):
+      self.assertIs(uop_given_valid(3<count, rng+count*8, try_simplex=try_simplex), rng+32)
+
+  def test_given_valid_simplifies_range_index(self):
+    rng = UOp.range(4, 0)
+    self.assertIs(uop_given_valid(2<rng, rng%3), UOp.const(0))
+
   def test_range_order(self):
     types = [AxisType.DEVICE, AxisType.GLOBAL, AxisType.LOCAL, AxisType.WARP, AxisType.WEAK, AxisType.LOOP,
              AxisType.UPCAST, AxisType.PLACEHOLDER]
@@ -68,6 +81,20 @@ class TestLinearizerRewrite(unittest.TestCase):
                      [Ops.RANGE, Ops.RANGE, Ops.STORE, Ops.END, Ops.STORE, Ops.END])
     rngs, ends = [u for u in uops if u.op is Ops.RANGE], [u for u in uops if u.op is Ops.END]
     self.assertEqual([e.src[1] for e in ends], rngs[::-1])
+
+  def test_gated_symbolic_matmul_keeps_single_reduction_loop(self):
+    pos, rows = UOp.variable("pos", 0, 28).bind(0), UOp.variable("rows", 1, 4).bind(3)
+    a = Tensor.empty(4, 32, device="NULL")[:rows, :pos+rows].pad(((0, 4-rows), (0, 0)))
+    b = Tensor.empty(32, 8, device="NULL")[:pos+rows]
+    linear, _ = (a@b).linear_with_vars()
+    prg = to_program(linear.src[0].src[0], OpenCLRenderer(Target("CL")))
+    ranges = [u for u in prg.src[1].src if u.op is Ops.RANGE]
+    ends = [u for u in prg.src[1].src if u.op is Ops.END]
+    self.assertEqual(len(ranges), 1)
+    self.assertEqual(len(ends), 1)
+    self.assertIs(ends[0].src[1], ranges[0])
+    source = prg.src[2].arg
+    self.assertEqual(source.count("{"), source.count("}"))
 
 if __name__ == '__main__':
   unittest.main()

@@ -1,7 +1,7 @@
 # all of symbolic lives here now
 import math
 from collections import defaultdict
-from tinygrad.uop.ops import Ops, PatternMatcher, UPat, UOp, GroupOp, exec_alu, promo_dtype
+from tinygrad.uop.ops import Ops, PatternMatcher, UPat, UOp, GroupOp, exec_alu, promo_dtype, BottomUpGate
 from tinygrad.dtype import PyConst, ConstFloat, dtypes, can_lossless_cast, Invalid, bitcast, truncate
 from tinygrad.helpers import partition, all_same, prod, flatten, IMAGE, dedup, ceildiv
 from tinygrad.uop.divandmod import div_and_mod_symbolic
@@ -337,6 +337,12 @@ def parse_valid(v:UOp) -> tuple[UOp, bool, int]|None:
   if (a:=lt.src[0]).op is Ops.CONST: return lt.src[1], neg, int(a.val) + (0 if neg else 1)
   return a, not neg, int(lt.src[1].vmin) if neg else int(lt.src[1].vmax)-1
 
+def _gate_range_substitution(ctx:dict[UOp, UOp], r:UOp) -> None:
+  # Branch-local assumptions may simplify the index, but must not clone its enclosing loop's binder.
+  if r not in ctx: raise BottomUpGate()
+
+pm_preserve_ranges = PatternMatcher([(UPat(Ops.RANGE, name="r"), _gate_range_substitution)])
+
 def uop_given_valid(valid:UOp, uop:UOp, try_simplex=True) -> UOp:
   # return simplified uop (might be the same as input)
 
@@ -357,15 +363,16 @@ def uop_given_valid(valid:UOp, uop:UOp, try_simplex=True) -> UOp:
       # For X0 + X1 + ... > 0, check whether every Xi > 0 gives the same simplified output.
       candidate = [(Xi, UOp.variable(f"fake{i}", 1, Xi.vmax, Xi.dtype)) for Xi in expr.split_uop(Ops.ADD)]
       if any(X not in uop.backward_slice_with_self for X,_ in candidate): continue
-      newuops = [uop.substitute({X:newX}).simplify().substitute({newX:X}).simplify() for X,newX in candidate]
+      newuops = [uop.substitute({X:newX}, extra_pm=pm_preserve_ranges).simplify()
+                .substitute({newX:X}, extra_pm=pm_preserve_ranges).simplify() for X,newX in candidate]
       if all_same(newuops): uop = newuops[0]
       elif uop.op is Ops.STACK and len(uop.src) == 2:
         if all_same([uops.src[0] for uops in newuops]): uop = uop.replace(src=(newuops[0].src[0], uop.src[1]))
         if all_same([uops.src[1] for uops in newuops]): uop = uop.replace(src=(uop.src[0], newuops[0].src[1]))
 
   # try all the valids together (but only the whole expressions)
-  if (s_uop:=uop.substitute(sub_dict:=dict(all_candidates))) is not uop:
-    uop = s_uop.simplify().substitute({newX:X for X,newX in sub_dict.items()}).simplify()
+  if (s_uop:=uop.substitute(sub_dict:=dict(all_candidates), extra_pm=pm_preserve_ranges)) is not uop:
+    uop = s_uop.simplify().substitute({newX:X for X,newX in sub_dict.items()}, extra_pm=pm_preserve_ranges).simplify()
   return uop
 
 def _valid_priority(v: UOp, valids:list[UOp]) -> tuple[int, int]:
