@@ -1,0 +1,6 @@
+{
+  "status": "qualified",
+  "goal_complete": true,
+  "benchmark": "rockchip-vlm-benchmark.json",
+  "verification": "rockchip-vlm-verification.json"
+}

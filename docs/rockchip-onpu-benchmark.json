@@ -1,0 +1,589 @@
+{
+  "complete": true,
+  "rows": [
+    {
+      "mode": "gpu",
+      "device": "CL",
+      "placement": null,
+      "trials": [
+        {
+          "prompt": "Write every number from one to ten in words.",
+          "response": {
+            "id": "chatcmpl-273d50d10a1641729d60ff47",
+            "object": "chat.completion",
+            "created": 1792255381,
+            "model": "55a95dc3c1b93b72",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "One, two, three, four, five, six, seven, eight,"
+                },
+                "finish_reason": "length"
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 22,
+              "completion_tokens": 16,
+              "total_tokens": 38
+            }
+          },
+          "metrics": {
+            "prompt_tokens": 22,
+            "cached_tokens": 0,
+            "completion_tokens": 16,
+            "ttft_ms": 6327.06856704317,
+            "total_seconds": 14.799460667883977,
+            "decode_tps": 1.770555471255495,
+            "prefill_tps": 3.4771236895700754,
+            "device": "CL",
+            "allocated_bytes": 1439944168,
+            "id": "ae167152ef7d4dd8bfc8d455cebaf815",
+            "model": "55a95dc3c1b93b72",
+            "profile": "CL",
+            "context": 512,
+            "created": 1792255381.796549,
+            "model_path": "/home/orangepi/oNPU/.data/models/72717a59205944dc-Qwen3-0.6B-Q8_0.gguf"
+          }
+        },
+        {
+          "prompt": "Explain why the sky looks blue.",
+          "response": {
+            "id": "chatcmpl-f627ee11437f4592b54f487e",
+            "object": "chat.completion",
+            "created": 1792255395,
+            "model": "55a95dc3c1b93b72",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "The sky appears blue because of the way light interacts with the Earth's atmosphere."
+                },
+                "finish_reason": "length"
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 20,
+              "completion_tokens": 16,
+              "total_tokens": 36
+            }
+          },
+          "metrics": {
+            "prompt_tokens": 20,
+            "cached_tokens": 3,
+            "completion_tokens": 16,
+            "ttft_ms": 4729.93162414059,
+            "total_seconds": 13.855419498169795,
+            "decode_tps": 1.6437862949348752,
+            "prefill_tps": 3.594132294267326,
+            "device": "CL",
+            "allocated_bytes": 1439944168,
+            "id": "e358d2a821774524b9f43d036d3275b0",
+            "model": "55a95dc3c1b93b72",
+            "profile": "CL",
+            "context": 512,
+            "created": 1792255395.7562258,
+            "model_path": "/home/orangepi/oNPU/.data/models/72717a59205944dc-Qwen3-0.6B-Q8_0.gguf"
+          }
+        },
+        {
+          "prompt": "Explain how to grow a tomato plant.",
+          "response": {
+            "id": "chatcmpl-a65d310795ed4c70b4befa5e",
+            "object": "chat.completion",
+            "created": 1792255409,
+            "model": "55a95dc3c1b93b72",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "Growing a tomato plant is a rewarding and simple process that requires patience and care."
+                },
+                "finish_reason": "length"
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 21,
+              "completion_tokens": 16,
+              "total_tokens": 37
+            }
+          },
+          "metrics": {
+            "prompt_tokens": 21,
+            "cached_tokens": 5,
+            "completion_tokens": 16,
+            "ttft_ms": 4327.310187974945,
+            "total_seconds": 13.560912319924682,
+            "decode_tps": 1.624640463750855,
+            "prefill_tps": 3.6974469832234362,
+            "device": "CL",
+            "allocated_bytes": 1439944168,
+            "id": "2178747e871d4c96977fcd03f1263e41",
+            "model": "55a95dc3c1b93b72",
+            "profile": "CL",
+            "context": 512,
+            "created": 1792255409.3741875,
+            "model_path": "/home/orangepi/oNPU/.data/models/72717a59205944dc-Qwen3-0.6B-Q8_0.gguf"
+          }
+        }
+      ]
+    },
+    {
+      "mode": "auto",
+      "device": "CL+ROCKCHIP",
+      "placement": {
+        "layers": 197,
+        "decode_layers": 141,
+        "prefill_layers": 1,
+        "decisions": [
+          {
+            "device": "CL",
+            "shape": [
+              3072,
+              1024
+            ],
+            "phase": "decode",
+            "valid": true,
+            "max_abs_error": 0.00012288987636566162,
+            "original_ms": 4.5493480283766985,
+            "npu_ms": 2.6640428695827723,
+            "selected": true
+          },
+          {
+            "device": "CL",
+            "shape": [
+              3072,
+              1024
+            ],
+            "phase": "prefill",
+            "valid": true,
+            "max_abs_error": 0.00017940998077392578,
+            "original_ms": 8.772327098995447,
+            "npu_ms": 216.68438310734928,
+            "selected": false
+          },
+          {
+            "device": "CL",
+            "shape": [
+              1024,
+              3072
+            ],
+            "phase": "decode",
+            "valid": true,
+            "max_abs_error": 0.0001225210726261139,
+            "original_ms": 7.025270024314523,
+            "npu_ms": 3.1210791785269976,
+            "selected": true
+          },
+          {
+            "device": "CL",
+            "shape": [
+              1024,
+              3072
+            ],
+            "phase": "prefill",
+            "valid": true,
+            "max_abs_error": 0.00016540288925170898,
+            "original_ms": 12.204316910356283,
+            "npu_ms": 433.3597260992974,
+            "selected": false
+          },
+          {
+            "device": "CL",
+            "shape": [
+              2048,
+              1024
+            ],
+            "phase": "decode",
+            "valid": true,
+            "max_abs_error": 0.00013002753257751465,
+            "original_ms": 4.804552998393774,
+            "npu_ms": 2.875789999961853,
+            "selected": true
+          },
+          {
+            "device": "CL",
+            "shape": [
+              2048,
+              1024
+            ],
+            "phase": "prefill",
+            "valid": true,
+            "max_abs_error": 0.00023597478866577148,
+            "original_ms": 5.083673866465688,
+            "npu_ms": 216.65434213355184,
+            "selected": false
+          },
+          {
+            "device": "CL",
+            "shape": [
+              1024,
+              1024
+            ],
+            "phase": "decode",
+            "valid": true,
+            "max_abs_error": 0.0001850724220275879,
+            "original_ms": 2.6191279757767916,
+            "npu_ms": 2.7868340257555246,
+            "selected": false
+          },
+          {
+            "device": "CL",
+            "shape": [
+              1024,
+              1024
+            ],
+            "phase": "prefill",
+            "valid": true,
+            "max_abs_error": 0.000232696533203125,
+            "original_ms": 4.7080127988010645,
+            "npu_ms": 216.67330083437264,
+            "selected": false
+          },
+          {
+            "device": "CL",
+            "shape": [
+              1024,
+              2048
+            ],
+            "phase": "decode",
+            "valid": true,
+            "max_abs_error": 0.00010779500007629395,
+            "original_ms": 4.793178057298064,
+            "npu_ms": 2.8174580074846745,
+            "selected": true
+          },
+          {
+            "device": "CL",
+            "shape": [
+              1024,
+              2048
+            ],
+            "phase": "prefill",
+            "valid": true,
+            "max_abs_error": 0.00017856061458587646,
+            "original_ms": 8.731786161661148,
+            "npu_ms": 216.65113419294357,
+            "selected": false
+          },
+          {
+            "device": "CL",
+            "shape": [
+              151936,
+              1024
+            ],
+            "phase": "decode",
+            "valid": true,
+            "max_abs_error": 0.00010953843593597412,
+            "original_ms": 195.83169603720307,
+            "npu_ms": 55.643626023083925,
+            "selected": true
+          },
+          {
+            "device": "CL",
+            "shape": [
+              151936,
+              1024
+            ],
+            "phase": "prefill",
+            "valid": true,
+            "max_abs_error": 0.00010481942445039749,
+            "original_ms": 197.25179905071855,
+            "npu_ms": 55.73870800435543,
+            "selected": true
+          }
+        ]
+      },
+      "trials": [
+        {
+          "prompt": "Write every number from one to ten in words.",
+          "response": {
+            "id": "chatcmpl-dbac332163da4cd28490adc5",
+            "object": "chat.completion",
+            "created": 1792255495,
+            "model": "55a95dc3c1b93b72",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "One, two, three, four, five, six, seven, eight,"
+                },
+                "finish_reason": "length"
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 22,
+              "completion_tokens": 16,
+              "total_tokens": 38
+            }
+          },
+          "metrics": {
+            "prompt_tokens": 22,
+            "cached_tokens": 0,
+            "completion_tokens": 16,
+            "ttft_ms": 6275.224424898624,
+            "total_seconds": 14.645497679943219,
+            "decode_tps": 1.7921600410251632,
+            "prefill_tps": 3.5058507091330693,
+            "device": "CL+ROCKCHIP",
+            "allocated_bytes": 2517194216,
+            "npu_submissions": 2708,
+            "id": "fdc76d486988443a93bb95658bb23316",
+            "model": "55a95dc3c1b93b72",
+            "profile": "CL",
+            "context": 512,
+            "created": 1792255495.3008866,
+            "model_path": "/home/orangepi/oNPU/.data/models/72717a59205944dc-Qwen3-0.6B-Q8_0.gguf"
+          }
+        },
+        {
+          "prompt": "Explain why the sky looks blue.",
+          "response": {
+            "id": "chatcmpl-c2cdfd9d165f4503a0fd46f4",
+            "object": "chat.completion",
+            "created": 1792255508,
+            "model": "55a95dc3c1b93b72",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "The sky appears blue because of the way light interacts with the Earth's atmosphere."
+                },
+                "finish_reason": "length"
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 20,
+              "completion_tokens": 16,
+              "total_tokens": 36
+            }
+          },
+          "metrics": {
+            "prompt_tokens": 20,
+            "cached_tokens": 3,
+            "completion_tokens": 16,
+            "ttft_ms": 4619.036075193435,
+            "total_seconds": 12.857866170117632,
+            "decode_tps": 1.820697374900359,
+            "prefill_tps": 3.6804215691881295,
+            "device": "CL+ROCKCHIP",
+            "allocated_bytes": 2517194216,
+            "npu_submissions": 2708,
+            "id": "ac5842402d334af8a64d82e11255e504",
+            "model": "55a95dc3c1b93b72",
+            "profile": "CL",
+            "context": 512,
+            "created": 1792255508.2344425,
+            "model_path": "/home/orangepi/oNPU/.data/models/72717a59205944dc-Qwen3-0.6B-Q8_0.gguf"
+          }
+        },
+        {
+          "prompt": "Explain how to grow a tomato plant.",
+          "response": {
+            "id": "chatcmpl-dc9ab55497114b9db4f62d8a",
+            "object": "chat.completion",
+            "created": 1792255520,
+            "model": "55a95dc3c1b93b72",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "Growing a tomato plant is a rewarding and simple process that requires patience and care."
+                },
+                "finish_reason": "length"
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 21,
+              "completion_tokens": 16,
+              "total_tokens": 37
+            }
+          },
+          "metrics": {
+            "prompt_tokens": 21,
+            "cached_tokens": 5,
+            "completion_tokens": 16,
+            "ttft_ms": 4311.159095959738,
+            "total_seconds": 12.57189798890613,
+            "decode_tps": 1.815866217225289,
+            "prefill_tps": 3.711298897550457,
+            "device": "CL+ROCKCHIP",
+            "allocated_bytes": 2517194216,
+            "npu_submissions": 2708,
+            "id": "ab80abc80c9146feb5123096c7bf4d4d",
+            "model": "55a95dc3c1b93b72",
+            "profile": "CL",
+            "context": 512,
+            "created": 1792255520.8577971,
+            "model_path": "/home/orangepi/oNPU/.data/models/72717a59205944dc-Qwen3-0.6B-Q8_0.gguf"
+          }
+        }
+      ]
+    },
+    {
+      "mode": "gpu",
+      "device": "CL",
+      "placement": null,
+      "trials": [
+        {
+          "prompt": "Write every number from one to ten in words.",
+          "response": {
+            "id": "chatcmpl-010ea856fa5546888d065080",
+            "object": "chat.completion",
+            "created": 1792255565,
+            "model": "55a95dc3c1b93b72",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "One, two, three, four, five, six, seven, eight,"
+                },
+                "finish_reason": "length"
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 22,
+              "completion_tokens": 16,
+              "total_tokens": 38
+            }
+          },
+          "metrics": {
+            "prompt_tokens": 22,
+            "cached_tokens": 0,
+            "completion_tokens": 16,
+            "ttft_ms": 6328.077601036057,
+            "total_seconds": 14.777283170958981,
+            "decode_tps": 1.7754228230667275,
+            "prefill_tps": 3.476569250098652,
+            "device": "CL",
+            "allocated_bytes": 1439944168,
+            "id": "ded2e245771044afbf6c553ff789ec16",
+            "model": "55a95dc3c1b93b72",
+            "profile": "CL",
+            "context": 512,
+            "created": 1792255565.4058282,
+            "model_path": "/home/orangepi/oNPU/.data/models/72717a59205944dc-Qwen3-0.6B-Q8_0.gguf"
+          }
+        },
+        {
+          "prompt": "Explain why the sky looks blue.",
+          "response": {
+            "id": "chatcmpl-ce180fc41ac4403e9e603ae8",
+            "object": "chat.completion",
+            "created": 1792255578,
+            "model": "55a95dc3c1b93b72",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "The sky appears blue because of the way light interacts with the Earth's atmosphere."
+                },
+                "finish_reason": "length"
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 20,
+              "completion_tokens": 16,
+              "total_tokens": 36
+            }
+          },
+          "metrics": {
+            "prompt_tokens": 20,
+            "cached_tokens": 3,
+            "completion_tokens": 16,
+            "ttft_ms": 4629.182416014373,
+            "total_seconds": 13.1251370748505,
+            "decode_tps": 1.765594998851307,
+            "prefill_tps": 3.6723547426408474,
+            "device": "CL",
+            "allocated_bytes": 1439944168,
+            "id": "4fac30d741cb4b3f8eb01ac4a254e0af",
+            "model": "55a95dc3c1b93b72",
+            "profile": "CL",
+            "context": 512,
+            "created": 1792255578.6095536,
+            "model_path": "/home/orangepi/oNPU/.data/models/72717a59205944dc-Qwen3-0.6B-Q8_0.gguf"
+          }
+        },
+        {
+          "prompt": "Explain how to grow a tomato plant.",
+          "response": {
+            "id": "chatcmpl-3e4b86ec53624901ab891bfc",
+            "object": "chat.completion",
+            "created": 1792255592,
+            "model": "55a95dc3c1b93b72",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "Growing a tomato plant is a rewarding and simple process that requires patience and care."
+                },
+                "finish_reason": "length"
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 21,
+              "completion_tokens": 16,
+              "total_tokens": 37
+            }
+          },
+          "metrics": {
+            "prompt_tokens": 21,
+            "cached_tokens": 5,
+            "completion_tokens": 16,
+            "ttft_ms": 4458.242065971717,
+            "total_seconds": 13.613013703143224,
+            "decode_tps": 1.638530888538925,
+            "prefill_tps": 3.5888585149116716,
+            "device": "CL",
+            "allocated_bytes": 1439944168,
+            "id": "d7a5fe9e1c8449319940fa46c93ba5fd",
+            "model": "55a95dc3c1b93b72",
+            "profile": "CL",
+            "context": 512,
+            "created": 1792255592.2696831,
+            "model_path": "/home/orangepi/oNPU/.data/models/72717a59205944dc-Qwen3-0.6B-Q8_0.gguf"
+          }
+        }
+      ]
+    }
+  ],
+  "summary": [
+    {
+      "mode": "gpu",
+      "median_decode_tps": 1.6437862949348752,
+      "median_ttft_ms": 4729.93162414059
+    },
+    {
+      "mode": "auto",
+      "median_decode_tps": 1.815866217225289,
+      "median_ttft_ms": 4619.036075193435
+    },
+    {
+      "mode": "gpu",
+      "median_decode_tps": 1.765594998851307,
+      "median_ttft_ms": 4629.182416014373
+    }
+  ],
+  "response_matches_gpu_baseline": [
+    true,
+    true,
+    true
+  ],
+  "passed": true,
+  "scope": {
+    "model": "Qwen3-0.6B Q8 GGUF prepared into FP16 weights",
+    "context": 512,
+    "protocol": "GPU-only, auto GPU/NPU, GPU-only; three prompts,16 output tokens each; same responses",
+    "limitations": "Single-board diagnostic samples; not a general quality or performance guarantee"
+  }
+}
