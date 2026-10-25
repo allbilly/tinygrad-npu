@@ -1,9 +1,9 @@
-import functools, io, pathlib, re, struct
+import functools, io, mmap, pathlib, re, struct
 from typing import Any, Callable
 
 from tinygrad.tensor import Tensor
 from tinygrad.device import Device
-from tinygrad.dtype import dtypes
+from tinygrad.dtype import DType, dtypes
 from tinygrad.helpers import prod, round_up
 from tinygrad.nn.state import TensorIO
 
@@ -249,10 +249,50 @@ def gguf_load(fn: Tensor|str|pathlib.Path) -> tuple[dict, dict[str, Tensor]]:
   return kv, gguf_shard(entries, (Device.DEFAULT,))
 
 def gguf_shard(entries:dict[str, tuple[Tensor, tuple[int, ...], int]], devices:tuple[str, ...],
-               shard_map:dict[str, int]|None=None) -> dict[str, Tensor]:
+               shard_map:dict[str, int]|None=None, *, stream:bool=False, cast_dtypes:dict[str,DType]|None=None,
+               chunk_size:int=16*1024**2) -> dict[str, Tensor]:
   """
   Loads the parsed `entries` on `devices`: a tensor in `shard_map` is sharded on the given axis, the others are copied to every device.
+
+  Single-device streaming realizes each weight in bounded decoding chunks, releasing packed uploads before loading the next weight.
+  Completed file-backed source pages are advised out of the resident set after each weight; their file contents remain available.
+  `cast_dtypes` chooses the resident dtype before realization; unspecified tensors retain their decoded dtype.
   """
+  cast_dtypes = cast_dtypes or {}
+  if stream:
+    if len(devices)!=1:raise ValueError('Streaming GGUF loading requires one device')
+    if chunk_size<1:raise ValueError('GGUF decoding chunk must be positive')
+    def load(name:str, data:Tensor, shape:tuple[int,...], typ:int) -> Tensor:
+      if typ in _GGML_QUANT:block,block_bytes = _GGML_QUANT[typ]
+      elif typ in _GGML_NATIVE:block,block_bytes = 1,_GGML_NATIVE[typ].itemsize
+      else:raise ValueError(f"GGML type '{typ}' is not supported!")
+      count = prod(shape)
+      if count%block or data.numel()<count//block*block_bytes:raise ValueError('Invalid packed tensor length: '+name)
+      capacity = max(block,chunk_size//block*block)
+      dtype = cast_dtypes.get(name,_GGML_NATIVE.get(typ,dtypes.float32))
+      if count<=capacity:
+        return ggml_data_to_tensor(data[:count//block*block_bytes].to(devices[0]),count,typ).cast(dtype).reshape(shape).contiguous().realize()
+      result = Tensor.empty(count,device=devices[0],dtype=dtype).realize()
+      for start in range(0,count,capacity):
+        size = min(capacity,count-start)
+        packed = data[start//block*block_bytes:(start+size)//block*block_bytes].to(devices[0])
+        decoded = ggml_data_to_tensor(packed,size,typ).cast(dtype).reshape(size)
+        result[start:start+size].assign(decoded).realize()
+        # Transfers are asynchronous on OpenCL. Complete them before queuing
+        # another chunk so host staging and driver-retained inputs stay bounded.
+        Device[devices[0]].synchronize()
+      return result.reshape(shape)
+    result = {}
+    for name,(data,shape,typ) in entries.items():
+      result[name] = load(name,data,shape,typ)
+      Device[devices[0]].synchronize()
+      Device[devices[0]].allocator.free_cache()
+      source = data.device
+      if isinstance(source,str) and source.startswith('DISK:') and not source.startswith('DISK:shm:'):
+        mapping = getattr(Device[source],'mem',None)
+        if mapping is not None and hasattr(mapping,'madvise') and (advice:=getattr(mmap,'MADV_DONTNEED',None)) is not None:
+          mapping.madvise(advice)
+    return result
   n, packed, shard_map = len(devices), {}, shard_map or {}
   for name, (data, shape, typ) in entries.items():
     if (axis:=shard_map.get(name)) is None: packed[name] = data.shard(devices)
@@ -266,6 +306,7 @@ def gguf_shard(entries:dict[str, tuple[Tensor, tuple[int, ...], int]], devices:t
   for d in devices: Device[d].allocator.free_cache()
   def decode(name:str, shape:tuple[int, ...], typ:int) -> Tensor:
     decoded = ggml_data_to_tensor(packed[name].flatten(), prod(shape), typ)
+    if name in cast_dtypes:decoded = decoded.cast(cast_dtypes[name])
     if (axis:=shard_map.get(name)) is None: return decoded.reshape(shape)
     local = decoded.reshape(n, *shape[:axis], shape[axis]//n, *shape[axis+1:])
     return local.permute(*range(1, axis+1), 0, *range(axis+1, local.ndim)).reshape(shape)

@@ -62,6 +62,7 @@ class TransformerBlock:
 class Transformer:
   def __init__(self, dim, n_heads, n_layers, norm_eps, vocab_size, max_seq_len=1024):
     self.vocab_size = vocab_size
+    self.max_context = MAX_CONTEXT
     self.wte = Embedding(vocab_size, dim)
     self.wpe = Embedding(max_seq_len, dim)
     self.h = [TransformerBlock(dim, n_heads, norm_eps) for _ in range(n_layers)]
@@ -69,7 +70,7 @@ class Transformer:
     self.lm_head = Linear(dim, vocab_size, bias=False)
     self.forward_jit = TinyJit(self.forward)
 
-  def forward(self, tokens:Union[Tensor,UOp], start_pos:Variable, temperature:float=0.0):
+  def logits(self, tokens:Union[Tensor,UOp], start_pos:Variable) -> Tensor:
     if not hasattr(self, 'allpos'): self.allpos = Tensor.arange(0, MAX_CONTEXT).reshape(1, -1).realize()
     if isinstance(tokens, UOp):
       seqlen = 1
@@ -97,8 +98,12 @@ class Transformer:
     else:
       logits = logits[:, -1, :]
 
+    return logits
+
+  def forward(self, tokens:Union[Tensor,UOp], start_pos:Variable, temperature:float=0.0):
+    logits = self.logits(tokens,start_pos)
     if temperature < 1e-6:
-      ret = logits.argmax(-1)
+      ret = greedy(logits) if (greedy:=getattr(self,'rockchip_argmax',None)) is not None else logits.argmax(-1)
     else:
       ret = (logits / temperature).softmax().multinomial()
     return ret.flatten().realize()
@@ -126,7 +131,7 @@ class GPT2:
     transposed = ('attn.c_attn.weight', 'attn.c_proj.weight', 'mlp.c_fc.weight', 'mlp.c_proj.weight')
     for k in weights:
       if k.endswith(transposed):
-        weights[k] = weights[k].T
+        weights[k] = weights[k].to(Device.DEFAULT).realize().T
     # lm head and wte are tied
     weights['lm_head.weight'] = weights['wte.weight']
 
@@ -175,6 +180,12 @@ class GPT2:
   def generate(self, prompt:str, max_length:int, temperature:float, timing:bool=False, batch_size:int=1):
     step_times = []
     prompt_tokens = self.tokenizer.encode(prompt, allowed_special={"<|endoftext|>"})
+    if (decode_many:=getattr(self.model,'rockchip_decode_many',None)) is not None and batch_size==1 and temperature<1e-6 \
+        and not timing and not getenv('ASSERT_MIN_STEP_TIME') and len(prompt_tokens)>=2 and max_length>0:
+      if len(prompt_tokens)+max_length-1>MAX_CONTEXT: raise ValueError('generation exceeds context')
+      first = self.model(Tensor([prompt_tokens],device='CPU').realize(),Variable('start_pos',0,MAX_CONTEXT-1).bind(0),0.0).tolist()
+      generated = first+decode_many(first[-1],len(prompt_tokens),max_length-1)
+      return [self.tokenizer.decode(prompt_tokens+generated)]
     toks = [prompt_tokens[:] for _ in range(batch_size)]
     start_pos = 0
     for _ in trange(max_length, disable=(timing==True)):
@@ -215,6 +226,7 @@ if __name__ == "__main__":
   parser.add_argument('--batch_size', type=int, default=1, help="Set the input batch size")
   parser.add_argument('--benchmark', type=int, default=-1, help="Benchmark GPT with the given number of tokens")
   parser.add_argument('--noshow', action='store_true', help="Don't show the output")
+  parser.add_argument('--rockchip', action='store_true', help="Use the opt-in FP16 CPU/NPU inference adapter (DEV=CPU HALF=1)")
   args = parser.parse_args()
 
   if args.seed is not None:
@@ -222,6 +234,9 @@ if __name__ == "__main__":
 
   print(f"using {args.model_size}")
   gpt2 = GPT2.build_gguf(args.model_size) if args.model_size.startswith("gpt2_gguf_") else GPT2.build(args.model_size)
+  if args.rockchip:
+    from tinygrad.llm.kernels.rockchip_gpt2 import configure_gpt2
+    configure_gpt2(gpt2.model)
 
   if args.benchmark != -1:
     gpt2.model(Tensor.randint(args.batch_size, args.benchmark), Variable("a", 0, MAX_CONTEXT).bind(0)).realize()

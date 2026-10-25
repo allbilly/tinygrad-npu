@@ -43,6 +43,32 @@ class TestLLMTokenizer(unittest.TestCase):
   def test_llama_special1(self): self._test_coding(self.llama_tok, "hello <|end_of_text|>", [ 15339, 220, 128001 ])
   def test_llama_special2(self): self._test_coding(self.llama_tok, "<|start_header_id|>user<|end_header_id|>\n\n", [ 128006, 882, 128007, 271 ])
   def test_llama_repeat(self): self._test_coding(self.llama_tok, "00000000000000000", [ 931, 931, 931, 931, 931, 410 ])
+
+  def test_smollm_digit_and_bytelevel_splitting(self):
+    split = SimpleTokenizer({}, {}, "smollm")._split_to_word.findall
+    self.assertEqual(split(" 12345"), [" ", "1", "2", "3", "4", "5"])
+    self.assertEqual(split("it's I'M"), ["it", "'s", " I", "'", "M"])
+    self.assertEqual(split("abc\n\ndef ١٢٣"), ["abc", "\n", "\n", "def", " ", "١", "٢", "٣"])
+
+  def test_spark_isolated_splits_prevent_cross_boundary_bpe_merges(self):
+    # Golden pieces follow Spark's published tokenizer.json, including its final
+    # individual-digit pass. Tempting cross-boundary merges must stay unused.
+    vocab = {'a':0,'b':1,'1':2,'2':3,'ab':4,'a1':5,'12':6,'1b':7,'!':8,'!ab':9,
+             'Ġ':10,'Ġab':11,'č':12,'Ċ':13,'čĊ':14,'a!ab':15,'Ġ12':16}
+    tok = SimpleTokenizer(vocab,{},'spark2_5')
+    for text,ids in [('ab12ab',[4,2,3,4]),('a1b',[0,2,1]),('!ab',[9]),(' ab',[11]),
+                     ('a\r\nb',[0,12,13,1]),('a!ab',[0,9]),('ab 12',[4,10,2,3])]:
+      with self.subTest(text=text):self.assertEqual(tok.encode(text),ids)
+
+  def test_deepseek_preserves_digit_groups_and_newline_runs(self):
+    # Golden pieces from DeepSeek-OCR's pinned tokenizer.json. Digits and CJK
+    # must split before BPE, whereas CRLF and punctuation/newline can merge.
+    vocab = {'a':0,'b':1,'1':2,'2':3,'ab':4,'a1':5,'12':6,'1b':7,'!':8,'!ab':9,
+             'Ġ':10,'Ġab':11,'č':12,'Ċ':13,'čĊ':14,'a!ab':15,'Ġ12':16,'!čĊ':17}
+    tok = SimpleTokenizer(vocab,{},'deepseek-v3')
+    for text,ids in [('ab12ab',[4,6,4]),('a1b',[0,2,1]),('!ab',[9]),(' ab',[11]),
+                     ('a\r\nb',[0,14,1]),('a!ab',[0,9]),('ab 12',[4,10,6]),('a!\r\nb',[0,17,1])]:
+      with self.subTest(text=text):self.assertEqual(tok.encode(text),ids)
   def test_llama_pat(self): self._test_coding(self.llama_tok, "today\n  \n", [ 31213, 14211 ])
 
   def test_split_regex_matches_naive_listing(self):

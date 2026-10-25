@@ -25,7 +25,8 @@ class CLCompiler(Compiler):
     super().__init__(f"compile_cl_{compile_key}")
   def compile(self, src:str) -> bytes:
     program = checked(cl.clCreateProgramWithSource(self.dev.context, 1, to_char_p_p([src.encode()]), None, status := ctypes.c_int32()), status)
-    build_status: int = cl.clBuildProgram(program, 1, self.dev.cl_dev, None, BP_CB(), None)
+    options = b'-cl-std=CL2.0' if src.startswith('// tinygrad-cl-std=CL2.0\n') else None
+    build_status: int = cl.clBuildProgram(program, 1, self.dev.cl_dev, options, BP_CB(), None)
     if build_status != 0:
       cl.clGetProgramBuildInfo(program, self.dev.cl_dev, cl.CL_PROGRAM_BUILD_LOG, 0, None, log_size := ctypes.c_size_t())
       cl.clGetProgramBuildInfo(program, self.dev.cl_dev, cl.CL_PROGRAM_BUILD_LOG,
