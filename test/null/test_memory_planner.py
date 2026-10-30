@@ -75,6 +75,23 @@ class TestMemoryPlanner(unittest.TestCase):
     held_bufs.clear()
     global_map = {}
 
+  def test_storage_views_keep_their_producer_live(self):
+    for view in (lambda x: x[:512], lambda x: x[:512].bitcast(dtypes.float32),
+                 lambda x: x[:512].reshape(128, 4)):
+      source = UOp.new_buffer("NULL", 1024, dtypes.uint8)
+      output = UOp.new_buffer("NULL", 512, dtypes.uint8)
+      tail = UOp.new_buffer("NULL", 512, dtypes.uint8)
+      linear = _make_linear([[source], [output, view(source)], [tail, source[512:]]])
+      planned = memory_plan_rewrite(linear)
+      source_plan = _get_planned_view(planned.src[0].src[1])
+      self.assertIsNotNone(source_plan)
+      arena, start, length = source_plan
+      for call in planned.src[1:]:
+        other = _get_planned_view(call.src[1])
+        self.assertIsNotNone(other)
+        other_arena, other_start, other_length = other
+        self.assertTrue(arena is not other_arena or start+length<=other_start or other_start+other_length<=start)
+
   def test_simple_buffer(self):
     bs = [
       [b(0), b(1), b(2)],

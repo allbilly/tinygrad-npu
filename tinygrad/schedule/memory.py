@@ -5,6 +5,7 @@ from tinygrad.dtype import dtypes
 from tinygrad.runtime.support.memory import TLSFAllocator
 
 def _collect_bufs(u:UOp) -> list[UOp]:
+  u = u.storage_base
   if u.op is Ops.BUFFER: return [u]
   if u.op in {Ops.MSELECT, Ops.MSTACK}: return [b for s in u.src for b in _collect_bufs(s)]
   return []

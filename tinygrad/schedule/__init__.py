@@ -78,7 +78,7 @@ def create_schedule(sched_sink:UOp) -> UOp:
     if any(in_degree.values()): raise RuntimeError("cycle detected in assign graph")
   return UOp(Ops.LINEAR, src=tuple(linearized))
 
-from tinygrad.schedule.memory import memory_plan_rewrite
+from tinygrad.schedule.memory import memory_plan_rewrite, _collect_bufs
 from tinygrad.engine.realize import capturing, pm_flatten_linear
 from tinygrad.schedule.prepare import prepare_rangeify
 from tinygrad.schedule.multi import multi_pm
@@ -292,5 +292,5 @@ def create_linear_with_vars(big_sink:UOp) -> tuple[UOp, dict[str, int]]:
     capturing[0].add_linear(linear)
     return UOp(Ops.LINEAR, src=()), var_vals
 
-  held_bufs = {b for b in linear_call.src[1:] if b.op is Ops.BUFFER}
+  held_bufs = {b for arg in linear_call.src[1:] for b in _collect_bufs(arg)}
   return memory_plan_rewrite(linear, held_bufs), var_vals
