@@ -33,6 +33,77 @@ def _cpu_gdn_model(*,context=512,n_kv_heads=1,num_v_heads=4):
                                       max_context=context,ssm=ssm,ssm_layers=(True,)))
 
 
+def _check_gated_attention(monkeypatch,precision,gates,fast_softmax,sliding_window=0,rows=(17,1,7)):
+  from tinygrad.llm.kernels.rockchip_int8 import RockchipInt8Linear
+  output_gate,head_gate = gates
+  Tensor.manual_seed(41)
+  model = Transformer(TransformerConfig(1,32,64,4,2,1e-6,32,8,10000.,8,8,max_context=64,qk_norm=8,
+                                        attn_output_gate=output_gate,attn_head_gate=head_gate,sliding_window=sliding_window))
+  block = model.blk[0]
+  inputs = [Tensor.randn(1,count,32,device='CPU').realize() for count in rows]
+  block._init_state(inputs[0])
+  expected = []
+  start = 0
+  for x in inputs:
+    expected.append(block._attention(x,start).numpy().copy())
+    start += x.shape[1]
+  block.cache_kv.assign(Tensor.zeros_like(block.cache_kv)).realize()
+  # Isolate attention math and placement from NPU quantization/driver access.
+  for cls in (RockchipLinear,RockchipInt8Linear):
+    monkeypatch.setattr(cls,'prepare',lambda self:setattr(self,'packed',[Tensor.empty(1,device='CPU')]))
+    monkeypatch.setattr(cls,'npu',lambda self,x:self.source(x))
+  result = configure(model,prefill='on',decode='on',cpu_attention=True,fuse_projections=True,
+                     fused_qkv=True,precision=precision,cpu_fast_softmax=fast_softmax)
+  assert result['cpu_attention_blocks']==1
+  assert result['prepared_qkv_blocks']==0 and not hasattr(block,'prepared_qkv')
+  start = 0
+  for x,reference in zip(inputs,expected):
+    np.testing.assert_allclose(block._attention(x,start).numpy(),reference,atol=2e-5,rtol=2e-4)
+    start += x.shape[1]
+
+
+@pytest.mark.parametrize('precision',['fp16','int8'])
+@pytest.mark.parametrize('gates',[(True,False),(False,True),(True,True)])
+@pytest.mark.parametrize('fast_softmax',[False,True])
+def test_gated_attention_reuses_cpu_kernel_and_preserves_cache_history(monkeypatch,precision,gates,fast_softmax):
+  _check_gated_attention(monkeypatch,precision,gates,fast_softmax)
+
+
+@pytest.mark.parametrize('window',[64,128])
+def test_window_covering_full_context_reuses_causal_kernel(monkeypatch,window):
+  _check_gated_attention(monkeypatch,'int8',(False,True),True,sliding_window=window,rows=(17,1,7,39))
+
+
+def test_packed_attention_preserves_window_covering_allocated_context(monkeypatch):
+  Tensor.manual_seed(46)
+  model = Transformer(TransformerConfig(1,576,1152,9,3,1e-6,32,64,10000.,64,64,
+                                       max_context=4096,sliding_window=4096))
+  block = model.blk[0]
+  x = Tensor.randn(1,17,576,device='CPU').realize()
+  block._init_state(x)
+  expected = block._attention(x,0).numpy().copy()
+  block.cache_kv.assign(Tensor.zeros_like(block.cache_kv)).realize()
+  monkeypatch.setattr(RockchipLinear,'prepare',lambda self:setattr(self,'packed',[Tensor.empty(1,device='CPU')]))
+  monkeypatch.setattr(RockchipLinear,'npu',lambda self,x:self.source(x))
+  placement = configure(model,prefill='on',decode='on',cpu_attention=True,cpu_packed_attention=True,cpu_fast_softmax=True)
+  assert placement['packed_attention_blocks']==1
+  np.testing.assert_allclose(block._attention(x,0).numpy(),expected,atol=2e-5,rtol=2e-4)
+
+
+@pytest.mark.parametrize('window',[1,8,17])
+@pytest.mark.parametrize('fast_softmax',[False,True])
+def test_sliding_window_reuses_cpu_kernel_across_cached_calls(monkeypatch,window,fast_softmax):
+  _check_gated_attention(monkeypatch,'int8',(True,True),fast_softmax,sliding_window=window)
+
+
+@pytest.mark.parametrize('unsupported',[{'attn_sinks':True},{'attn_logit_softcap':129.0},{'max_context':8193}])
+def test_gated_attention_keeps_unsupported_features_on_generic_path(unsupported):
+  options = {'max_context':64,'attn_output_gate':True,**unsupported}
+  model = Transformer(TransformerConfig(1,32,64,4,2,1e-6,32,8,10000.,8,8,**options))
+  result = configure(model,prefill='off',decode='off',cpu_attention=True)
+  assert result['cpu_attention_blocks']==0 and result['prepared_qkv_blocks']==0
+
+
 @pytest.mark.parametrize('precision',['fp16','int8'])
 @pytest.mark.parametrize('context',[4096,8192])
 def test_prepared_qkv_keeps_larger_context_on_regular_cpu_attention(monkeypatch,precision,context):
@@ -56,6 +127,55 @@ def test_prepared_qkv_keeps_larger_context_on_regular_cpu_attention(monkeypatch,
     block._init_state(x)
     output = block._attention(x,0).numpy()
     assert output.shape==(1,16,32) and np.isfinite(output).all()
+
+
+@pytest.mark.parametrize('precision,bias',[('fp16',False),('fp16',True),('int8',True)])
+def test_unnormalized_prepared_qkv_preserves_model_attention_and_cache(monkeypatch,precision,bias):
+  from tinygrad.llm.kernels.rockchip import RockchipPreparedQKV
+  from tinygrad.llm.kernels.rockchip_int8 import RockchipInt8Linear, RockchipInt8PreparedQKV
+  Tensor.manual_seed(61)
+  model = Transformer(TransformerConfig(1,32,64,4,2,1e-6,32,8,10000.,8,8,max_context=64,qkv_bias=bias))
+  block = model.blk[0]
+  values = [Tensor.randn(1,rows,32,device='CPU').realize() for rows in (17,1,7)]
+  block._init_state(values[0])
+  expected=[]
+  start=0
+  for value in values:
+    expected.append((block._attention(value,start).numpy().copy(),block.cache_kv.numpy().copy()))
+    start+=value.shape[1]
+  block.cache_kv.assign(Tensor.zeros_like(block.cache_kv)).realize()
+  for cls in (RockchipLinear,RockchipInt8Linear):
+    monkeypatch.setattr(cls,'prepare',lambda self:setattr(self,'packed',[Tensor.empty(1,device='CPU')]))
+    monkeypatch.setattr(cls,'npu',lambda self,x:self.source(x))
+  # These placement fixtures replace device projections with their float CPU
+  # source. The raw INT32 path has separate biased-QKV numerical tests.
+  monkeypatch.setattr(RockchipInt8PreparedQKV,'__call__',RockchipPreparedQKV.__call__)
+  result=configure(model,prefill='on',decode='on',cpu_attention=True,fuse_projections=True,fused_qkv=True,
+                   fused_qkv_without_norm=True,precision=precision)
+  assert result['prepared_qkv_blocks']==1 and block.prepared_qkv.qnorm is block.prepared_qkv.knorm is None
+  start=0
+  for value,(output,cache) in zip(values,expected):
+    np.testing.assert_allclose(block._attention(value,start).numpy(),output,atol=2e-5,rtol=2e-4)
+    np.testing.assert_allclose(block.cache_kv.numpy(),cache,atol=2e-3,rtol=2e-3)
+    start+=value.shape[1]
+
+
+@pytest.mark.parametrize('enabled,context,gated,prepared',[(False,64,False,0),(True,64,False,1),
+                                                       (True,8192,False,0),(True,64,True,0)])
+def test_unnormalized_prepared_qkv_remains_explicit_and_bounded(monkeypatch,enabled,context,gated,prepared):
+  from tinygrad.llm.kernels.rockchip_int8 import RockchipInt8Linear, RockchipInt8PreparedQKV
+  for cls in (RockchipLinear,RockchipInt8Linear):
+    monkeypatch.setattr(cls,'prepare',lambda self:setattr(self,'packed',[Tensor.empty(1,device='CPU')]))
+  model=Transformer(TransformerConfig(1,32,64,4,2,1e-6,32,8,10000.,8,8,max_context=context,attn_output_gate=gated))
+  result=configure(model,prefill='on',cpu_attention=True,fuse_projections=True,fused_qkv=True,
+                   fused_qkv_without_norm=enabled,precision='int8')
+  assert result['prepared_qkv_blocks']==prepared
+  if prepared:assert isinstance(model.blk[0].prepared_qkv,RockchipInt8PreparedQKV)
+
+
+def test_unnormalized_qkv_requires_fused_qkv_selection():
+  with pytest.raises(ValueError,match='requires fused_qkv'):configure(SimpleNamespace(),fused_qkv_without_norm=True)
+  with pytest.raises(ValueError,match='must be a bool'):configure(SimpleNamespace(),fused_qkv_without_norm=1)
 
 
 @pytest.mark.parametrize('use_channel_scales',[False,True])

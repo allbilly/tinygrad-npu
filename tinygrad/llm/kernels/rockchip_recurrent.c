@@ -29,35 +29,110 @@ static int cpu_gated_delta_scan_part(float *out, const float *q, const float *k,
       const size_t step=bh*capacity+t;
       const float *qt=q+step*key_dim,*kt=k+step*key_dim,*at=alpha+step*alpha_dim;
       const F4 b=(F4){beta[step],beta[step],beta[step],beta[step]};
-      for(int r=0;r<value_dim;r+=4) {
-        int count=value_dim-r<4?value_dim-r:4;
-        F4 predicted=(F4){0,0,0,0};
-        for(int c=0;c<key_dim;c++) {
-          F4 old=load_rows(columns+(size_t)c*value_dim+r,count);
-          F4 key=(F4){kt[c],kt[c],kt[c],kt[c]};
-          if(alpha_dim!=1) {
-            F4 a=(F4){at[c],at[c],at[c],at[c]};
-            old=old*a;
+      /* Share key/query loads across four vectors without changing each key reduction. */
+      if(value_dim%16==0) {
+        for(int r=0;r<value_dim;r+=16) {
+          F4 predicted0=(F4){0,0,0,0};
+          F4 predicted1=(F4){0,0,0,0};
+          F4 predicted2=(F4){0,0,0,0};
+          F4 predicted3=(F4){0,0,0,0};
+          for(int c=0;c<key_dim;c++) {
+            const float *p=columns+(size_t)c*value_dim+r;
+            F4 key=(F4){kt[c],kt[c],kt[c],kt[c]};
+            F4 old0=*(const F4*)(p+0);
+            F4 old1=*(const F4*)(p+4);
+            F4 old2=*(const F4*)(p+8);
+            F4 old3=*(const F4*)(p+12);
+            if(alpha_dim!=1) {
+              F4 a=(F4){at[c],at[c],at[c],at[c]};
+              old0=old0*a;
+              old1=old1*a;
+              old2=old2*a;
+              old3=old3*a;
+            }
+            predicted0=predicted0+old0*key;
+            predicted1=predicted1+old1*key;
+            predicted2=predicted2+old2*key;
+            predicted3=predicted3+old3*key;
           }
-          predicted=predicted+old*key;
+          F4 decay=(F4){at[0],at[0],at[0],at[0]};
+          F4 value0=*(const F4*)(v+step*value_dim+r+0),delta0;
+          F4 value1=*(const F4*)(v+step*value_dim+r+4),delta1;
+          F4 value2=*(const F4*)(v+step*value_dim+r+8),delta2;
+          F4 value3=*(const F4*)(v+step*value_dim+r+12),delta3;
+          if(alpha_dim==1) {
+            delta0=(value0-predicted0*decay)*b;
+            delta1=(value1-predicted1*decay)*b;
+            delta2=(value2-predicted2*decay)*b;
+            delta3=(value3-predicted3*decay)*b;
+          } else {
+            delta0=(value0-predicted0)*b;
+            delta1=(value1-predicted1)*b;
+            delta2=(value2-predicted2)*b;
+            delta3=(value3-predicted3)*b;
+          }
+          F4 result0=(F4){0,0,0,0};
+          F4 result1=(F4){0,0,0,0};
+          F4 result2=(F4){0,0,0,0};
+          F4 result3=(F4){0,0,0,0};
+          for(int c=0;c<key_dim;c++) {
+            float *p=columns+(size_t)c*value_dim+r;
+            float decay_value=at[alpha_dim==1?0:c];
+            F4 a=(F4){decay_value,decay_value,decay_value,decay_value};
+            F4 key=(F4){kt[c],kt[c],kt[c],kt[c]},query=(F4){qt[c],qt[c],qt[c],qt[c]};
+            F4 old0=*(const F4*)(p+0);
+            F4 updated0=old0*a+delta0*key;
+            *(F4*)(p+0)=updated0;
+            result0=result0+updated0*query;
+            F4 old1=*(const F4*)(p+4);
+            F4 updated1=old1*a+delta1*key;
+            *(F4*)(p+4)=updated1;
+            result1=result1+updated1*query;
+            F4 old2=*(const F4*)(p+8);
+            F4 updated2=old2*a+delta2*key;
+            *(F4*)(p+8)=updated2;
+            result2=result2+updated2*query;
+            F4 old3=*(const F4*)(p+12);
+            F4 updated3=old3*a+delta3*key;
+            *(F4*)(p+12)=updated3;
+            result3=result3+updated3*query;
+          }
+          *(F4*)(out+step*value_dim+r+0)=result0;
+          *(F4*)(out+step*value_dim+r+4)=result1;
+          *(F4*)(out+step*value_dim+r+8)=result2;
+          *(F4*)(out+step*value_dim+r+12)=result3;
         }
-        F4 value=load_rows(v+step*value_dim+r,count),delta;
-        if(alpha_dim==1) {
-          F4 a=(F4){at[0],at[0],at[0],at[0]};
-          delta=(value-predicted*a)*b;
-        } else delta=(value-predicted)*b;
-        F4 result=(F4){0,0,0,0};
-        for(int c=0;c<key_dim;c++) {
-          float *p=columns+(size_t)c*value_dim+r;
-          F4 old=load_rows(p,count);
-          float decay=at[alpha_dim==1?0:c];
-          F4 a=(F4){decay,decay,decay,decay},key=(F4){kt[c],kt[c],kt[c],kt[c]};
-          F4 updated=old*a+delta*key;
-          store_rows(p,updated,count);
-          F4 query=(F4){qt[c],qt[c],qt[c],qt[c]};
-          result=result+updated*query;
+      } else {
+        for(int r=0;r<value_dim;r+=4) {
+          int count=value_dim-r<4?value_dim-r:4;
+          F4 predicted=(F4){0,0,0,0};
+          for(int c=0;c<key_dim;c++) {
+            F4 old=load_rows(columns+(size_t)c*value_dim+r,count);
+            F4 key=(F4){kt[c],kt[c],kt[c],kt[c]};
+            if(alpha_dim!=1) {
+              F4 a=(F4){at[c],at[c],at[c],at[c]};
+              old=old*a;
+            }
+            predicted=predicted+old*key;
+          }
+          F4 value=load_rows(v+step*value_dim+r,count),delta;
+          if(alpha_dim==1) {
+            F4 a=(F4){at[0],at[0],at[0],at[0]};
+            delta=(value-predicted*a)*b;
+          } else delta=(value-predicted)*b;
+          F4 result=(F4){0,0,0,0};
+          for(int c=0;c<key_dim;c++) {
+            float *p=columns+(size_t)c*value_dim+r;
+            F4 old=load_rows(p,count);
+            float decay=at[alpha_dim==1?0:c];
+            F4 a=(F4){decay,decay,decay,decay},key=(F4){kt[c],kt[c],kt[c],kt[c]};
+            F4 updated=old*a+delta*key;
+            store_rows(p,updated,count);
+            F4 query=(F4){qt[c],qt[c],qt[c],qt[c]};
+            result=result+updated*query;
+          }
+          store_rows(out+step*value_dim+r,result,count);
         }
-        store_rows(out+step*value_dim+r,result,count);
       }
       if(history)for(int r=0;r<value_dim;r++)for(int c=0;c<key_dim;c++)
         history[((size_t)t*bh_count+bh)*stride+(size_t)r*key_dim+c]=columns[(size_t)c*value_dim+r];

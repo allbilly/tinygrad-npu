@@ -4,10 +4,12 @@ import copy, functools, struct
 from dataclasses import replace
 from typing import TYPE_CHECKING
 from tinygrad import Tensor, dtypes
-from tinygrad.helpers import Target, ceildiv, round_up
+from tinygrad.helpers import Target, ceildiv, getenv, round_up
 from tinygrad.llm.kernels.rockchip import RockchipLinear, RockchipFeedForward, RockchipProjections, RockchipPreparedQKV
 from tinygrad.llm.kernels.rockchip_cpu import _renderer
-from tinygrad.runtime.support.rockchip_int8 import padded_depth, supported_depth
+from tinygrad.llm.kernels.rockchip_shared_pool import ONPU_PREFILL_CPU_TUNING, shared_program
+from tinygrad.llm.kernels.rockchip_padding import capacity_input
+from tinygrad.runtime.support.rockchip_int8 import padded_depth, supported_depth, sdk_prefill_supported
 from tinygrad.uop.ops import KernelInfo, Ops, ProgramInfo, UOp
 if TYPE_CHECKING:
   from tinygrad.llm.kernels.rockchip_pool import AttentionPool
@@ -28,9 +30,45 @@ def _quantize_vector_source() -> str:
   }'''
 
 
+def _sdk_quantize_part(rows:int, depth:int, padded:int, header:int) -> str:
+  return f'''static void part(unsigned char *raw,const float *input,float *scale_out,int begin,int end) {{
+    float *scales=(float*)raw;signed char *output=(signed char*)(raw+{header});
+    for(int first=begin;first<end;first+=4) {{
+      int count=end-first<4?end-first:4;float inverse[4];int invalid[4];
+      for(int r=0;r<count;r++) {{
+        const float *x=input+(first+r)*{depth};float4 maximum={{0}};uint4 bad={{0}};int i=0;
+        for(;i+3<{depth};i+=4) {{
+          float4 v=*(const float4*)(x+i);uint4 bits=*(const uint4*)(x+i);
+          bad|=(bits&(uint4)0x7f800000)==(uint4)0x7f800000;
+          float4 a=v>=(float4)0?v:-v;maximum=a>maximum?a:maximum;
+        }}
+        float largest=maximum[0];for(int j=1;j<4;j++)if(maximum[j]>largest)largest=maximum[j];
+        invalid[r]=__builtin_reduce_or(bad)!=0;
+        for(;i<{depth};i++){{unsigned bits=*((const unsigned*)(x+i));
+          invalid[r]|=(bits&0x7f800000)==0x7f800000;float a=__builtin_fabsf(x[i]);if(a>largest)largest=a;}}
+        float scale=largest/127.0f;if(scale<1e-8f)scale=1e-8f;
+        scales[first+r]=scale_out[first+r]=invalid[r]?__builtin_nanf(""):scale;inverse[r]=1.0f/scale;
+      }}
+      for(int c=0;c<{padded};c+=16)for(int r=0;r<count;r++) {{
+        const float *x=input+(first+r)*{depth};signed char *dest=output+(c/16*{rows}+first+r)*16;
+        for(int j=0;j<16;j+=4) {{
+          if(c+j+3<{depth}) {{float4 value=invalid[r]?(float4)0:*(const float4*)(x+c+j);
+            *(char4*)(dest+j)=rockchip_quantize_vector(value,inverse[r]);}}
+          else for(int lane=0;lane<4;lane++) {{int i=c+j+lane;float q=0;
+            if(i<{depth} && !invalid[r])q=__builtin_nearbyintf(x[i]*inverse[r]);
+            if(q>127)q=127;if(q< -127)q=-127;dest[j+lane]=(signed char)q;
+          }}
+        }}
+      }}
+    }}
+  }}'''
+
+
+@shared_program
 @functools.cache
-def _quantize(out:UOp, inp:UOp, scale_out:UOp, rows:int, depth:int, padded:int) -> UOp:
+def _quantize(out:UOp, inp:UOp, scale_out:UOp, rows:int, depth:int, padded:int, sdk_prefill:bool=False) -> UOp:
   header = round_up(rows*4,64)
+  index = f'(i/16*{rows}+row)*16+i%16' if sdk_prefill else f'row*{padded}+i'
   parallel = rows*depth>=32768
   declarations = '''typedef unsigned long thread_t;
   extern int pthread_create(thread_t*,const void*,void*(*)(void*),void*);
@@ -43,10 +81,7 @@ def _quantize(out:UOp, inp:UOp, scale_out:UOp, rows:int, depth:int, padded:int) 
       if(!created[i])part(raw,input,scale_out,work[i].begin,work[i].end);}}
     part(raw,input,scale_out,work[3].begin,work[3].end);
     for(int i=0;i<3;i++)if(created[i])pthread_join(threads[i],(void**)0);''' if parallel else f'part(raw,input,scale_out,0,{rows});'
-  source = f'''typedef float float4 __attribute__((aligned(4),ext_vector_type(4)));
-  typedef unsigned uint4 __attribute__((aligned(4),ext_vector_type(4)));
-  {_quantize_vector_source()}
-  static void part(unsigned char *raw,const float *input,float *scale_out,int begin,int end) {{
+  part = f'''static void part(unsigned char *raw,const float *input,float *scale_out,int begin,int end) {{
     float *scales=(float*)raw;signed char *output=(signed char*)(raw+{header});
     for(int row=begin;row<end;row++) {{
       const float *x=input+row*{depth};float4 maximum={{0}};uint4 bad={{0}};int i=0;
@@ -62,62 +97,103 @@ def _quantize(out:UOp, inp:UOp, scale_out:UOp, rows:int, depth:int, padded:int) 
       float scale=largest/127.0f;if(scale<1e-8f)scale=1e-8f;
       scales[row]=scale_out[row]=invalid?__builtin_nanf(""):scale;float inverse=1.0f/scale;
       for(i=0;i+3<{depth};i+=4){{float4 value=invalid?(float4)0:*(const float4*)(x+i);
-        *(char4*)(output+row*{padded}+i)=rockchip_quantize_vector(value,inverse);}}
+        *(char4*)(output+{index})=rockchip_quantize_vector(value,inverse);}}
       for(;i<{depth};i++){{float q=invalid?0:__builtin_nearbyintf(x[i]*inverse);
-        if(q>127)q=127;if(q< -127)q=-127;output[row*{padded}+i]=(signed char)q;}}
-      for(;i<{padded};i++)output[row*{padded}+i]=0;
+        if(q>127)q=127;if(q< -127)q=-127;output[{index}]=(signed char)q;}}
+      for(;i<{padded};i++)output[{index}]=0;
     }}
-  }}
+  }}'''
+  source = f'''typedef float float4 __attribute__((aligned(4),ext_vector_type(4)));
+  typedef unsigned uint4 __attribute__((aligned(4),ext_vector_type(4)));
+  {_quantize_vector_source()}
+  {_sdk_quantize_part(rows,depth,padded,header) if sdk_prefill else part}
   {declarations}
   void rockchip_quantize(unsigned char *raw,const float *input,float *scale_out) {{
     for(int i={rows*4};i<{header};i++)raw[i]=0;{dispatch}
   }}'''
   inputs = (out,inp,scale_out)
-  sink = UOp.sink(*inputs,arg=KernelInfo('rockchip_quantize'))
+  sink = UOp.sink(*inputs,arg=KernelInfo('rockchip_quantize'+('_sdk' if sdk_prefill else '')))
   renderer = _renderer()
   info = replace(ProgramInfo.from_sink(sink,renderer.target),outs=(0,2),ins=(1,))
   return UOp(Ops.PROGRAM,arg=info,src=(sink,UOp(Ops.LINEAR,src=inputs),UOp(Ops.SOURCE,arg=source),
                                      UOp(Ops.BINARY,arg=renderer.compiler.compile_cached(source))))
 
 
-def quantize(x:Tensor, padded:int) -> tuple[Tensor,Tensor]:
+def quantize(x:Tensor, padded:int, *, sdk_prefill:bool=False) -> tuple[Tensor,Tensor]:
   if x.ndim!=2 or x.device!='CPU' or not isinstance(x.shape[0],int) or not isinstance(x.shape[1],int):
     raise ValueError('INT8 quantization requires a static CPU matrix')
   rows,depth = x.shape
   assert isinstance(rows,int) and isinstance(depth,int)
   if not 1<=rows<=24576 or not 1<=depth<=padded or not supported_depth(padded): raise ValueError('Unsupported INT8 quantization geometry')
+  if type(sdk_prefill) is not bool:raise ValueError('SDK INT8 quantization layout must be a bool')
   result = Tensor.empty(round_up(rows*4,64)+rows*padded,device='CPU',dtype=dtypes.uint8).custom_kernel(
-    x.float().contiguous(),Tensor.empty(rows,device='CPU',dtype=dtypes.float),fxn=lambda o,a,s:_quantize(o,a,s,rows,depth,padded))
+    x.float().contiguous(),Tensor.empty(rows,device='CPU',dtype=dtypes.float),fxn=lambda o,a,s:_quantize(o,a,s,rows,depth,padded,sdk_prefill))
   return result[0],result[2]
 
 
 @functools.cache
-def _matmul(out:UOp, lhs:UOp, rhs:UOp, m:int, n:int, k:int, column_offset:int, cores:int) -> UOp:
-  sink = UOp.sink(out,lhs,rhs,arg=KernelInfo(f'rockchip_int8_{m}_{n}_{k}'))
+def _matmul(out:UOp, lhs:UOp, rhs:UOp, m:int, n:int, k:int, column_offset:int, cores:int, sdk_prefill:bool=False) -> UOp:
+  sink = UOp.sink(out,lhs,rhs,arg=KernelInfo(f'rockchip_int8_{m}_{n}_{k}'+('_sdk' if sdk_prefill else '')))
   info = replace(ProgramInfo.from_sink(sink,Target('ROCKCHIP')),outs=(0,),ins=(1,2))
   return UOp(Ops.PROGRAM,arg=info,src=(sink,UOp(Ops.LINEAR,src=(out,lhs,rhs)),UOp(Ops.SOURCE,arg=f'INT8 {m}x{k}x{n}'),
-    UOp(Ops.BINARY,arg=struct.pack('<8I',m,n,k,cores,column_offset*k,round_up(m*4,64),0,1))))
+    UOp(Ops.BINARY,arg=struct.pack('<9I' if sdk_prefill else '<8I',m,n,k,cores,column_offset*k,round_up(m*4,64),0,1,
+                                 *((1,) if sdk_prefill else ())))))
 
 
+@shared_program
 @functools.cache
 def _dequantize_tiles(out:UOp, raw:tuple[UOp,...], sa:tuple[UOp,...], sw:UOp, counts:tuple[int,...],
-                      columns:int, n:int, offset:int=0) -> UOp:
+                      columns:int, n:int, offset:int=0, sdk_tiles:tuple[bool,...]=()) -> UOp:
   rows = sum(counts)
   tile_rows = counts[0]
   width = round_up(ceildiv(n,3),32)
   parts = [(start,min(width,n-start)) for start in range(0,n,width)]
   if len(parts)!=3: parts = [(0,n)]
   loops = []
+  layouts = ','.join(str(int(flag)) for flag in (sdk_tiles or (False,)*len(counts)))
   for start,count in parts:
     used = min(count,columns-start)
     if used<=0: continue
+    if any(sdk_tiles):
+      first_row = 0
+      for tile,(m,blocked) in enumerate(zip(counts,sdk_tiles)):
+        if blocked:
+          loops.append(f'''{{int first=begin>{first_row}?begin-{first_row}:0;
+            int last=end<{first_row+m}?end-{first_row}:{m};
+            const int *source=raw[{tile}]+{start*m};const float *scales=sw+{offset+start};
+            for(int row=first;row<last;row+=4) {{int active=last-row<4?last-row:4;int c=0;
+              for(;c+3<{used};c+=4) {{float4 w=*(const float4*)(scales+c);
+                for(int r=0;r<active;r++) {{
+                  float4 value=__builtin_convertvector(*(const int4*)(source+(c/4*{m}+row+r)*4),float4);
+                  *(float4*)(out+({first_row}+row+r)*{columns}+{start}+c)=(value*(float4)sa[{tile}][row+r])*w;
+                }}
+              }}
+              for(;c<{used};c++)for(int r=0;r<active;r++) {{
+                int index=(c/4*{m}+row+r)*4+c%4;
+                out[({first_row}+row+r)*{columns}+{start}+c]=((float)source[index]*sa[{tile}][row+r])*scales[c];
+              }}
+            }}
+          }}''')
+        else:
+          loops.append(f'''for(int row=begin>{first_row}?begin:{first_row};row<end && row<{first_row+m};row++) {{
+            const int *source=raw[{tile}]+{start*m}+(row-{first_row})*{count};
+            float *dest=out+row*{columns}+{start};const float *scales=sw+{offset+start};float a=sa[{tile}][row-{first_row}];int c=0;
+            for(;c+3<{used};c+=4){{float4 value=__builtin_convertvector(*(const int4*)(source+c),float4);
+              *(float4*)(dest+c)=(value*(float4)a)*(*(const float4*)(scales+c));}}
+            for(;c<{used};c++)dest[c]=((float)source[c]*a)*scales[c];
+          }}''')
+        first_row += m
+      continue
     loops.append(f'''for(int row=begin;row<end;row++) {{
       int tile=row/{tile_rows},local=row%{tile_rows},m=tile=={len(counts)-1}?{counts[-1]}:{tile_rows};
-      const int *source=raw[tile]+{start}*m+local*{count};float *dest=out+row*{columns}+{start};
+      const int *source=raw[tile]+{start}*m;const int blocked[{len(counts)}]={{{layouts}}};
+      float *dest=out+row*{columns}+{start};
       const float *scales=sw+{offset+start};float a=sa[tile][local];int c=0;
-      for(;c+3<{used};c+=4){{float4 value=__builtin_convertvector(*(const int4*)(source+c),float4);
+      for(;c+3<{used};c+=4){{int index=blocked[tile]?(c/4*m+local)*4:local*{count}+c;
+        float4 value=__builtin_convertvector(*(const int4*)(source+index),float4);
         *(float4*)(dest+c)=(value*(float4)a)*(*(const float4*)(scales+c));}}
-      for(;c<{used};c++)dest[c]=((float)source[c]*a)*scales[c];
+      for(;c<{used};c++){{int index=blocked[tile]?(c/4*m+local)*4+c%4:local*{count}+c;
+        dest[c]=((float)source[index]*a)*scales[c];}}
     }}''')
   parallel = rows*columns>=131072
   declarations = '''typedef unsigned long thread_t;
@@ -147,37 +223,45 @@ def _dequantize_tiles(out:UOp, raw:tuple[UOp,...], sa:tuple[UOp,...], sw:UOp, co
                                      UOp(Ops.BINARY,arg=renderer.compiler.compile_cached(source))))
 
 
-def _dequantize(out:UOp, raw:UOp, sa:UOp, sw:UOp, rows:int, columns:int, n:int, offset:int) -> UOp:
-  return _dequantize_tiles(out,(raw,),(sa,),sw,(rows,),columns,n,offset)
+def _dequantize(out:UOp, raw:UOp, sa:UOp, sw:UOp, rows:int, columns:int, n:int, offset:int, sdk_prefill:bool=False) -> UOp:
+  return _dequantize_tiles(out,(raw,),(sa,),sw,(rows,),columns,n,offset,(sdk_prefill,))
 
 
-def dequantize_tiles(raw:list[Tensor], sa:list[Tensor], sw:Tensor, counts:list[int], columns:int) -> Tensor:
+def dequantize_tiles(raw:list[Tensor], sa:list[Tensor], sw:Tensor, counts:list[int], columns:int, *, sdk_tiles:tuple[bool,...]=()) -> Tensor:
   if (not raw or len(raw)!=len(sa) or len(raw)!=len(counts) or any(n!=counts[0] for n in counts[:-1])
       or any(n<1 for n in counts) or counts[-1]>counts[0] or columns<1
       or sw.device!='CPU' or sw.dtype is not dtypes.float or sw.numel()<columns
       or any(r.device!='CPU' or r.dtype is not dtypes.int32 or r.numel()!=m*round_up(columns,32) for r,m in zip(raw,counts))
-      or any(s.device!='CPU' or s.dtype is not dtypes.float or s.shape!=(m,) for s,m in zip(sa,counts))):
+      or any(s.device!='CPU' or s.dtype is not dtypes.float or s.shape!=(m,) for s,m in zip(sa,counts))
+      or sdk_tiles and (len(sdk_tiles)!=len(raw) or any(type(flag) is not bool for flag in sdk_tiles))):
     raise ValueError('Invalid INT8 output tiles')
   count=len(raw)
   return Tensor.empty(sum(counts),columns,device='CPU',dtype=dtypes.float).custom_kernel(*raw,*sa,sw,
     fxn=lambda o,*args:_dequantize_tiles(o,tuple(args[:count]),tuple(args[count:count*2]),args[-1],
-                                       tuple(counts),columns,round_up(columns,32)))[0]
+                                       tuple(counts),columns,round_up(columns,32),sdk_tiles=sdk_tiles))[0]
 
 
-def raw_int8_matmul(payload:Tensor, weight:Tensor, rows:int, columns:int, column_offset:int=0) -> Tensor:
+def raw_int8_matmul(payload:Tensor, weight:Tensor, rows:int, columns:int, column_offset:int=0, *,
+                    sdk_prefill:bool=False, cpu_output:bool=True) -> Tensor:
   k = weight.shape[1]*32
   n = round_up(columns,32)
   if (not isinstance(k,int) or weight.ndim!=4 or weight.shape[2:]!=(32,32) or weight.dtype is not dtypes.int8
-      or weight.device!='ROCKCHIP' or payload.device!='CPU' or payload.dtype is not dtypes.uint8
+      or not isinstance(weight.device,str) or weight.device.split(':')[0]!='ROCKCHIP'
+      or not isinstance(payload.device,str) or payload.device!='CPU' and payload.device.split(':')[0]!='ROCKCHIP'
+      or payload.dtype is not dtypes.uint8
       or not 1<=rows<=(128 if k<=2048 else 64) or columns<1 or column_offset<0 or column_offset%32
       or column_offset+n>weight.shape[0]*32 or n>(24576 if rows==1 else 12288)
       or payload.numel()!=round_up(rows*4,64)+rows*k): raise ValueError('Unsupported raw INT8 operands')
-  return Tensor.empty(rows*n,device='ROCKCHIP',dtype=dtypes.int32).custom_kernel(payload.to('ROCKCHIP'),weight,
-    fxn=lambda o,a,b:_matmul(o,a,b,rows,n,k,column_offset,3))[0].to('CPU')
+  if type(sdk_prefill) is not bool or sdk_prefill and not sdk_prefill_supported(rows,n,k):
+    raise ValueError('Unsupported SDK INT8 matrix geometry')
+  if type(cpu_output) is not bool:raise ValueError('CPU output selection must be a bool')
+  result = Tensor.empty(rows*n,device=weight.device,dtype=dtypes.int32).custom_kernel(payload.to(weight.device),weight,
+    fxn=lambda o,a,b:_matmul(o,a,b,rows,n,k,column_offset,3,sdk_prefill))[0]
+  return result.to('CPU') if cpu_output else result
 
 
 def packed_int8_matmul(x:Tensor, weight:Tensor, scales:Tensor, columns:int, column_offset:int=0) -> Tensor:
-  if (x.ndim!=2 or x.device!='CPU' or weight.device!='ROCKCHIP' or weight.dtype is not dtypes.int8
+  if (x.ndim!=2 or x.device!='CPU' or not isinstance(weight.device,str) or weight.device.split(':')[0]!='ROCKCHIP' or weight.dtype is not dtypes.int8
       or weight.ndim!=4 or weight.shape[2:]!=(32,32) or scales.device!='CPU' or scales.dtype is not dtypes.float):
     raise ValueError('Unsupported INT8 matrix layout')
   rows,depth = x.shape
@@ -187,10 +271,11 @@ def packed_int8_matmul(x:Tensor, weight:Tensor, scales:Tensor, columns:int, colu
   if (not isinstance(rows,int) or not 1<=rows<=(128 if k<=2048 else 64) or not 0<depth<=k or columns<1 or column_offset<0 or column_offset%32
       or column_offset+n>weight.shape[0]*32 or n>(24576 if rows==1 else 12288)):
     raise ValueError('Unsupported INT8 matrix geometry')
-  payload,activation_scales = quantize(x,k)
-  out = raw_int8_matmul(payload,weight,rows,columns,column_offset)
+  sdk = bool(getenv('ONPU_INT8_SDK_PREFILL',0)) and sdk_prefill_supported(rows,n,k)
+  payload,activation_scales = quantize(x,k,sdk_prefill=sdk)
+  out = raw_int8_matmul(payload,weight,rows,columns,column_offset,sdk_prefill=sdk)
   return Tensor.empty(rows,columns,device='CPU',dtype=dtypes.float).custom_kernel(out,activation_scales,scales,
-    fxn=lambda o,a,b,c:_dequantize(o,a,b,c,rows,columns,n,column_offset))[0]
+    fxn=lambda o,a,b,c:_dequantize(o,a,b,c,rows,columns,n,column_offset,sdk))[0]
 
 
 class RockchipInt8Linear(RockchipLinear):
@@ -224,17 +309,20 @@ class RockchipInt8Linear(RockchipLinear):
       count = len(values)
       n = round_up(count,32)
       codes = raw[round_up(count*4,64):].bitcast(dtypes.int8).reshape(count,k).pad(((0,n-count),(0,0)))
-      self.packed.append(codes.reshape(n//32,32,k//32,32).permute(0,2,1,3).contiguous().to('ROCKCHIP').realize())
+      from tinygrad.runtime.ops_rockchip import int8_weight_device
+      device = int8_weight_device(n*k)
+      self.packed.append(codes.reshape(n//32,32,k//32,32).permute(0,2,1,3).contiguous().to(device).realize())
       self.scales.append(scales)
 
   def release_packed(self):
     super().release_packed()
     self.scales.clear()
 
-  def raw_projection(self, x:Tensor) -> tuple[list[Tensor],list[Tensor],list[int]]:
-    if x.device!='CPU' or len(self.packed)!=1 or self.columns>12288 or self.bias is not None:
+  def raw_projection(self, x:Tensor, *, sdk_prefill:bool=False, defer_bias:bool=False) -> tuple[list[Tensor],list[Tensor],list[int]]:
+    if type(defer_bias) is not bool:raise ValueError('Deferred raw projection bias must be a bool')
+    if x.device!='CPU' or len(self.packed)!=1 or self.columns>12288 or self.bias is not None and not defer_bias:
       raise ValueError('Unsupported raw INT8 projection')
-    dense = x.pad_to(x.max_shape).reshape(-1,self.depth)
+    dense = capacity_input(x).reshape(-1,self.depth)
     k = self.packed[0].shape[1]*32
     assert isinstance(k,int)
     tile_rows = 128 if k<=2048 else 64
@@ -243,8 +331,9 @@ class RockchipInt8Linear(RockchipLinear):
       part = dense[start:start+tile_rows]
       count = part.shape[0]
       assert isinstance(count,int)
-      payload,scale = quantize(self.scaled_input(part),k)
-      raw.append(raw_int8_matmul(payload,self.packed[0],count,self.columns))
+      sdk = sdk_prefill and sdk_prefill_supported(count,round_up(self.columns,32),k)
+      payload,scale = quantize(self.scaled_input(part),k,sdk_prefill=sdk)
+      raw.append(raw_int8_matmul(payload,self.packed[0],count,self.columns,sdk_prefill=sdk))
       scales.append(scale)
       counts.append(count)
     return raw,scales,counts
@@ -253,12 +342,15 @@ class RockchipInt8Linear(RockchipLinear):
     if self.shared_projection is not None:return self.shared_npu(x)
     if x.device!='CPU': raise ValueError('INT8 acceleration requires CPU activations')
     shape = x.shape
-    dense = x.pad_to(x.max_shape).reshape(-1,self.depth)
+    dense = capacity_input(x).reshape(-1,self.depth)
     rows = []
     tile_rows = 128 if padded_depth(self.depth)<=2048 else 64
     if len(self.packed)==1 and self.columns<=12288 and dense.shape[0]>1 and self.bias is None:
-      raw_tiles,tile_scales,counts = self.raw_projection(x)
-      out = dequantize_tiles(raw_tiles,tile_scales,self.scales[0],counts,self.columns).reshape(*x.max_shape[:-1],self.columns)
+      sdk_enabled = bool(getenv('ONPU_INT8_SDK_PREFILL',0))
+      raw_tiles,tile_scales,counts = self.raw_projection(x,sdk_prefill=sdk_enabled)
+      sdk_tiles = tuple(sdk_enabled and sdk_prefill_supported(m,round_up(self.columns,32),padded_depth(self.depth)) for m in counts)
+      out = dequantize_tiles(raw_tiles,tile_scales,self.scales[0],counts,self.columns,sdk_tiles=sdk_tiles)
+      out = out.reshape(*x.max_shape[:-1],self.columns)
       out = out.shrink(tuple((0,s) for s in (*shape[:-1],self.columns))).cast(x.dtype)
       return out if self.bias is None else out+self.bias
     for start in range(0,dense.shape[0],tile_rows):
@@ -308,8 +400,10 @@ class RockchipInt8SplitLinear(RockchipInt8Linear):
     return result if self.bias is None else result+self.bias
 
 
+@shared_program
 @functools.cache
-def _ffn_pack(out:UOp, raw:UOp, sa:UOp, sw:UOp, scale_out:UOp, rows:int, depth:int, tile_rows:int) -> UOp:
+def _ffn_pack(out:UOp, raw:UOp, sa:UOp, sw:UOp, scale_out:UOp, rows:int, depth:int, tile_rows:int,
+              static_layout:bool=False, tune_cpu:bool=False) -> UOp:
   from tinygrad.llm.kernels.rockchip_cpu import _vector_sigmoid_source
   columns = depth*2
   width = round_up(ceildiv(columns,3),32)
@@ -317,6 +411,25 @@ def _ffn_pack(out:UOp, raw:UOp, sa:UOp, sw:UOp, scale_out:UOp, rows:int, depth:i
   if len(parts)!=3: parts = [(0,columns)]
   indices = f'row*{parts[-1][1]}+column-{parts[-1][0]}+{parts[-1][0]*rows}'
   for start,count in reversed(parts[:-1]): indices = f'(column<{start+count}?{start*rows}+row*{count}+column-{start}:{indices})'
+  bounds = sorted({0,depth,*(max(0,min(depth,start-base)) for start,_ in parts for base in (0,depth))}) if static_layout else [0,depth]
+  loops = []
+  for begin,end in zip(bounds,bounds[1:]):
+    loads = []
+    for base in (0,depth):
+      if static_layout:
+        start,count = next((start,count) for start,count in parts if start<=base+begin<base+end<=start+count)
+        loads.append(f'''(__builtin_convertvector(*(const int4*)(raw+{start*rows+base-start}+row*{count}+c),float4)*
+          (float4)sa[row])*(*(const float4*)(sw+{base}+c))''')
+      else: loads.append(f'project(raw,sa,sw,row,c+{base})')
+    # Independent vector activations hide divide/polynomial latency; reductions keep their original order.
+    loops.append(f'''
+      {'#pragma clang loop unroll_count(4)' if tune_cpu else ''}
+      for(int c={begin};c<{end};c+=4) {{
+        float4 gate={loads[0]},up={loads[1]};
+        float4 value=(gate/(1.0f+rockchip_exp2_vector(gate*-1.4426950216293335f)))*up;*(float4*)(values+c)=value;
+        uint4 bits=__builtin_bit_cast(uint4,value);bad|=(bits&(uint4)0x7f800000)==(uint4)0x7f800000;
+        float4 a=value>=(float4)0?value:-value;maximum=a>maximum?a:maximum;
+      }}''')
   parallel = rows*depth>=32768
   declarations = '''typedef unsigned long thread_t;
   extern int pthread_create(thread_t*,const void*,void*(*)(void*),void*);
@@ -344,12 +457,7 @@ def _ffn_pack(out:UOp, raw:UOp, sa:UOp, sw:UOp, scale_out:UOp, rows:int, depth:i
   static void part(unsigned char *out,const int *raw,const float *sa,const float *sw,float *scales,int begin,int end) {{
     for(int row=begin;row<end;row++) {{
       float values[{depth}] __attribute__((aligned(16)));float4 maximum=(float4)0;uint4 bad=(uint4)0;
-      for(int c=0;c<{depth};c+=4) {{
-        float4 gate=project(raw,sa,sw,row,c),up=project(raw,sa,sw,row,c+{depth});
-        float4 value=(gate/(1.0f+rockchip_exp2_vector(gate*-1.4426950216293335f)))*up;*(float4*)(values+c)=value;
-        uint4 bits=__builtin_bit_cast(uint4,value);bad|=(bits&(uint4)0x7f800000)==(uint4)0x7f800000;
-        float4 a=value>=(float4)0?value:-value;maximum=a>maximum?a:maximum;
-      }}
+      {''.join(loops)}
       float largest=maximum[0];for(int j=1;j<4;j++)if(maximum[j]>largest)largest=maximum[j];
       int invalid=__builtin_reduce_or(bad)!=0;float scale=largest/127.0f;if(scale<1e-8f)scale=1e-8f;
       int first=row/{tile_rows}*{tile_rows},count={rows}-first<{tile_rows}?{rows}-first:{tile_rows};
@@ -385,7 +493,8 @@ def ffn_pack(raw:Tensor, activation_scales:Tensor, weight_scales:Tensor, rows:in
   size = sum(round_up(min(tile_rows,rows-first)*4,64)+min(tile_rows,rows-first)*depth for first in range(0,rows,tile_rows))
   result = Tensor.empty(size,device='CPU',dtype=dtypes.uint8).custom_kernel(
     raw,activation_scales,weight_scales,Tensor.empty(rows,device='CPU',dtype=dtypes.float),
-    fxn=lambda o,r,a,w,s:_ffn_pack(o,r,a,w,s,rows,depth,tile_rows))
+    fxn=lambda o,r,a,w,s:_ffn_pack(o,r,a,w,s,rows,depth,tile_rows,bool(getenv('ONPU_SWIGLU_PACK_STATIC_LAYOUT',0)),
+                                 bool(ONPU_PREFILL_CPU_TUNING)))
   return result[0],result[4]
 
 
@@ -417,7 +526,7 @@ class RockchipInt8FeedForward(RockchipFeedForward):
       projected = joint.npu(x)
       depth = self.down.depth
       return self.down((projected[...,:depth]*sigmoid_gate(projected,pool=self.pool))*projected[...,depth:])
-    dense = x.pad_to(x.max_shape).reshape(-1,joint.depth)
+    dense = capacity_input(x).reshape(-1,joint.depth)
     outputs,output_scales,output_counts = [],[],[]
     input_rows = 128 if padded_depth(joint.depth)<=2048 else 64
     output_rows = 128 if padded_depth(self.down.depth)<=2048 else 64
@@ -428,12 +537,23 @@ class RockchipInt8FeedForward(RockchipFeedForward):
       k = joint.packed[0].shape[1]*32
       assert isinstance(k,int)
       payload,sa = quantize(joint.scaled_input(part),k)
-      projected = raw_int8_matmul(payload,joint.packed[0],rows,joint.columns)
-      packed,scales = ffn_pack(projected,sa,joint.scales[0],rows,self.down.depth,output_rows)
-      for first in range(0,rows,output_rows):
+      use_gpu = bool(getenv('ONPU_FFN_GPU',0)) and (rows,self.down.depth,output_rows)==(128,3072,64)
+      packed_tiles:tuple[Tensor,...]
+      if use_gpu:
+        from tinygrad.llm.kernels.rockchip_gpu import gpu_ffn_pack
+        assert isinstance(self.down.packed[0].device,str)
+        payload = payload.to(joint.packed[0].device)
+        projected = raw_int8_matmul(payload,joint.packed[0],rows,joint.columns,cpu_output=False)
+        packed_tiles,scales = gpu_ffn_pack(projected,payload,joint.scales[0],self.down.packed[0].device)
+      else:
+        projected = raw_int8_matmul(payload,joint.packed[0],rows,joint.columns)
+        packed,scales = ffn_pack(projected,sa,joint.scales[0],rows,self.down.depth,output_rows)
+        packed_tiles = tuple(packed[first*self.down.depth+(first//output_rows)*round_up(output_rows*4,64):
+          first*self.down.depth+(first//output_rows)*round_up(output_rows*4,64)+
+          round_up(min(output_rows,rows-first)*4,64)+min(output_rows,rows-first)*self.down.depth]
+          for first in range(0,rows,output_rows))
+      for first,payload in zip(range(0,rows,output_rows),packed_tiles):
         count = min(output_rows,rows-first)
-        begin = first*self.down.depth+(first//output_rows)*round_up(output_rows*4,64)
-        payload = packed[begin:begin+round_up(count*4,64)+count*self.down.depth]
         output = raw_int8_matmul(payload,self.down.packed[0],count,self.down.columns)
         outputs.append(output)
         output_scales.append(scales[first:first+count])
@@ -448,5 +568,5 @@ class RockchipInt8PreparedQKV(RockchipPreparedQKV):
     from tinygrad.llm.kernels.rockchip_qkv import prepare_qkv_int8
     joint = self.projections.joint
     assert isinstance(joint,RockchipInt8Linear)
-    raw,scales,counts = joint.raw_projection(x)
-    return prepare_qkv_int8(raw,scales,joint.scales[0],counts,cache,self.qnorm,self.knorm,freqs,start,self.heads,self.eps,x.shape[1])
+    raw,scales,counts = joint.raw_projection(x,defer_bias=True)
+    return prepare_qkv_int8(raw,scales,joint.scales[0],counts,cache,self.qnorm,self.knorm,freqs,start,self.heads,self.eps,x.shape[1],bias=joint.bias)

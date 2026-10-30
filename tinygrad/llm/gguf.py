@@ -1,11 +1,39 @@
 import functools, io, mmap, pathlib, re, struct
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 from tinygrad.tensor import Tensor
-from tinygrad.device import Device
+from tinygrad.device import Buffer, BufferStorage, Device
 from tinygrad.dtype import DType, dtypes
-from tinygrad.helpers import prod, round_up
+from tinygrad.helpers import mv_address, prod, round_up
 from tinygrad.nn.state import TensorIO
+from tinygrad.runtime.support.memory import MMIOInterface
+from tinygrad.uop.ops import UOp
+
+
+class _MappedCPUFile:
+  """Own a private file mapping shared by all packed CPU aliases of that file."""
+  def __init__(self, path:str):
+    with open(path,'rb') as source:self.mem = mmap.mmap(source.fileno(),0,access=mmap.ACCESS_COPY)
+    self.address = mv_address(memoryview(self.mem))
+  def __del__(self):
+    if hasattr(self,'mem'):self.mem.close()
+
+
+def _mapped_cpu_bytes(data:Tensor, files:dict[str,_MappedCPUFile]) -> Tensor:
+  count = data.numel()
+  if (not isinstance(data.device,str) or not data.device.startswith('DISK:') or data.device.startswith('DISK:shm:')
+      or data.dtype is not dtypes.uint8 or not isinstance(count,int) or count<1):
+    raise ValueError('Mapped CPU weights require nonempty file-backed uint8 storage')
+  if data.uop.contiguous_view() is None:raise ValueError('Mapped CPU weights require contiguous file bytes')
+  owner = cast(Buffer,data.contiguous().realize().uop.buffer).ensure_allocated()
+  offset = owner.get_buf(data.device).offset
+  if data.device not in files:files[data.device] = _MappedCPUFile(data.device[len('DISK:'):])
+  mapping = files[data.device]
+  if not 0<=offset<=len(mapping.mem)-count:raise ValueError('Mapped CPU weight exceeds its file')
+  pointer = mapping.address+offset
+  node = UOp.new_buffer('CPU',count,dtypes.uint8)
+  cast(Buffer,node.buffer).allocate(opaque=BufferStorage(pointer,mapping,MMIOInterface(pointer,count,fmt='B')),external_ptr=pointer)
+  return Tensor(node).reshape(data.shape)
 
 # ggml packs each iq grid entry as N bytes (N=4 for uint32 grids, N=8 for uint64 grids) in a single word. See ggml-common.h.
 def _ggml_iq_grid(device: str|tuple[str, ...]|None, grid: tuple[int, ...], grid_shape: tuple[int, int]) -> Tensor:
@@ -250,14 +278,18 @@ def gguf_load(fn: Tensor|str|pathlib.Path) -> tuple[dict, dict[str, Tensor]]:
 
 def gguf_shard(entries:dict[str, tuple[Tensor, tuple[int, ...], int]], devices:tuple[str, ...],
                shard_map:dict[str, int]|None=None, *, stream:bool=False, cast_dtypes:dict[str,DType]|None=None,
-               chunk_size:int=16*1024**2) -> dict[str, Tensor]:
+               chunk_size:int=16*1024**2, mapped_cpu:bool=False) -> dict[str, Tensor]:
   """
   Loads the parsed `entries` on `devices`: a tensor in `shard_map` is sharded on the given axis, the others are copied to every device.
 
   Single-device streaming realizes each weight in bounded decoding chunks, releasing packed uploads before loading the next weight.
   Completed file-backed source pages are advised out of the resident set after each weight; their file contents remain available.
   `cast_dtypes` chooses the resident dtype before realization; unspecified tensors retain their decoded dtype.
+  `mapped_cpu` borrows packed file bytes on one CPU device instead of copying them. A private copy-on-write
+  mapping protects checkpoint contents and stays alive with its CPU aliases; decoded values and transforms are unchanged.
   """
+  if mapped_cpu and (stream or len(devices)!=1 or Device.canonicalize(devices[0])!='CPU'):
+    raise ValueError('Mapped CPU weights require one CPU device without streaming')
   cast_dtypes = cast_dtypes or {}
   if stream:
     if len(devices)!=1:raise ValueError('Streaming GGUF loading requires one device')
@@ -294,8 +326,10 @@ def gguf_shard(entries:dict[str, tuple[Tensor, tuple[int, ...], int]], devices:t
           mapping.madvise(advice)
     return result
   n, packed, shard_map = len(devices), {}, shard_map or {}
+  mapped_files:dict[str,_MappedCPUFile] = {}
   for name, (data, shape, typ) in entries.items():
-    if (axis:=shard_map.get(name)) is None: packed[name] = data.shard(devices)
+    if mapped_cpu: packed[name] = _mapped_cpu_bytes(data,mapped_files)
+    elif (axis:=shard_map.get(name)) is None: packed[name] = data.shard(devices)
     else:
       if shape[axis] % n or (axis == len(shape)-1 and shape[axis]//n % _GGML_QUANT.get(typ, (1,))[0]):
         raise ValueError(f"{name}: can't split {shape} on axis {axis} over {n} devices")

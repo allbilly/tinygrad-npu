@@ -109,12 +109,55 @@ class TestRockchipReplayAliasAnalysis(unittest.TestCase):
         self.assertTrue(_full_write(calls[0],0,output.numel()*output.dtype.itemsize))
         self.assertFalse(_full_write(calls[0],0,output.numel()*output.dtype.itemsize+64))
 
+
   def test_same_base_overlapping_future_view_keeps_copy(self):
     cpu,npu,source,result = self.node(),self.node('ROCKCHIP'),self.node(),self.node()
     view = self.node(size=2,base=cpu[1][0].base,offset=2)
     calls = [self.call(self.program(),cpu[0],source[0]),self.call(UOp(Ops.STORE),npu[0],cpu[0]),
              self.call(self.program(size=2),view[0],source[0]),self.call(self.program(),result[0],cpu[0])]
     self.assertEqual(self.analyze(calls,cpu,npu,source,result,view),({},set(),set()))
+
+  def test_future_reads_only_overwritten_slices_can_elide_upload(self):
+    for read_tail,proven in ((False,True),(True,True),(False,False)):
+      with self.subTest(read_tail=read_tail,proven=proven):
+        cpu,npu,source = self.node(),self.node('ROCKCHIP'),self.node()
+        view = self.node(size=2,base=cpu[1][0].base)
+        source2,result = self.node(size=2),self.node(size=4 if read_tail else 2)
+        writer = self.call(UOp(Ops.STORE),view[0],source2[0]) if proven else \
+          self.call(self.program(size=2,count=1),view[0],source2[0])
+        calls = [self.call(self.program(),cpu[0],source[0]),self.call(UOp(Ops.STORE),npu[0],cpu[0]),writer,
+                 self.call(self.program(size=4 if read_tail else 2),result[0],cpu[0] if read_tail else view[0])]
+        _,uploads,_ = self.analyze(calls,cpu,npu,source,view,source2,result)
+        self.assertEqual(uploads,{1} if proven and not read_tail else set())
+
+  def test_adjacent_full_writes_cover_future_read(self):
+    cpu,npu,source,result = self.node(),self.node('ROCKCHIP'),self.node(),self.node()
+    source2 = self.node(size=2)
+    views = [self.node(size=2,base=cpu[1][0].base,offset=offset) for offset in (0,4)]
+    calls = [self.call(self.program(),cpu[0],source[0]),self.call(UOp(Ops.STORE),npu[0],cpu[0]),
+             *(self.call(UOp(Ops.STORE),view[0],source2[0]) for view in views),
+             self.call(self.program(),result[0],cpu[0])]
+    _,uploads,_ = self.analyze(calls,cpu,npu,source,result,source2,*views)
+    self.assertEqual(uploads,{1})
+
+  def test_same_call_read_precedes_full_write(self):
+    cpu,npu,source = self.node(),self.node('ROCKCHIP'),self.node()
+    calls = [self.call(self.program(),cpu[0],source[0]),self.call(UOp(Ops.STORE),npu[0],cpu[0]),
+             self.call(self.program(),cpu[0],cpu[0])]
+    self.assertEqual(self.analyze(calls,cpu,npu,source),({},set(),set()))
+
+  def test_intervening_npu_view_requires_actual_overlap(self):
+    for offset in (2,7,8):
+      with self.subTest(offset=offset):
+        cpu,source,npu = self.node(),self.node(),self.node('ROCKCHIP')
+        cpu2 = self.node(base=cpu[1][0].base,offset=8)
+        view = self.node('ROCKCHIP',base=npu[1][0].base,offset=offset)
+        node,(buf,raw,expr) = view
+        view = node,(buf,replace(raw,addr=npu[1][1].addr+offset,dma=npu[1][1].dma+offset,meta=npu[1][1].meta),expr)
+        calls = [self.call(self.program(),cpu[0],source[0]),self.call(self.program(),cpu2[0],source[0]),
+                 self.call(UOp(Ops.STORE),npu[0],cpu[0]),self.call(UOp(Ops.STORE),view[0],cpu2[0])]
+        _,uploads,_ = self.analyze(calls,cpu,cpu2,source,npu,view)
+        self.assertEqual(uploads,{2,3} if offset==8 else {2})
 
   def test_download_borrowing_keeps_partial_future_reuse_copy(self):
     cpu,npu,source,result = self.node(),self.node('ROCKCHIP'),self.node(),self.node()
@@ -129,7 +172,17 @@ class TestRockchipReplayAliasAnalysis(unittest.TestCase):
         self.assertEqual(len(aliases),int(count is None))
 
 
+
 class TestRockchipReplayFallback(unittest.TestCase):
+  def test_non_string_devices_decline_native_replay(self):
+    from tinygrad.llm.kernels.rockchip_replay import NativeReplay, UnsupportedReplay
+    for device in (None,('CPU','CPU:1')):
+      call = SimpleNamespace(op=Ops.CALL,device=device)
+      with self.assertRaises(UnsupportedReplay):
+        NativeReplay(SimpleNamespace(src=[SimpleNamespace(without_after=call)]),[],{})
+      with self.assertRaises(UnsupportedReplay):
+        NativeReplay.kernel(NativeReplay.__new__(NativeReplay),call,0)
+
   def test_prefill_variants_reuse_multiple_input_sizes(self):
     model = SimpleNamespace(blk=[],greedy_prefill_jit=TinyJit(lambda x:(x*2+1).realize()))
     configure(model,native_replay=True)

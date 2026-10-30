@@ -2,9 +2,17 @@
 import functools, math, platform
 from dataclasses import replace
 from tinygrad import Tensor, dtypes
-from tinygrad.helpers import Target
+from tinygrad.helpers import ContextVar, Target
 from tinygrad.renderer.cstyle import ClangRenderer
+from tinygrad.llm.kernels.rockchip_shared_pool import shared_program
+from tinygrad.llm.kernels.rockchip_padding import ONPU_ZERO_PAD_VIEWS, capacity_input, mark_zero_tail
 from tinygrad.uop.ops import KernelInfo, Ops, ProgramInfo, UOp
+
+
+ONPU_CPU_PREFILL_LAYOUT = ContextVar('ONPU_CPU_PREFILL_LAYOUT',0)
+ONPU_CPU_DECODE_POOL = ContextVar('ONPU_CPU_DECODE_POOL',0)
+ONPU_EXP2_FAST_PATH = ContextVar('ONPU_EXP2_FAST_PATH',0)
+ONPU_EXP2_SCALE_BITS = ContextVar('ONPU_EXP2_SCALE_BITS',1)
 
 
 @functools.cache
@@ -28,35 +36,39 @@ def _sigmoid_source() -> str:
 
 
 @functools.cache
-def _decode_heads(heads:int, kv_heads:int, dim:int, context:int, fast_softmax:bool=False) -> str:
+def _decode_heads(heads:int, kv_heads:int, dim:int, context:int, fast_softmax:bool=False,
+                  score_scale:float|None=None, window:int=0, softcap:float=0.0) -> str:
   group = heads//kv_heads
   tile = min(4,16//group)
   if dim%(4*tile): tile = 1
   queries = '\n'.join(f'const float4 *q{i}=(const float4*)(query+(kv*{group}+{i})*{dim});' for i in range(group))
   acc = ','.join(f'a{i}={{0}}' for i in range(group))
   dot = '\n'.join(f'a{i}=a{i}+q{i}[c]*key;' for i in range(group))
-  scores = '\n'.join(f'''p[{i}][t]=(((a{i}[0]+a{i}[1])+a{i}[2])+a{i}[3])*{1/math.sqrt(dim):.17g}f;
+  scale = float(1/math.sqrt(dim) if score_scale is None else score_scale).hex()+'f'
+  scores = '\n'.join(f'''p[{i}][t]=(((a{i}[0]+a{i}[1])+a{i}[2])+a{i}[3])*{scale};
+    {f'p[{i}][t]=rockchip_attention_softcap(p[{i}][t]);' if softcap else ''}
     if(p[{i}][t]>maximum[{i}])maximum[{i}]=p[{i}][t];''' for i in range(group))
   maxima = ','.join('-__builtin_inff()' for _ in range(group))
   values = '\n'.join(f'float4 v{j}=__builtin_convertvector(value[c+{j}],float4);' for j in range(tile))
   pv_acc = ','.join(f'a{i}{j}={{0}}' for i in range(group) for j in range(tile))
   pv = '\n'.join(f'a{i}{j}=a{i}{j}+v{j}*(float4)p[{i}][t];' for i in range(group) for j in range(tile))
   stores = '\n'.join(f'((float4*)(out+(kv*{group}+{i})*{dim}))[c+{j}]=a{i}{j};' for i in range(group) for j in range(tile))
-  normalize = (f'for(int i=0;i<{group};i++)rockchip_softmax_vector(p[i],total,maximum[i]);' if fast_softmax else f'''
+  normalize = (f'for(int i=0;i<{group};i++)rockchip_softmax_vector(p[i]+first,total-first,maximum[i]);' if fast_softmax else f'''
     for(int i=0;i<{group};i++) {{float sum=0;
-      for(int t=0;t<total;t++) {{p[i][t]=expf(p[i][t]-maximum[i]);sum+=p[i][t];}}
-      for(int t=0;t<total;t++)p[i][t]/=sum;
+      for(int t=first;t<total;t++) {{p[i][t]=expf(p[i][t]-maximum[i]);sum+=p[i][t];}}
+      for(int t=first;t<total;t++)p[i][t]/=sum;
     }}''')
   return f'''for(int kv=begin/{group};kv<end/{group};kv++) {{
     const __fp16 *keys=cache+kv*{context*dim},*values=keys+{kv_heads*context*dim};
+    const int first={f'total>{window}?total-{window}:0' if window else '0'};
     float p[{group}][{context}],maximum[{group}]={{{maxima}}};{queries}
-    for(int t=0;t<total;t++) {{const half4 *source=(const half4*)(keys+t*{dim});float4 {acc};
+    for(int t=first;t<total;t++) {{const half4 *source=(const half4*)(keys+t*{dim});float4 {acc};
       for(int c=0;c<{dim//4};c++) {{float4 key=__builtin_convertvector(source[c],float4);{dot}}}
       {scores}
     }}
     {normalize}
     for(int c=0;c<{dim//4};c+={tile}) {{float4 {pv_acc};
-      for(int t=0;t<total;t++) {{const half4 *value=(const half4*)(values+t*{dim});{values}{pv}}}
+      for(int t=first;t<total;t++) {{const half4 *value=(const half4*)(values+t*{dim});{values}{pv}}}
       {stores}
     }}
   }}return;'''
@@ -64,13 +76,15 @@ def _decode_heads(heads:int, kv_heads:int, dim:int, context:int, fast_softmax:bo
 
 @functools.cache
 def _attention_rows(dim:int, context:int, max_rows:int, block:int=4, channel_tile:int=0, fast_softmax:bool=False,
-                    causal:bool=True, kv_float:bool=False) -> str:
+                    causal:bool=True, kv_float:bool=False, score_scale:float|None=None, softcap:float=0.0, token_major_heads:int=0) -> str:
   """Reuse each KV load across queries without reordering dot sums."""
   if block not in (4,8,16) or channel_tile not in (0,1,2,4): raise ValueError('Unsupported CPU attention register tile')
   queries = '\n'.join(f'const float4 *q{i}=(const float4*)(query+(head*{max_rows}+row+{i})*{dim});' for i in range(block))
   acc = ','.join(f'a{i}={{0}}' for i in range(block))
   dot = '\n'.join(f'a{i}=a{i}+q{i}[c]*key;' for i in range(block))
-  score = '\n'.join(f'''if(t<used[{i}]) {{float v=(((a{i}[0]+a{i}[1])+a{i}[2])+a{i}[3])*{1/math.sqrt(dim):.17g}f;
+  scale = float(1/math.sqrt(dim) if score_scale is None else score_scale).hex()+'f'
+  score = '\n'.join(f'''if(t<used[{i}]) {{float v=(((a{i}[0]+a{i}[1])+a{i}[2])+a{i}[3])*{scale};
+    {'v=rockchip_attention_softcap(v);' if softcap else ''}
     p[{i}][t]=v;if(v>maximum[{i}])maximum[{i}]=v;}}''' for i in range(block))
   tile = channel_tile or (2 if dim%8==0 else 1)
   if dim%(4*tile): raise ValueError('CPU attention channel tile does not divide the head')
@@ -81,8 +95,8 @@ def _attention_rows(dim:int, context:int, max_rows:int, block:int=4, channel_til
   pv = '\n'.join('if(t<used['+str(i)+']) {'+''.join(f'a{i}{j}=a{i}{j}+v{j}*(float4)p[{i}][t];' for j in range(tile))+'}'
                  for i in range(block))
   pv_common = '\n'.join(f'a{i}{j}=a{i}{j}+v{j}*(float4)p[{i}][t];' for i in range(block) for j in range(tile))
-  stores = '\n'.join(f'((float4*)(out+(head*{max_rows}+row+{i})*{dim}))[c+{j}]=a{i}{j};'
-                     for i in range(block) for j in range(tile))
+  row_indices = [f'((row+{i})*{token_major_heads}+head)' if token_major_heads else f'(head*{max_rows}+row+{i})' for i in range(block)]
+  stores = '\n'.join(f'((float4*)(out+{index}*{dim}))[c+{j}]=a{i}{j};' for i,index in enumerate(row_indices) for j in range(tile))
   maxima = ','.join('-__builtin_inff()' for _ in range(block))
   normalize = (f'for(int i=0;i<{block};i++)rockchip_softmax_vector(p[i],used[i],maximum[i]);' if fast_softmax else f'''
     for(int i=0;i<{block};i++) {{
@@ -115,7 +129,8 @@ def _attention_rows(dim:int, context:int, max_rows:int, block:int=4, channel_til
 def _attention(out:UOp, query:UOp, cache:UOp, length:UOp|None, heads:int, kv_heads:int, dim:int, context:int,
                rows:UOp|None=None, max_rows:int=1, static_length:int|None=None, blocked_rows:bool=True,
                query_rows:int|None=None, channel_tile:int=0, decode_grouped:bool=True, pool:int|None=None,
-               fast_softmax:bool=False) -> UOp:
+               fast_softmax:bool=False, score_scale:float|None=None, window:int=0, softcap:float=0.0, token_major:bool=False,
+               small_kv_pool:bool=False) -> UOp:
   if query_rows is None:
     query_rows = 8 if max_rows>=64 and (dim==128 and context<=1024 or dim==64 and context>=4096) else 4
   parallel = max_rows>=16 and heads>=4
@@ -138,12 +153,12 @@ def _attention(out:UOp, query:UOp, cache:UOp, length:UOp|None, heads:int, kv_hea
   worker = '''static void *attention_worker(void *opaque) {
     Work *w=(Work*)opaque;attention_part(w->out,w->query,w->cache,w->total,w->rows,w->begin,w->end);return (void*)0;
   }''' if parallel else ''
-  if pool is not None and max_rows==1 and (kv_heads>=4 or kv_heads>=2 and context>=4096):
+  if pool is not None and max_rows==1 and (kv_heads>=4 or kv_heads>=2 and (context>=4096 or small_kv_pool)):
     declarations += f'''static void pool_part(void **args,int total,int group) {{
       attention_part(args[0],args[1],args[2],total,1,({kv_heads}*group/4)*{heads//kv_heads},
                      ({kv_heads}*(group+1)/4)*{heads//kv_heads});
     }}'''
-    dispatch = f'''if(total>={1024 if kv_heads<4 else 16}){{void *args[4]={{out,(void*)query,(void*)cache,0}};
+    dispatch = f'''if(total>={1024 if kv_heads<4 and not small_kv_pool else 16}){{void *args[4]={{out,(void*)query,(void*)cache,0}};
       if(!((int(*)(void(*)(void**,int,int),void**,int)){pool}ULL)(pool_part,args,total))return;
     }}attention_part(out,query,cache,total,active_rows,0,{heads});'''
   elif pool is not None and parallel:
@@ -153,9 +168,19 @@ def _attention(out:UOp, query:UOp, cache:UOp, length:UOp|None, heads:int, kv_hea
     dispatch = f'''if(active_rows>=16){{void *args[4]={{out,(void*)query,(void*)cache,(void*)&active_rows}};
       if(!((int(*)(void(*)(void**,int,int),void**,int)){pool}ULL)(pool_prefill_part,args,total))return;
     }}{dispatch}'''
+  cap_source = ''
+  if softcap:
+    import struct
+    coefficient = struct.unpack('f',struct.pack('f',(-2/math.log(2))*(1/softcap)))[0]
+    cap_source = (_vector_exp2_source() if not fast_softmax else '')+f'''
+    static __attribute__((always_inline)) float rockchip_attention_softcap(float value) {{
+      float4 y=rockchip_exp2_vector((float4)(value*{coefficient.hex()}f));
+      return (2.0f/(1.0f+y[0])-1.0f)*{float(softcap).hex()}f;
+    }}'''
   source = f'''typedef float float4 __attribute__((aligned(16),ext_vector_type(4)));
   typedef __fp16 half4 __attribute__((aligned(8),ext_vector_type(4)));
   {_fast_softmax_source() if fast_softmax else ''}
+  {cap_source}
   extern float expf(float);
   static void attention_part(float*,const float*,const __fp16*,int,int,int,int);
   {declarations}
@@ -168,32 +193,38 @@ def _attention(out:UOp, query:UOp, cache:UOp, length:UOp|None, heads:int, kv_hea
     {dispatch}
   }}
   static void attention_part(float *out,const float *query,const __fp16 *cache,int total,int active_rows,int begin,int end) {{
-    {_decode_heads(heads,kv_heads,dim,context,fast_softmax) if decode_grouped and max_rows==1 and 1<heads//kv_heads<=8 else ''}
+    {_decode_heads(heads,kv_heads,dim,context,fast_softmax,score_scale,window,softcap)
+     if decode_grouped and max_rows==1 and 1<heads//kv_heads<=8 else ''}
     for(int head=begin;head<end;head++) {{
       const __fp16 *keys=cache+(head/{heads//kv_heads})*{context*dim};
       const __fp16 *values=keys+{kv_heads*context*dim};
       int row=0;
-      {_attention_rows(dim,context,max_rows,query_rows,channel_tile,fast_softmax) if blocked_rows and max_rows>=16 else ''}
+      {_attention_rows(dim,context,max_rows,query_rows,channel_tile,fast_softmax,score_scale=score_scale,softcap=softcap,
+                       token_major_heads=heads if token_major else 0)
+       if blocked_rows and max_rows>=16 and not window else ''}
       for(;row<active_rows;row++) {{
       const int used=total-active_rows+row+1;
+      const int first={f'used>{window}?used-{window}:0' if window else '0'};
       const float4 *q=(const float4*)(query+(head*{max_rows}+row)*{dim});
       float scores[{context}],maximum=-__builtin_inff(),denominator=0.0f;
-      for(int t=0;t<used;t++) {{
+      for(int t=first;t<used;t++) {{
         const half4 *key=(const half4*)(keys+t*{dim});float4 acc={{0}};
         for(int c=0;c<{dim//4};c++)acc=acc+q[c]*__builtin_convertvector(key[c],float4);
         float score=((acc[0]+acc[1])+acc[2])+acc[3];
-        scores[t]=score*{1/math.sqrt(dim):.17g}f;
+        scores[t]=score*{float(1/math.sqrt(dim) if score_scale is None else score_scale).hex()}f;
+        {'scores[t]=rockchip_attention_softcap(scores[t]);' if softcap else ''}
         if(scores[t]>maximum)maximum=scores[t];
       }}
-      {'rockchip_softmax_vector(scores,used,maximum);denominator=1.0f;' if fast_softmax else
-       'for(int t=0;t<used;t++){scores[t]=expf(scores[t]-maximum);denominator+=scores[t];}'}
+      {'rockchip_softmax_vector(scores+first,used-first,maximum);denominator=1.0f;' if fast_softmax else
+       'for(int t=first;t<used;t++){scores[t]=expf(scores[t]-maximum);denominator+=scores[t];}'}
       float4 accum[{dim//4}]={{{{0}}}};
-      for(int t=0;t<used;t++) {{
+      for(int t=first;t<used;t++) {{
         const half4 *value=(const half4*)(values+t*{dim});float p=scores[t]/denominator;
         for(int c=0;c<{dim//4};c++)accum[c]=accum[c]+(float4){{p,p,p,p}}*__builtin_convertvector(value[c],float4);
       }}
-      for(int c=0;c<{dim//4};c++)((float4*)(out+(head*{max_rows}+row)*{dim}))[c]=accum[c];
+      for(int c=0;c<{dim//4};c++)((float4*)(out+{f'(row*{heads}+head)' if token_major else f'(head*{max_rows}+row)'}*{dim}))[c]=accum[c];
       }}
+      {f'for(;row<{max_rows};row++)for(int c=0;c<{dim//4};c++)((float4*)(out+(row*{heads}+head)*{dim}))[c]=(float4)0;' if token_major else ''}
     }}
   }}
   {worker}'''
@@ -206,32 +237,46 @@ def _attention(out:UOp, query:UOp, cache:UOp, length:UOp|None, heads:int, kv_hea
              UOp(Ops.SOURCE,arg=source),UOp(Ops.BINARY,arg=renderer.compiler.compile_cached(source))))
 
 
-def _cpu_attention(query:Tensor, cache:Tensor, length:int|UOp, decode_only:bool, pool:int|None=None, fast_softmax:bool=False) -> Tensor:
+def _cpu_attention(query:Tensor, cache:Tensor, length:int|UOp, decode_only:bool, pool:int|None=None, fast_softmax:bool=False,
+                   score_scale:float|None=None, window:int=0, softcap:float=0.0) -> Tensor:
   if (query.device!='CPU' or cache.device!='CPU' or query.dtype is not dtypes.float or cache.dtype is not dtypes.half
       or query.ndim!=4 or cache.ndim!=5 or query.shape[0]!=1 or decode_only and query.shape[2]!=1
       or cache.shape[:2]!=(2,1) or query.shape[-1]!=cache.shape[-1]): raise ValueError('Unsupported CPU decode attention layout')
   heads,kv_heads,dim,context = query.shape[1],cache.shape[2],query.shape[3],cache.shape[3]
   if (not all(isinstance(value,int) for value in (heads,kv_heads,dim,context)) or heads%kv_heads or dim%4
-      or not 4<=dim<=256 or not 1<=context<=8192): raise ValueError('Unsupported CPU decode attention geometry')
+      or not 4<=dim<=512 or not 1<=context<=8192): raise ValueError('Unsupported CPU decode attention geometry')
+  if score_scale is not None and (isinstance(score_scale,bool) or not math.isfinite(score_scale) or score_scale<=0):
+    raise ValueError('CPU attention scale must be finite and positive')
+  if type(window) is not int or not 0<=window<=2147483647:raise ValueError('Invalid CPU attention sliding window')
+  if isinstance(softcap,bool) or not math.isfinite(softcap) or softcap!=0 and not .125<=softcap<=128:
+    raise ValueError('CPU attention soft cap must be zero or between 0.125 and 128')
+  if window>=context:window=0
   assert isinstance(heads,int) and isinstance(kv_heads,int) and isinstance(dim,int) and isinstance(context,int)
   if isinstance(length,int) and not 1<=length<=context: raise ValueError('Invalid CPU decode attention length')
   max_rows = query.max_shape[2]
   if not 1<=max_rows<=4096: raise ValueError('Unsupported CPU attention query count')
   size = (Tensor(length,device='CPU',dtype=dtypes.int).reshape(1),) if isinstance(length,UOp) else ()
   rows = (Tensor(query.shape[2],device='CPU',dtype=dtypes.int).reshape(1),) if not isinstance(query.shape[2],int) and max_rows>1 else ()
-  out = Tensor.empty(*query.max_shape,device='CPU',dtype=dtypes.float)
-  result = out.custom_kernel(query.pad_to(query.max_shape).contiguous(),cache,*size,*rows,
+  token_major = bool(ONPU_CPU_PREFILL_LAYOUT) and not decode_only and max_rows>=16
+  out = Tensor.empty(*((1,max_rows,heads,dim) if token_major else query.max_shape),device='CPU',dtype=dtypes.float)
+  result = out.custom_kernel(capacity_input(query).contiguous(),cache,*size,*rows,
     fxn=lambda o,q,k,*r:_attention(o,q,k,r[0] if size else None,heads,kv_heads,dim,context,
                                   r[-1] if rows else None,max_rows,length if isinstance(length,int) else None,
-                                  pool=pool,fast_softmax=fast_softmax))[0]
-  return result.shrink(tuple((0,size) for size in query.shape))
+                                  pool=pool,fast_softmax=fast_softmax,score_scale=score_scale,window=window,softcap=softcap,
+                                  query_rows=8 if token_major and max_rows>=64 and (heads,kv_heads,dim)==(32,4,64) else None,
+                                  token_major=token_major,small_kv_pool=bool(ONPU_CPU_DECODE_POOL)))[0]
+  full = result.transpose(1,2) if token_major else result
+  logical = full.shrink(tuple((0,size) for size in query.shape))
+  return mark_zero_tail(logical,full,'cpu_attention') if token_major else logical
 
 
-def decode_attention(query:Tensor, cache:Tensor, length:int|UOp, pool=None, fast_softmax:bool=False) -> Tensor:
-  return _cpu_attention(query,cache,length,True,pool.address if pool is not None and pool.active else None,fast_softmax)
-def prefill_attention(query:Tensor, cache:Tensor, length:int|UOp, fast_softmax:bool=False, pool=None) -> Tensor:
+def decode_attention(query:Tensor, cache:Tensor, length:int|UOp, pool=None, fast_softmax:bool=False, *,
+                     score_scale:float|None=None, window:int=0, softcap:float=0.0) -> Tensor:
+  return _cpu_attention(query,cache,length,True,pool.address if pool is not None and pool.active else None,fast_softmax,score_scale,window,softcap)
+def prefill_attention(query:Tensor, cache:Tensor, length:int|UOp, fast_softmax:bool=False, pool=None, *,
+                      score_scale:float|None=None, window:int=0, softcap:float=0.0) -> Tensor:
   address = pool.prefill_address if pool is not None and pool.active and query.max_shape[2]>=16 else None
-  return _cpu_attention(query,cache,length,False,pool=address,fast_softmax=fast_softmax)
+  return _cpu_attention(query,cache,length,False,pool=address,fast_softmax=fast_softmax,score_scale=score_scale,window=window,softcap=softcap)
 
 
 @functools.cache
@@ -296,8 +341,10 @@ def unpack_tiles(parts:list[Tensor], split:bool=False) -> Tensor:
   return out.custom_kernel(*parts,fxn=lambda o,*p:_unpack_tiles(o,p,tile_rows,last_rows,columns,split))[0]
 
 
+@shared_program
 @functools.cache
-def _rms_norm(out:UOp, source:UOp, weight:UOp, rows:int, width:int, eps:float, parallel:bool|None=None) -> UOp:
+def _rms_norm(out:UOp, source:UOp, weight:UOp, rows:int, width:int, eps:float, parallel:bool|None=None,
+              active:UOp|None=None) -> UOp:
   dtype = '__fp16' if weight.dtype is dtypes.half else 'float'
   load = '__builtin_convertvector(*(const half4*)(weight+c),float4)' if dtype=='__fp16' else '*(const float4*)(weight+c)'
   if parallel is None: parallel = rows*width>=131072
@@ -319,7 +366,10 @@ def _rms_norm(out:UOp, source:UOp, weight:UOp, rows:int, width:int, eps:float, p
   typedef __fp16 half4 __attribute__((aligned(8),ext_vector_type(4)));
   static void norm_part(float*,const float*,const {dtype}*,int,int);
   {declarations}
-  void rockchip_cpu_rmsnorm(float *out,const float *src,const {dtype} *weight) {{{dispatch}}}
+  void rockchip_cpu_rmsnorm(float *out,const float *src,const {dtype} *weight{',const int *active_rows' if active is not None else ''}) {{
+    {dispatch}{f'if(*active_rows>=0 && *active_rows<{rows})__builtin_memset(out+*active_rows*{width},0,({rows}-*active_rows)*{width}UL*4);'
+                if active is not None else ''}
+  }}
   static void norm_part(float *out,const float *src,const {dtype} *weight,int begin,int end) {{
     for(int r=begin;r<end;r++) {{
       float4 acc=(float4)0;
@@ -331,10 +381,11 @@ def _rms_norm(out:UOp, source:UOp, weight:UOp, rows:int, width:int, eps:float, p
     }}
   }}
   {worker}'''
-  sink = UOp.sink(out,source,weight,arg=KernelInfo('rockchip_cpu_rmsnorm'))
+  inputs = (out,source,weight)+((active,) if active is not None else ())
+  sink = UOp.sink(*inputs,arg=KernelInfo('rockchip_cpu_rmsnorm'))
   renderer = _renderer()
-  info = replace(ProgramInfo.from_sink(sink,renderer.target),outs=(0,),ins=(1,2))
-  return UOp(Ops.PROGRAM,arg=info,src=(sink,UOp(Ops.LINEAR,src=(out,source,weight)),UOp(Ops.SOURCE,arg=text),
+  info = replace(ProgramInfo.from_sink(sink,renderer.target),outs=(0,),ins=tuple(range(1,len(inputs))))
+  return UOp(Ops.PROGRAM,arg=info,src=(sink,UOp(Ops.LINEAR,src=inputs),UOp(Ops.SOURCE,arg=text),
                                      UOp(Ops.BINARY,arg=renderer.compiler.compile_cached(text))))
 
 
@@ -343,29 +394,54 @@ def rms_norm(x:Tensor, weight:Tensor, eps:float) -> Tensor:
   if (x.device!='CPU' or x.dtype is not dtypes.float or weight.device!='CPU' or weight.dtype not in (dtypes.float,dtypes.half)
       or weight.shape!=(width,) or not 4<=width<=8192 or width%4 or rows<1 or not math.isfinite(eps) or eps<=0):
     raise ValueError('Unsupported CPU normalization geometry')
+  zero_tail = bool(ONPU_ZERO_PAD_VIEWS) and x.ndim>=2 and not isinstance(x.shape[-2],int) and math.prod(x.max_shape[:-2])==1
+  count = math.prod(x.shape[:-1])
+  active = (Tensor([count] if isinstance(count,int) else count,device='CPU',dtype=dtypes.int).reshape(1),) if zero_tail else ()
   out = Tensor.empty(*x.max_shape,device='CPU',dtype=dtypes.float).custom_kernel(
-    x.pad_to(x.max_shape).contiguous(),weight.contiguous(),fxn=lambda o,a,w:_rms_norm(o,a,w,rows,width,eps))[0]
-  return out.shrink(tuple((0,s) for s in x.shape))
+    x.pad_to(x.max_shape).contiguous(),weight.contiguous(),*active,
+    fxn=lambda o,a,w,*n:_rms_norm(o,a,w,rows,width,eps,active=n[0] if n else None))[0]
+  logical = out.shrink(tuple((0,s) for s in x.shape))
+  return mark_zero_tail(logical,out,'rms_norm') if zero_tail else logical
 
 
 def _vector_exp2_source() -> str:
-  # Same FP32 xexp2 polynomial, range reduction and exceptional cases as the
-  # scalar CPU legalization above. Full half payloads are checked against it.
-  return '''typedef float float4 __attribute__((aligned(16),ext_vector_type(4)));
+  # Reuse the exact polynomial. Normal powers of two change only exponent bits.
+  declarations = '''typedef float float4 __attribute__((aligned(16),ext_vector_type(4)));
   typedef int int4 __attribute__((aligned(16),ext_vector_type(4)));
-  typedef __fp16 half4 __attribute__((aligned(8),ext_vector_type(4)));
-  static __attribute__((always_inline)) float4 rockchip_exp2_vector(float4 x) {
-    int4 nan=x!=x;
-    float4 safe=((x==(float4)__builtin_inff())|(x==(float4)-__builtin_inff())|nan)?(float4)0:x;
-    int4 q=__builtin_convertvector(safe+(safe<0?(float4)-.5f:(float4).5f),int4),q1=q>>1;
+  typedef __fp16 half4 __attribute__((aligned(8),ext_vector_type(4)));'''
+  polynomial = '''((((((0.00015359208919107914f*s+0.0013392627006396651f)*s+0.009618384763598442f)*s+
+      0.055503472685813904f)*s+0.24022644758224487f)*s+0.6931471824645996f)*s+1.0f)'''
+  reduced = '''int4 q=__builtin_convertvector(safe+(safe<0?(float4)-.5f:(float4).5f),int4),q1=q>>1;
     float4 s=safe-__builtin_convertvector(q,float4);
-    float4 y=((((((0.00015359208919107914f*s+0.0013392627006396651f)*s+0.009618384763598442f)*s+
-      0.055503472685813904f)*s+0.24022644758224487f)*s+0.6931471824645996f)*s+1.0f)*
-      __builtin_bit_cast(float4,(q1+127)<<23)*__builtin_bit_cast(float4,(q-q1+127)<<23);
+    float4 y='''+polynomial+'''*__builtin_bit_cast(float4,(q1+127)<<23)*__builtin_bit_cast(float4,(q-q1+127)<<23);'''
+  checked = '''int4 nan=x!=x;
+    float4 safe=((x==(float4)__builtin_inff())|(x==(float4)-__builtin_inff())|nan)?(float4)0:x;
+    '''+reduced+'''
     y=x>=128?(float4)__builtin_inff():y;
     y=x<-150?(float4)0:y;
     y=nan?(float4)__builtin_nanf(""):y;
-    return y;
+    return y;'''
+  if not ONPU_EXP2_FAST_PATH:
+    return declarations+'static __attribute__((always_inline)) float4 rockchip_exp2_vector(float4 x) {'+checked+'}'
+  slow = 'static __attribute__((always_inline)) float4 rockchip_exp2_slow(float4 x) {'+checked+'}'
+  if not ONPU_EXP2_SCALE_BITS:
+    return declarations+slow+'''
+    static __attribute__((always_inline)) float4 rockchip_exp2_vector(float4 x) {
+      int4 magnitude=__builtin_bit_cast(int4,x)&(int4)0x7fffffff;
+      if(__builtin_expect(__builtin_reduce_max(magnitude)>=0x43000000,0))return rockchip_exp2_slow(x);
+      float4 safe=x;
+      '''+reduced+'return y;}'
+  # |x|<125 keeps the polynomial and final result normal, with q in [-125,125].
+  # The original two power-of-two multiplies are exact here, as is this exponent
+  # adjustment. The signed integer multiplication/addition cannot overflow.
+  return declarations+slow+'''
+  static __attribute__((always_inline)) float4 rockchip_exp2_vector(float4 x) {
+    int4 magnitude=__builtin_bit_cast(int4,x)&(int4)0x7fffffff;
+    if(__builtin_expect(__builtin_reduce_max(magnitude)>=0x42fa0000,0))return rockchip_exp2_slow(x);
+    int4 q=__builtin_convertvector(x+(x<0?(float4)-.5f:(float4).5f),int4);
+    float4 s=x-__builtin_convertvector(q,float4);
+    float4 y='''+polynomial+''';
+    return __builtin_bit_cast(float4,__builtin_bit_cast(int4,y)+q*(int4)0x800000);
   }'''
 
 

@@ -7,6 +7,23 @@ from tinygrad.llm.kernels import rockchip_cpu
 
 
 class TestRockchipCPUAttention(unittest.TestCase):
+  def test_256_channel_prefill_matches_independent_float64_reference(self):
+    rng = np.random.default_rng(256)
+    heads,kv_heads,dim,rows,length,context = 16,4,256,128,239,512
+    query = rng.normal(0,1,(1,heads,rows,dim)).astype(np.float32)
+    values = rng.normal(0,.5,(2,1,kv_heads,context,dim)).astype(np.float16)
+    keys = np.repeat(values[0,:,:,:length].astype(np.float64),heads//kv_heads,axis=1)
+    vals = np.repeat(values[1,:,:,:length].astype(np.float64),heads//kv_heads,axis=1)
+    scores = query.astype(np.float64)@keys.swapaxes(-1,-2)/(dim**.5)
+    allowed = np.arange(length)[None,:]<=(length-rows+np.arange(rows))[:,None]
+    scores = np.where(allowed,scores,-np.inf)
+    probs = np.exp(scores-scores.max(axis=-1,keepdims=True))
+    expected = (probs/probs.sum(axis=-1,keepdims=True))@vals
+    q,cache = Tensor(query,device='CPU').realize(),Tensor(values,device='CPU').realize()
+    for fast in (False,True):
+      actual = prefill_attention(q,cache,length,fast_softmax=fast).numpy()
+      np.testing.assert_allclose(actual,expected,atol=2e-5,rtol=2e-4)
+
   def test_prefill_pool_preserves_bits_affinity_and_parks_between_calls(self):
     if platform.machine().lower() not in ('aarch64','arm64') or not {4,5,6,7}.issubset(os.sched_getaffinity(0)):
       self.skipTest('AArch64 attention pool needs CPU4-7')

@@ -10,7 +10,8 @@ def _ioctl(nr, payload_type, fd, payload=None, **kwargs):
 class struct_rknpu_mem_create(ctypes.Structure):
   _pack_ = 1
   _fields_ = [('handle', ctypes.c_uint32), ('flags', ctypes.c_uint32), ('size', ctypes.c_uint64), ('obj_addr', ctypes.c_uint64),
-              ('dma_addr', ctypes.c_uint64), ('sram_size', ctypes.c_uint64)]
+              ('dma_addr', ctypes.c_uint64), ('sram_size', ctypes.c_uint64), ('iommu_domain_id', ctypes.c_int32),
+              ('core_mask', ctypes.c_uint32)]
 class struct_rknpu_mem_map(ctypes.Structure):
   _pack_ = 1
   _fields_ = [('handle', ctypes.c_uint32), ('reserved', ctypes.c_uint32), ('offset', ctypes.c_uint64)]
@@ -33,7 +34,8 @@ class struct_rknpu_submit(ctypes.Structure):
   _pack_ = 1
   _fields_ = [('flags', ctypes.c_uint32), ('timeout', ctypes.c_uint32), ('task_start', ctypes.c_uint32), ('task_number', ctypes.c_uint32),
               ('task_counter', ctypes.c_uint32), ('priority', ctypes.c_int32), ('task_obj_addr', ctypes.c_uint64),
-              ('regcfg_obj_addr', ctypes.c_uint64), ('task_base_addr', ctypes.c_uint64), ('user_data', ctypes.c_uint64),
+              ('iommu_domain_id', ctypes.c_uint32), ('reserved', ctypes.c_uint32), ('task_base_addr', ctypes.c_uint64),
+              ('hw_elapse_time', ctypes.c_int64),
               ('core_mask', ctypes.c_uint32), ('fence_fd', ctypes.c_int32), ('subcore_task', struct_rknpu_subcore_task * 5)]
 class struct_rknpu_action(ctypes.Structure):
   _pack_ = 1
@@ -49,6 +51,7 @@ RKNPU_MEM_NON_CACHEABLE, RKNPU_MEM_NON_CONTIGUOUS, RKNPU_MEM_CACHEABLE = 0, 1, 2
 RKNPU_MEM_KERNEL_MAPPING, RKNPU_MEM_IOMMU_LIMIT_IOVA_ALIGNMENT = 8, 1024
 RKNPU_MEM_SYNC_TO_DEVICE, RKNPU_MEM_SYNC_FROM_DEVICE = 1, 2
 RKNPU_JOB_PC, RKNPU_JOB_BLOCK, RKNPU_JOB_PINGPONG, RKNPU_ACT_RESET = 1, 0, 4, 6
+RKNPU_GET_IOMMU_DOMAIN_ID, RKNPU_SET_IOMMU_DOMAIN_ID = 24, 25
 
 REG_PC_OPERATION_ENABLE = 0x00000008
 REG_PC_BASE_ADDRESS = 0x00000010

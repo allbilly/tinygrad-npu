@@ -6,11 +6,47 @@ from tinygrad import Device, Tensor, TinyJit, UOp, nn
 from tinygrad.llm.kernels.rockchip import (RockchipLinear, configure, pack_weight, packed_matmul, pack_split_weight,
                                          packed_activation_matmul)
 from tinygrad.llm.kernels.rockchip_replay import RockchipCapturedJit
-from tinygrad.runtime.ops_rockchip import _matmul_body, _finite_program, RockchipBuffer, RockchipDevice, RockchipProgram
+from tinygrad.runtime.ops_rockchip import _matmul_body, _finite_program, RockchipBuffer, RockchipDevice, RockchipProgram, RockchipAllocator
 from tinygrad.runtime.autogen import rockchip as rk
 
 
 class TestRockchipBounds(unittest.TestCase):
+  def test_released_device_rejects_copyin_before_touching_memory(self):
+    def released(*args): raise RuntimeError('This worker released its NPU ownership')
+    allocator = SimpleNamespace(dev=SimpleNamespace(check_healthy=released,sync=released))
+    dest = SimpleNamespace(addr=1,meta=SimpleNamespace(version=0))
+    with patch('tinygrad.runtime.ops_rockchip.ctypes.memmove') as move:
+      with self.assertRaises(RuntimeError): RockchipAllocator._copyin(allocator,dest,memoryview(bytearray(b'x')))
+      move.assert_not_called()
+    self.assertEqual(dest.meta.version,0)
+
+  def test_domain_uapi_layout(self):
+    self.assertEqual(ctypes.sizeof(rk.struct_rknpu_mem_create),48)
+    self.assertEqual(rk.struct_rknpu_mem_create.iommu_domain_id.offset,40)
+    self.assertEqual(ctypes.sizeof(rk.struct_rknpu_submit),104)
+    self.assertEqual(rk.struct_rknpu_submit.iommu_domain_id.offset,32)
+    self.assertEqual(rk.struct_rknpu_submit.subcore_task.offset,64)
+
+  def test_cross_domain_bindings_rejected(self):
+    dev = SimpleNamespace(domain=1)
+    def buf(domain): return RockchipBuffer(0,0,4096,SimpleNamespace(iommu_domain_id=domain))
+    RockchipDevice.check_domain(dev,buf(1),buf(1),buf(1))
+    with self.assertRaises(ValueError): RockchipDevice.check_domain(dev,buf(1),buf(0),buf(1))
+    with self.assertRaises(ValueError): RockchipDevice('ROCKCHIP:16')
+
+  def test_weight_domain_spill_and_default(self):
+    from tinygrad.runtime.ops_rockchip import int8_weight_device
+    hw = SimpleNamespace(weight_domain=0)
+    first,second = SimpleNamespace(hw=hw,mapped_bytes=4096),SimpleNamespace(mapped_bytes=0)
+    options = {'ONPU_NPU_DOMAINS':2,'ONPU_NPU_DOMAIN_BYTES':4096}
+    with patch('tinygrad.runtime.ops_rockchip.Device',{'ROCKCHIP':first,'ROCKCHIP:1':second}), \
+         patch('tinygrad.runtime.ops_rockchip.getenv',side_effect=lambda key,default:options.get(key,default)):
+      self.assertEqual(int8_weight_device(4096),'ROCKCHIP:1')
+      second.mapped_bytes = 4096
+      with self.assertRaises(MemoryError): int8_weight_device(4096)
+      options['ONPU_NPU_DOMAINS'] = 1
+      self.assertEqual(int8_weight_device(4096),'ROCKCHIP')
+
   def test_binding_eviction_preserves_live_replay_owner(self):
     references = []
     class Plan:

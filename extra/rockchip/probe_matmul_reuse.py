@@ -68,7 +68,7 @@ def main():
         subcores = [(0,1)] if args.cores==1 else [(0,0),(0,0),(0,1),(1,1),(2,1)]
         rk.DRM_IOCTL_RKNPU_SUBMIT(dev.fd,flags=rk.RKNPU_JOB_PC|rk.RKNPU_JOB_BLOCK|rk.RKNPU_JOB_PINGPONG,
           timeout=6000,task_start=0,task_number=len(parts),task_counter=0,priority=0,task_obj_addr=task.meta.obj_addr,
-          regcfg_obj_addr=0,task_base_addr=0,user_data=0,core_mask=(1<<args.cores)-1,fence_fd=-1,
+          iommu_domain_id=0,task_base_addr=0,hw_elapse_time=0,core_mask=(1<<args.cores)-1,fence_fd=-1,
           subcore_task=(rk.struct_rknpu_subcore_task*5)(*(rk.struct_rknpu_subcore_task(*part) for part in subcores)))
         elapsed = time.perf_counter()-begin
         dev.sync(out,rk.RKNPU_MEM_SYNC_FROM_DEVICE)

@@ -1,6 +1,6 @@
 """Native replay of prepared CPU/Rockchip inference calls, with guarded fallback."""
 from __future__ import annotations
-import ctypes, time
+import ctypes, functools, itertools, subprocess, time
 from collections import Counter
 from dataclasses import replace
 from typing import Any, cast
@@ -13,12 +13,29 @@ from tinygrad.helpers import DEBUG, PROFILE, GlobalCounters, getenv, unwrap
 from tinygrad.renderer import Estimates
 from tinygrad.renderer.cstyle import ClangRenderer
 from tinygrad.runtime.ops_cpu import CPUProgram
-from tinygrad.runtime.ops_rockchip import RockchipBuffer, RockchipDevice, RockchipProgram, _FINITE_HALF_SOURCE
+from tinygrad.runtime.ops_rockchip import (RockchipBuffer, RockchipDevice, RockchipProgram, RockchipRoutedMatmul,
+                                         RockchipBucketedMatmul, _FINITE_HALF_SOURCE)
 from tinygrad.runtime.autogen import rockchip as rk
 from tinygrad.uop.ops import Ops, UOp, sym_infer
 
 
 class UnsupportedReplay(Exception): pass
+
+
+def _copy_scalar_input(u:UOp) -> UOp:
+  """Snapshot a local CPU token without compiling a one-element copy graph."""
+  if (getenv('ONPU_REPLAY_SCALAR_COPY',1) and u.device=='CPU' and u.dtype in (dtypes.int32,dtypes.int64)
+      and u.op is Ops.BUFFER and u.max_numel()==1 and getattr(Device['CPU'],'remote',None) is None
+      and isinstance(source:=u.buffer,Buffer)):
+    new=UOp.new_buffer('CPU',1,u.dtype)
+    cast(Buffer,new.buffer).ensure_allocated().as_memoryview(allow_zero_copy=True)[:] = source.as_memoryview(allow_zero_copy=True)
+    return new
+  return _copy_input(u)
+
+
+def _attention_call(call:UOp) -> bool:
+  return (call.device=='CPU' and call.body.op is Ops.PROGRAM and len(call.body.src)>=4
+          and isinstance(binary:=call.body.src[3].arg,bytes) and len(binary)==32 and binary[:4]==b'RNPA')
 
 
 def _full_write(call:UOp, slot:int, nbytes:int) -> bool:
@@ -108,13 +125,27 @@ class NativeReplay:
     self.write_counts:Counter[int] = Counter()
     self.weight_guards:dict[int,tuple[Any,int]] = {}
     self.plans:list[tuple[Any,tuple]] = []
+    self.attention_programs:list[Any] = []
     self.mutated:set[int] = set()
     self.calls = [call.without_after for call in linear.src]
-    if not any(call.op is Ops.CALL and call.device=='ROCKCHIP' for call in self.calls): raise UnsupportedReplay('no NPU work')
+    if not any(call.op is Ops.CALL and (isinstance(call.device,str) and call.device.split(':')[0]=='ROCKCHIP' or _attention_call(call))
+               for call in self.calls): raise UnsupportedReplay('no NPU work')
     self.dev = cast(RockchipDevice,Device['ROCKCHIP'])
     self.cleaner = cleaner
     self.clean_sites = 0
     self.driver_from_sites = 0
+    self.invalidator:int|None = None
+    self.invalidate_sites = 0
+    self.npu_outputs:dict[int,tuple[int,int,int]] = {}
+    self.pending_npu_outputs:set[tuple[int,int,int]] = set()
+    self.borrow_batch = bool(getenv('ONPU_REPLAY_BORROW_BATCH',0))
+    if getenv('ONPU_REPLAY_NATIVE_FROM',0):
+      from tinygrad.llm.kernels.rockchip_cache import cache_invalidator
+      try: library = cache_invalidator()
+      except (OSError,subprocess.TimeoutExpired): pass
+      else:
+        self.kept.append(library)
+        self.invalidator = ctypes.cast(library.clean_from,ctypes.c_void_p).value
     self.libc = ctypes.CDLL(None)
     ioctl = unwrap(ctypes.cast(self.libc.ioctl,ctypes.c_void_p).value)
     memcpy = unwrap(ctypes.cast(self.libc.memmove,ctypes.c_void_p).value)
@@ -130,13 +161,20 @@ class NativeReplay:
     self.labels:list[str] = []
     self.estimates = Estimates()
     self.submits = 0
+    self.gpu_calls = 0
     for index,call in enumerate(self.calls):
       if call.op is not Ops.CALL: raise UnsupportedReplay('non-call graph entry')
+      if call.body.op is Ops.PROGRAM and call.device!='ROCKCHIP': self.pending_npu_outputs.clear()
       self.estimates += estimate_uop(call)
       start = len(self.statements)
       if call.body.op is Ops.STORE: self.copy(call,index)
       elif call.body.op is Ops.PROGRAM: self.kernel(call,index)
       else: raise UnsupportedReplay('unsupported call body')
+      if (written:=self.npu_outputs.get(index)) is not None:
+        meta,address,size = written
+        self.pending_npu_outputs = {p for p in self.pending_npu_outputs
+                                    if p[0]!=meta or p[1]+p[2]<=address or address+size<=p[1]}
+        self.pending_npu_outputs.add(written)
       label = (f'{call.device}:{call.body.src[0].arg.function_name}' if call.body.op is Ops.PROGRAM else
                f'COPY:{call.src[2].device}->{call.src[1].device}')
       self.labels.append(label)
@@ -168,7 +206,7 @@ class NativeReplay:
     # Symbolic views require their own pointer expression; leave them on the ordinary executor.
     if any(u.is_variable for u in node.toposort()): raise UnsupportedReplay('symbolic buffer view')
     buf = _resolve(node,self.inputs).buffer
-    if not isinstance(buf,Buffer) or buf.device not in ('CPU','ROCKCHIP','PYTHON','NPY'):
+    if not isinstance(buf,Buffer) or buf.device.split(':')[0] not in ('CPU','ROCKCHIP','PYTHON','NPY'):
       raise UnsupportedReplay('unsupported buffer device')
     buf.ensure_allocated()
     raw = buf.get_buf(buf.device)
@@ -184,6 +222,20 @@ class NativeReplay:
   def sync(self, raw:RockchipBuffer, flag:int, index:int) -> str:
     base_flags = rk.RKNPU_MEM_CACHEABLE|rk.RKNPU_MEM_NON_CONTIGUOUS|rk.RKNPU_MEM_IOMMU_LIMIT_IOVA_ALIGNMENT
     offset = raw.dma-int(raw.meta.dma_addr)
+    native_limit = 16777216 if getenv('ONPU_REPLAY_NATIVE_FROM_LARGE',0) else 4194304
+    # No CPU kernel may intervene between the producer and this read. Batched
+    # copies also forget any overlapping CPU upload. The output was clean at
+    # warm replay, and NativeReplay.valid retains that invariant.
+    if (self.invalidator is not None and flag==rk.RKNPU_MEM_SYNC_FROM_DEVICE and index>0
+        and (self.npu_outputs.get(index-1)==(id(raw.meta),raw.addr,raw.size)
+             or getattr(self,'borrow_batch',False) and (id(raw.meta),raw.addr,raw.size) in self.pending_npu_outputs)
+        and raw.meta.flags==base_flags
+        and raw.meta.cpu_clean_version==raw.meta.version
+        and 0<raw.size<=raw.meta.size<=native_limit and 0<=offset<=raw.meta.size-raw.size
+        and (raw.addr|raw.size)&63==0 and (raw.addr-offset)&4095==0):
+      self.invalidate_sites += 1
+      return (f'if(((int(*)(void*,unsigned long)){self.invalidator}ULL)((void*){raw.addr}ULL,{raw.size}UL))'
+              f'return {2000000+index};')
     if (self.cleaner is not None and flag==rk.RKNPU_MEM_SYNC_TO_DEVICE
         and raw.meta.flags in (base_flags,base_flags|rk.RKNPU_MEM_KERNEL_MAPPING)
         and 0<raw.size<=raw.meta.size<=1048576 and 0<=offset<=raw.meta.size-raw.size
@@ -218,8 +270,18 @@ class NativeReplay:
     def scratch(event): return any(u.op is Ops.BUFFER and u.tag=='scratch' for u in event[5].toposort())
     def dead_after(key,index):
       future = [e for e in events if e[0]>index and overlap(e[1],key)]
-      return not future or all(e[1]==key and e[2] and not e[3] and _full_write(self.calls[e[0]],e[8],key[2])
-                               for e in future if e[0]==future[0][0])
+      stale = [(key[1],key[1]+key[2])]
+      for _,call_events in itertools.groupby(future,key=lambda e:e[0]):
+        group = list(call_events)
+        # A call can read and write overlapping views. Check every read before
+        # letting proven writes kill the old contents of their exact ranges.
+        if any(e[3] and any(start<e[1][1]+e[1][2] and e[1][1]<end for start,end in stale) for e in group): return False
+        for e in group:
+          if e[2] and _full_write(self.calls[e[0]],e[8],e[1][2]):
+            first,last = e[1][1],e[1][1]+e[1][2]
+            stale = [(a,b) for start,end in stale for a,b in ((start,min(end,first)),(max(start,last),end)) if a<b]
+        if not stale: return True
+      return True
     for dst,src in copies:
       i,key = src[:2]
       if (not isinstance(dst[6],RockchipBuffer) or src[4]!='CPU' or key[2]!=dst[1][2]
@@ -232,28 +294,37 @@ class NativeReplay:
       if not _full_write(self.calls[writer[0]],writer[8],key[2]): continue
       if any(e[0]==writer[0] and e is not writer and overlap(e[1],key) for e in events): continue
       if not dead_after(key,i): continue
-      if any(writer[0]<e[0]<i and isinstance(e[6],RockchipBuffer) and e[6].meta is dst[6].meta for e in events): continue
+      if any(writer[0]<e[0]<i and isinstance(e[6],RockchipBuffer) and e[6].meta is dst[6].meta
+             and e[6].addr<dst[6].addr+dst[1][2] and dst[6].addr<e[6].addr+e[1][2] for e in events): continue
       aliases[(writer[0],key)] = dst[7]
       uploads.add(i)
     if self.borrow_outputs:
+      redirected_writers = {index for index,_ in aliases}
       for dst,src in copies:
         i,key = dst[:2]
         raw = src[6]
         if (not isinstance(raw,RockchipBuffer) or dst[4]!='CPU' or key[2]!=src[1][2]
             or not scratch(dst) or not scratch(src) or any(key[0] is root.base for root in self.roots)
             or not raw.meta.flags & rk.RKNPU_MEM_CACHEABLE or raw.addr&63): continue
-        if i+1>=len(self.calls) or self.calls[i+1].device!='CPU' or self.calls[i+1].body.op is not Ops.PROGRAM: continue
+        consumer = i+1
+        if getattr(self,'borrow_batch',False):
+          while consumer<len(self.calls) and self.calls[consumer].body.op is Ops.STORE: consumer += 1
+        if consumer>=len(self.calls) or self.calls[consumer].device!='CPU' or self.calls[consumer].body.op is not Ops.PROGRAM: continue
         # Keep every write on its original allocation, including redirected pack outputs.
-        # Borrowing is valid only for the immediately following synchronous CPU reader.
-        if any(index==i+1 for index,_ in aliases): continue
+        # A batch may contain other copies before the synchronous CPU reader, but
+        # neither its host destination nor its NPU source may change in between.
+        if consumer in redirected_writers: continue
         following = [e for e in events if e[0]>i and overlap(e[1],key)]
-        readers = [e for e in following if e[0]==i+1]
+        if any(e[0]<consumer for e in following): continue
+        if any(i<e[0]<consumer and e[2] and isinstance(e[6],RockchipBuffer) and e[6].meta is raw.meta
+               and e[6].addr<raw.addr+raw.size and raw.addr<e[6].addr+e[1][2] for e in events): continue
+        readers = [e for e in following if e[0]==consumer]
         if not readers or any(e[1]!=key or e[2] or not e[3] for e in readers): continue
-        if not dead_after(key,i+1): continue
-        later = [e for e in following if e[0]>i+1]
+        if not dead_after(key,consumer): continue
+        later = [e for e in following if e[0]>consumer]
         # Keep output borrowing on the stricter COPY-only scratch-reuse policy.
         if later and self.calls[later[0][0]].body.op is not Ops.STORE: continue
-        aliases[(i+1,key)] = src[7]
+        aliases[(consumer,key)] = src[7]
         downloads.add(i)
     return aliases,uploads,downloads
 
@@ -266,6 +337,8 @@ class NativeReplay:
     if isinstance(s,RockchipBuffer): self.statements.append(self.sync(s,rk.RKNPU_MEM_SYNC_FROM_DEVICE,index))
     if index not in self.alias_copies: self.statements.append(f'{self.memcpy}({dp},{sp},{dst.nbytes}UL);')
     if isinstance(d,RockchipBuffer):
+      self.pending_npu_outputs = {p for p in self.pending_npu_outputs
+                                  if p[0]!=id(d.meta) or p[1]+p[2]<=d.addr or d.addr+d.size<=p[1]}
       self.statements.append(self.sync(d,rk.RKNPU_MEM_SYNC_TO_DEVICE,index))
       self.writes[id(d.meta)] = d.meta
       self.write_counts[id(d.meta)] += 1
@@ -283,7 +356,7 @@ class NativeReplay:
 
   def kernel(self, call:UOp, index:int):
     device = call.device
-    if device not in ('CPU','ROCKCHIP'): raise UnsupportedReplay('kernel device')
+    if not isinstance(device,str) or device.split(':')[0] not in ('CPU','ROCKCHIP'): raise UnsupportedReplay('kernel device')
     runtime = get_runtime(device,call.body)
     self.kept.append(runtime)
     raw,expressions,types = [],[],[]
@@ -298,11 +371,40 @@ class NativeReplay:
         raw.append(buffer)
         types.append('void*')
         expressions.append(value)
+    from tinygrad.runtime.support.rockchip_attention import RockchipAttentionProgram
+    if isinstance(runtime,RockchipAttentionProgram):
+      if len(raw)!=5 or any(isinstance(buf,RockchipBuffer) for buf in raw):raise UnsupportedReplay('NPU attention CPU signature')
+      if runtime.closed or not runtime.owned:raise UnsupportedReplay('NPU attention resources released')
+      self.attention_programs.append(runtime)
+      self.statements.append(runtime.emit(expressions,index))
+      self.submits+=2
+      return
     if isinstance(runtime,CPUProgram):
       if any(isinstance(buf,RockchipBuffer) for buf in raw): raise UnsupportedReplay('CPU kernel touches NPU mapping')
       if runtime.lvp or runtime.dev.remote is not None: raise UnsupportedReplay('CPU execution mode')
       address = unwrap(ctypes.cast(runtime.fxn,ctypes.c_void_p).value)
       self.statements.append(f'((void(*)({",".join(types)})){address}ULL)({",".join(expressions)});')
+      return
+    from tinygrad.runtime.support.rockchip_gpu import RockchipGPUProgram
+    if isinstance(runtime,RockchipGPUProgram):
+      self.pending_npu_outputs.clear()
+      if len(raw)!=6 or not all(isinstance(buf,RockchipBuffer) for buf in raw):raise UnsupportedReplay('GPU FFN signature')
+      gpu_key = runtime.key(tuple(raw))
+      if (gpu_plan:=runtime.bindings.get(gpu_key)) is None or not gpu_plan.owned:raise UnsupportedReplay('GPU FFN binding not prepared')
+      gpu_out,gpu_raw = cast(RockchipBuffer,raw[0]),cast(RockchipBuffer,raw[1])
+      gpu_scales,gpu_second = cast(RockchipBuffer,raw[4]),cast(RockchipBuffer,raw[5])
+      if any(buf.meta.cpu_clean_version!=buf.meta.version for buf in (gpu_out,gpu_scales,gpu_second)):
+        raise UnsupportedReplay('dirty GPU FFN output mapping')
+      self.kept.append(gpu_plan)
+      self.plans.append((gpu_plan,gpu_plan.bufs))
+      self.statements.append(self.sync(gpu_raw,rk.RKNPU_MEM_SYNC_FROM_DEVICE,index))
+      self.statements.append(gpu_plan.emit(4000000+index))
+      for output in (gpu_out,gpu_scales,gpu_second):
+        self.statements.append(self.sync(output,rk.RKNPU_MEM_SYNC_FROM_DEVICE,index))
+        self.writes[id(output.meta)] = output.meta
+        self.write_counts[id(output.meta)] += 1
+        self.mutated.add(id(output.meta))
+      self.gpu_calls += 1
       return
     if not isinstance(runtime,RockchipProgram) or len(raw)!=3 or not all(isinstance(buf,RockchipBuffer) for buf in raw):
       raise UnsupportedReplay('NPU kernel signature')
@@ -311,33 +413,90 @@ class NativeReplay:
     out,lhs,rhs = raw
     if out.meta.cpu_clean_version!=out.meta.version: raise UnsupportedReplay('dirty NPU output mapping')
     if plan.weight_version!=(rhs.meta.obj_addr,rhs.meta.version): raise UnsupportedReplay('unverified matrix weights')
-    self.weight_guards[id(rhs.meta)] = rhs.meta,rhs.meta.version
+    if plan.dynamic_weights:
+      self.statements.append(f'if(!all_finite_half((const unsigned short*){rhs.addr+plan.rhs_offset}ULL,'
+        f'{getattr(plan,"weight_groups",plan.groups)*plan.n*plan.k}UL))'
+        f'return {5000000+index};')
+    else:self.weight_guards[id(rhs.meta)] = rhs.meta,rhs.meta.version
     self.mutated.add(id(out.meta))
     self.kept.append(plan)
     self.plans.append((plan,plan.bufs))
     if plan.int8:
-      self.statements.append(f'for(int r=0;r<{plan.m};r++){{float s=((const float*){lhs.addr}ULL)[r];'
+      scale_rows=plan.storage_rows if isinstance(plan,RockchipBucketedMatmul) else plan.groups*plan.m
+      self.statements.append(f'for(int r=0;r<{scale_rows};r++){{float s=((const float*){lhs.addr}ULL)[r];'
         f'unsigned b=((const unsigned*){lhs.addr}ULL)[r];if(!(s>0.0f) || (b&0x7f800000)==0x7f800000)return {1000000+index};}}')
     else:
-      self.statements.append(f'if(!all_finite_half((const unsigned short*){lhs.addr+plan.lhs_offset}ULL,{plan.m*plan.k}UL))'
+      self.statements.append(f'if(!all_finite_half((const unsigned short*){lhs.addr+plan.lhs_offset}ULL,{plan.groups*plan.m*plan.k}UL))'
         f'return {1000000+index};')
+    if isinstance(plan,RockchipRoutedMatmul):
+      # Validate the entire routing header before changing any command address.
+      self.statements.append(f'{{const int *ids=(const int*){lhs.addr+plan.selector_offset}ULL;'
+        f'for(int g=0;g<{plan.groups};g++)if((unsigned)ids[g]>={plan.experts}U)return {3000000+index};')
+      for address,group in plan.weight_patches:
+        self.statements.append(f'*(unsigned long long*){address}ULL=(0x201ULL<<48)|'
+          f'(((unsigned long long)({rhs.dma}U+(unsigned)ids[{group}]*{plan.n*plan.k}U))<<16)|0x1110ULL;')
+      self.statements.append('}')
+      self.statements.append(self.sync(plan.cmd,rk.RKNPU_MEM_SYNC_TO_DEVICE,index))
+    if isinstance(plan,RockchipBucketedMatmul):
+      address=unwrap(ctypes.cast(plan.updater.fxn,ctypes.c_void_p).value)
+      state=ctypes.addressof(plan.dynamic_state)
+      self.statements.append(f'if(((int(*)(void*,unsigned long long,unsigned long long,unsigned long long,'
+        f'unsigned long long,const int*,unsigned*)){address}ULL)((void*){plan.cmd.addr}ULL,{plan.cmd.dma}ULL,'
+        f'{lhs.dma}ULL,{rhs.dma}ULL,{out.dma}ULL,(const int*){lhs.addr+plan.count_offset}ULL,'
+        f'(unsigned*){state}ULL))return {3000000+index};')
+      self.statements.append(self.sync(plan.cmd,rk.RKNPU_MEM_SYNC_TO_DEVICE,index))
     # The warm replay cleaned initial output pages. Subsequent CPU writes are
     # COPY destinations followed immediately by TO_DEVICE; NPU writes need FROM_DEVICE only.
-    # Prepared task/command descriptors are immutable and were flushed by prepare().
-    subcores = [value for pair in (*plan.subcores,*((0,0),)*(5-len(plan.subcores))) for value in pair]
-    fields = [5,6000,0,plan.tasks,0,0,f'{plan.task.meta.obj_addr}ULL',0,0,0,plan.core_mask,-1]
+    # Ordinary command descriptors are immutable; routed addresses were cleaned above.
+    subcores:list[int|str] = [value for pair in (*plan.subcores,*((0,0),)*(5-len(plan.subcores))) for value in pair]
+    fields:list[int|str] = [5,6000,0,plan.tasks,0,0,f'{plan.task.meta.obj_addr}ULL',plan.dev.domain,0,0,plan.core_mask,-1]
+    tasks=str(plan.tasks)
+    if isinstance(plan,RockchipBucketedMatmul):
+      state=ctypes.addressof(plan.dynamic_state)
+      tasks=f'((const unsigned*){state}ULL)[0]'
+      fields[3],fields[10]=tasks,f'((const unsigned*){state}ULL)[1]'
+      subcores=[f'((const unsigned*){state}ULL)[{i}]' for i in range(2,12)]
     request = (3<<30)|(ctypes.sizeof(rk.struct_rknpu_submit)<<16)|(ord('d')<<8)|0x41
     self.statements.append('{struct Submit submit={'+','.join(map(str,fields))+',{'+','.join(map(str,subcores))+'}};'
       f'if({self.ioctl}({self.dev.fd.fd},{request}UL,&submit)!=0)return {2000000+index};'
-      f'stats[0]++;stats[1]+={plan.tasks};}}')
+      f'stats[0]++;stats[1]+={tasks};}}')
     self.submits += 1
+    self.npu_outputs[index] = (id(out.meta),out.addr,out.size)
+
+  @functools.cached_property
+  def _output_guards(self) -> tuple[Any,...]:
+    # Plans retain immutable binding tuples. Multiple output views can share
+    # one allocation and therefore the same CPU-clean/version state.
+    return tuple({id(buf.meta):buf.meta for _,buffers in self.plans
+                  for buf in ((buffers[0],buffers[4],buffers[5]) if len(buffers)==6 else (buffers[0],))}.values())
+
+  def _valid_deduplicated(self, inputs:list[UOp]) -> bool:
+    if len(inputs)!=len(self.roots):return False
+    for u,size in zip(inputs,self.input_sizes):
+      if not isinstance(buf:=u.buffer,Buffer) or buf.device!='CPU' or buf.nbytes!=size:return False
+    for buf,storage in self.guards.items():
+      if buf._storage is not storage:return False
+    for meta,version in self.weight_guards.values():
+      if meta.version!=version:return False
+    for program in self.attention_programs:
+      if program.closed or not program.owned:return False
+    for plan,buffers in self.plans:
+      # Preparing again replaces this tuple even if the buffer values compare
+      # equal; the old command addresses must then be rebuilt as well.
+      if not plan.owned or plan.bufs is not buffers:return False
+    for meta in self._output_guards:
+      if meta.cpu_clean_version!=meta.version:return False
+    return True
 
   def valid(self, inputs:list[UOp]) -> bool:
+    if getenv('ONPU_REPLAY_DEDUP_GUARDS',1):return self._valid_deduplicated(inputs)
     return (len(inputs)==len(self.roots) and all(isinstance(u.buffer,Buffer) and u.buffer.device=='CPU'
       and u.buffer.nbytes==size for u,size in zip(inputs,self.input_sizes))
       and all(buf._storage is storage for buf,storage in self.guards.items())
       and all(meta.version==version for meta,version in self.weight_guards.values())
-      and all(plan.bufs[0].meta.cpu_clean_version==plan.bufs[0].meta.version for plan,_ in self.plans if plan.bufs)
+      and all(not program.closed and program.owned for program in self.attention_programs)
+      and all(all(buf.meta.cpu_clean_version==buf.meta.version for buf in
+        ((plan.bufs[0],plan.bufs[4],plan.bufs[5]) if len(plan.bufs)==6 else (plan.bufs[0],))) for plan,_ in self.plans if plan.bufs)
       and all(plan.owned and plan.bufs==buffers for plan,buffers in self.plans))
 
   def __call__(self, inputs:list[UOp], values:dict[str,int]):
@@ -350,6 +509,13 @@ class NativeReplay:
       result = self.program.fxn(*pointers,*scalars,stats)
       self.dev.submit_count += stats[0]
       self.dev.task_count += stats[1]
+      if result>=7000000: raise RuntimeError(f'NPU attention CPU dispatch failed at call {result-7000000}')
+      if result>=6000000: raise ValueError(f'NPU attention length or active rows are out of range at call {result-6000000}')
+      if result>=5000000: raise ValueError(f'Native replay requires finite dynamic matrix weights at call {result-5000000}')
+      if result>=4000000:
+        self.dev.poisoned = True
+        raise RuntimeError(f'Native OpenCL FFN failed at call {result-4000000}')
+      if result>=3000000: raise ValueError(f'NPU native replay expert routing metadata is out of range at call {result-3000000}')
       if result>=2000000:
         self.dev.poisoned = True
         raise RuntimeError(f'NPU native replay submission failed at call {result-2000000}')
@@ -387,7 +553,7 @@ class RockchipCapturedJit(CapturedJit):
     if warming:
       result = super().__call__(input_uops,var_vals)
       self.warmed = True
-    concrete = [_copy_input(u) if u in self._jit_bufs else u for u in input_uops]
+    concrete = [_copy_scalar_input(u) if u in self._jit_bufs else u for u in input_uops]
     if self.native is not None and not self.native.valid(concrete): self.native = None
     if self.native is None:
       try: self.native = NativeReplay(self.linear,concrete,var_vals,self.cleaner)

@@ -8,7 +8,7 @@ from __future__ import annotations
 import array, contextlib, ctypes, fcntl, functools, mmap, os, struct, threading, time, weakref
 from collections import OrderedDict
 from dataclasses import dataclass, replace
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 from tinygrad.device import Allocator, BufferSpec, BufferStorage, Compiled, Device, Program, TinyELF
 from tinygrad.helpers import ceildiv, from_mv, getenv, round_up, to_mv
 from tinygrad.runtime.autogen import rockchip as rk
@@ -54,12 +54,13 @@ _MATMUL_REGISTERS = (
            *range(0x4090,0x40b0,4),0x40c0,0x40c4,*range(0x4100,0x4130,4))))
 
 
-def _matmul_body(m:int, n:int, k:int, lhs:int, rhs:int, dst:int) -> tuple[int, ...]:
-  """Full-K streaming: input (K/8,M,8), weight (N/16,K/32,16,32), output (N/4,M,4)."""
+def _matmul_body(m:int, n:int, k:int, lhs:int, rhs:int, dst:int, row_major:bool=False) -> tuple[int, ...]:
+  """FP16 streaming with native weights; explicit row-major mode follows the captured RKLLM layout."""
   banks = ceildiv(m*k*2, 32768)
-  if not (1 <= m <= 64 and 32 <= k <= 4096
+  if not (1 <= m <= (128 if row_major else 64) and 32 <= k <= (512 if row_major else 4096)
           and 32 <= n <= (8192 if m==1 else 4096) and k%32 == n%32 == 0 and banks <= 4):
     raise ValueError(f"Unsupported Rockchip matmul geometry {(m, n, k)}")
+  if row_major and n>512:raise ValueError('Unqualified row-major FP16 output width')
   C, O, D = 0x201, 0x801, 0x1001
   # Qualified GPT-2 streaming geometries from the reference register sweeps.
   grains = {(768,256):32,(768,768):8,(768,1024):2,(3072,256):4,(768,8192):4}.get((k,n),2) \
@@ -82,6 +83,13 @@ def _matmul_body(m:int, n:int, k:int, lhs:int, rhs:int, dst:int) -> tuple[int, .
     (D,rk.REG_DPU_WDMA_SIZE_0,n-1), (D,rk.REG_DPU_WDMA_SIZE_1,m-1), (D,rk.REG_DPU_BN_CFG,0x53),
     (D,rk.REG_DPU_EW_CFG,0x383), (D,rk.REG_DPU_OUT_CVT_SCALE,1), (D,rk.REG_DPU_SURFACE_ADD,m*4<<4))
   values = {(target,reg):value for target,reg,value in regs}
+  if row_major:
+    capacity=1<<((131072//(k*2)).bit_length()-1)
+    values.update({(C,0x100c):0x20000120,(C,0x1010):16*min(m+1,capacity),
+      (C,0x1020):(1<<16)|m,(C,0x1028):1,(C,0x1044):k//32,
+      (C,0x107c):k//8,(C,0x1080):0,(C,0x1084):(1<<16)|m,
+      (O,0x3014):(m-1)<<16,(D,0x4024):16,(D,0x4030):0,(D,0x4034):m-1,
+      (D,0x4038):((n//4-1)<<16)|(n//4-1),(D,0x405c):(m-1)<<16,(D,0x40c0):0x40})
   return tuple(_cmd(target,reg,values.get((target,reg),int((target,reg)==(D,rk.REG_DPU_EW_CVT_SCALE_VALUE))))
                for target,registers in _MATMUL_REGISTERS for reg in registers)
 
@@ -111,6 +119,7 @@ class RockchipAllocator(Allocator['RockchipDevice']):
   def _alloc(self, size:int, options:BufferSpec) -> BufferStorage: return BufferStorage(self.dev.allocate(size))
   def _free(self, storage:BufferStorage, options:BufferSpec): self.dev.free(storage.buf)
   def _copyin(self, dest:RockchipBuffer, src:memoryview):
+    self.dev.check_healthy()
     ctypes.memmove(dest.addr, from_mv(src), src.nbytes)
     dest.meta.version += 1
     self.dev.sync(dest, rk.RKNPU_MEM_SYNC_TO_DEVICE)
@@ -121,6 +130,8 @@ class RockchipAllocator(Allocator['RockchipDevice']):
 
 
 class RockchipMatmul:
+  groups = 1
+  dynamic_weights = False
   def __init__(self, dev:RockchipDevice, obj:TinyELF):
     self.dev = dev
     self.m, self.n, self.k, self.cores = struct.unpack('<4I', obj.lib[:16])
@@ -128,6 +139,11 @@ class RockchipMatmul:
     self.lhs_offset = struct.unpack('<I',obj.lib[20:24])[0] if len(obj.lib)>=24 else 0
     self.split_k = bool(struct.unpack('<I',obj.lib[24:28])[0]) if len(obj.lib)>=28 else False
     self.int8 = bool(struct.unpack('<I',obj.lib[28:32])[0]) if len(obj.lib)>=32 else False
+    self.sdk_prefill = struct.unpack('<I',obj.lib[32:36])[0] if len(obj.lib)>=36 else 0
+    if self.sdk_prefill:
+      from tinygrad.runtime.support.rockchip_int8 import sdk_prefill_supported
+      if self.sdk_prefill!=1 or not self.int8 or not sdk_prefill_supported(self.m,self.n,self.k):
+        raise ValueError('Invalid SDK INT8 prefill descriptor')
     self.itemsize = 1 if self.int8 else 2
     if self.int8 and (self.split_k or self.lhs_offset!=round_up(self.m*4,64)):
       raise ValueError('Invalid INT8 input scale header')
@@ -147,7 +163,10 @@ class RockchipMatmul:
     self.owned.clear()
     self.bufs = ()
 
+  def update_inputs(self, lhs:RockchipBuffer, rhs:RockchipBuffer): pass
+
   def prepare(self, out:RockchipBuffer, lhs:RockchipBuffer, rhs:RockchipBuffer):
+    self.dev.check_domain(out,lhs,rhs)
     if (out.size<self.m*self.n*4*(3 if self.split_k else 1) or lhs.size<self.lhs_offset+self.m*self.k*self.itemsize
         or rhs.size<self.rhs_offset+self.n*self.k*self.itemsize):
       raise ValueError('Rockchip matrix kernel exceeds its bound buffers')
@@ -158,8 +177,9 @@ class RockchipMatmul:
     active_cores = 1 if self.tasks==1 else 3
     self.core_mask = (1<<active_cores)-1
     if self.int8:
-      from tinygrad.runtime.support.rockchip_int8 import int8_body
-      bodies = tuple(int8_body(self.m,n,self.k,lhs.dma+self.lhs_offset,rhs.dma+self.rhs_offset+offset*self.k,
+      from tinygrad.runtime.support.rockchip_int8 import int8_body, int8_sdk_body
+      body_builder = int8_sdk_body if self.sdk_prefill else int8_body
+      bodies = tuple(body_builder(self.m,n,self.k,lhs.dma+self.lhs_offset,rhs.dma+self.rhs_offset+offset*self.k,
                                out.dma+offset*self.m*4,n) for offset,n in parts)
     elif self.split_k:
       part = self.k//3
@@ -194,13 +214,14 @@ class RockchipMatmul:
       if (out,lhs,rhs) != self.bufs: self.prepare(out,lhs,rhs)
       check = _finite_program()
       if self.int8:
-        scales = (ctypes.c_float*self.m).from_address(lhs.addr)
+        scales = (ctypes.c_float*getattr(self,'storage_rows',self.groups*self.m)).from_address(lhs.addr)
         if any(not 0<s<float('inf') for s in scales): raise ValueError('Rockchip INT8 requires finite positive activation scales')
-      elif not check.fxn(ctypes.c_void_p(lhs.addr+self.lhs_offset),ctypes.c_ulong(self.m*self.k)):
+      elif not check.fxn(ctypes.c_void_p(lhs.addr+self.lhs_offset),ctypes.c_ulong(self.groups*self.m*self.k)):
         raise ValueError('Rockchip matmul requires finite FP16 activations')
+      self.update_inputs(lhs,rhs)
       version = rhs.meta.obj_addr,rhs.meta.version
-      if version != self.weight_version:
-        count = self.n*self.k
+      if self.dynamic_weights or version != self.weight_version:
+        count = getattr(self,'weight_groups',self.groups)*self.n*self.k
         if not self.int8 and not check.fxn(ctypes.c_void_p(rhs.addr+self.rhs_offset),ctypes.c_ulong(count)):
           raise ValueError('Rockchip matmul requires finite FP16 weights')
         self.weight_version = version
@@ -211,7 +232,7 @@ class RockchipMatmul:
       try:
         rk.DRM_IOCTL_RKNPU_SUBMIT(self.dev.fd,flags=rk.RKNPU_JOB_PC|rk.RKNPU_JOB_BLOCK|rk.RKNPU_JOB_PINGPONG,timeout=6000,
           task_start=0,task_number=self.tasks,task_counter=0,priority=0,task_obj_addr=self.task.meta.obj_addr,
-          regcfg_obj_addr=0,task_base_addr=0,user_data=0,core_mask=self.core_mask,fence_fd=-1,
+          iommu_domain_id=self.dev.domain,task_base_addr=0,hw_elapse_time=0,core_mask=self.core_mask,fence_fd=-1,
           subcore_task=(rk.struct_rknpu_subcore_task*5)(*(rk.struct_rknpu_subcore_task(*s) for s in self.subcores)))
       except OSError as exc:
         self.dev.poisoned = True
@@ -243,6 +264,7 @@ class RockchipBatchedMatmul(RockchipMatmul):
     dev.programs.add(self)
 
   def prepare(self, out:RockchipBuffer, lhs:RockchipBuffer, rhs:RockchipBuffer):
+    self.dev.check_domain(out,lhs,rhs)
     if out.size<self.m*self.n*4 or lhs.size<self.m*self.k*2 or rhs.size<self.n*self.k*2:
       raise ValueError('Batched FP16 matrices exceed their bound buffers')
     self.close()
@@ -278,6 +300,175 @@ class RockchipBatchedMatmul(RockchipMatmul):
     self.dev.sync(self.task,rk.RKNPU_MEM_SYNC_TO_DEVICE)
 
 
+class RockchipGroupedMatmul(RockchipMatmul):
+  """Grouped PC chains: 1 static FP16, 2 INT8, 7 dynamic FP16, 8 dynamic row-major FP16."""
+  def __init__(self,dev:RockchipDevice,obj:TinyELF):
+    self.dev=dev
+    self.m,self.n,self.k,self.cores,self.groups,self.tile,marker,version=struct.unpack('<8I',obj.lib)
+    self.weight_groups=self.groups
+    integer=version==2
+    self.dynamic_weights=version in (7,8)
+    self.row_major=version==8
+    limit=(128 if self.k<=2048 else 64) if integer else min(128 if self.row_major else 64,65536//max(1,self.k))
+    if (marker!=0x47524d4d or version not in (1,2,7,8) or self.cores not in (1,3) or not 1<=self.groups<=128 or not 1<=self.m<=128
+        or not 32<=self.k<=4096 or self.k%32 or not 32<=self.n<=4096 or self.n%32
+        or not 1<=self.tile<=limit):
+      raise ValueError('Unsupported grouped matrix descriptor')
+    if integer:
+      from tinygrad.runtime.support.rockchip_int8 import int8_body
+      int8_body(min(self.m,self.tile),self.n,self.k,0,0,0,self.n)
+    else:_matmul_body(min(self.m,self.tile),self.n,self.k,0,0,0,self.row_major)
+    self.rhs_offset=0
+    self.lhs_offset=round_up(self.groups*self.m*4,64) if integer else 0
+    self.split_k=False
+    self.int8=integer
+    self.itemsize=1 if integer else 2
+    self.bufs=()
+    self.owned=[]
+    self.weight_version=None
+    dev.programs.add(self)
+
+  def prepare(self,out:RockchipBuffer,lhs:RockchipBuffer,rhs:RockchipBuffer):
+    self.dev.check_domain(out,lhs,rhs)
+    if (out.size<self.groups*self.m*self.n*4 or lhs.size<self.lhs_offset+self.groups*self.m*self.k*self.itemsize
+        or rhs.size<self.weight_groups*self.n*self.k*self.itemsize):raise ValueError('Grouped matrices exceed their bound buffers')
+    self.close()
+    self.bufs=out,lhs,rhs
+    active=3 if self.cores==3 and self.groups>=3 else 1
+    chains=[]
+    for core in range(active):
+      chain=[]
+      for group in range(core,self.groups,active):
+        for row in range(0,self.m,self.tile):
+          a=lhs.dma+self.lhs_offset+(group*self.m+row)*self.k*self.itemsize
+          b=rhs.dma+(group%self.weight_groups)*self.n*self.k*self.itemsize
+          c=out.dma+(group*self.m+row)*self.n*4
+          if self.int8:
+            from tinygrad.runtime.support.rockchip_int8 import int8_body
+            chain.append(int8_body(min(self.tile,self.m-row),self.n,self.k,a,b,c,self.n))
+          else:chain.append(_matmul_body(min(self.tile,self.m-row),self.n,self.k,a,b,c,self.row_major))
+      chains.append(chain)
+    bodies=[body for chain in chains for body in chain]
+    self.tasks=len(bodies)
+    self.core_mask=(1<<active)-1
+    stride=round_up(len(bodies[0])+4,2)
+    self.cmd=self.dev.allocate(stride*self.tasks*8)
+    self.owned.append(self.cmd)
+    self.task=self.dev.allocate(self.tasks*ctypes.sizeof(rk.struct_rknpu_task),rk.RKNPU_MEM_KERNEL_MAPPING)
+    self.owned.append(self.task)
+    ctypes.memset(self.cmd.addr,0,self.cmd.size)
+    offset=0
+    ranges=[]
+    for chain in chains:
+      ranges.append((offset,len(chain)))
+      for j,body in enumerate(chain):
+        index=offset+j
+        tail=((_cmd(rk.TARGET_PC_REG,rk.REG_PC_BASE_ADDRESS,(self.cmd.dma+(index+1)*stride*8)&0xfffffff0),
+               _cmd(rk.TARGET_PC_REG,rk.REG_PC_REGISTER_AMOUNTS,ceildiv(len(bodies[index+1]),2)+1)) if j+1<len(chain) else
+              (_cmd(1,0),_cmd(rk.TARGET_PC_REG,rk.REG_PC_REGISTER_AMOUNTS)))
+        words=array.array('Q',body+tail+(_cmd(rk.TARGET_VERSION,0),_cmd(rk.TARGET_PC,rk.REG_PC_OPERATION_ENABLE,0xd)))
+        ctypes.memmove(self.cmd.addr+index*stride*8,words.buffer_info()[0],len(words)*8)
+        desc=rk.struct_rknpu_task(0,0,0xd,0x300,0x1ffff,0,len(body),0,self.cmd.dma+index*stride*8)
+        ctypes.memmove(self.task.addr+index*ctypes.sizeof(desc),ctypes.addressof(desc),ctypes.sizeof(desc))
+      offset+=len(chain)
+    self.subcores=tuple(ranges) if active==1 else ((0,0),(0,0),*ranges)
+    self.dev.sync(self.cmd,rk.RKNPU_MEM_SYNC_TO_DEVICE)
+    self.dev.sync(self.task,rk.RKNPU_MEM_SYNC_TO_DEVICE)
+
+
+class RockchipRoutedMatmul(RockchipGroupedMatmul):
+  """Single-token INT8 groups select immutable expert matrices using an input header."""
+  def __init__(self,dev:RockchipDevice,obj:TinyELF):
+    if len(obj.lib)!=36: raise ValueError('Invalid routed INT8 descriptor size')
+    m,n,k,cores,groups,tile,marker,version,self.experts=struct.unpack('<9I',obj.lib)
+    if (version!=3 or tile!=m or not 1<=groups<=8 or not 1<=self.experts<=128
+        or marker!=0x47524d4d): raise ValueError('Unsupported routed INT8 descriptor')
+    # Reuse the qualified integer recipes and grouped command chains.
+    super().__init__(dev,replace(obj,lib=struct.pack('<8I',m,n,k,cores,groups,tile,marker,2)))
+    self.selector_offset=self.groups*self.m*4
+    self.lhs_offset=round_up((self.groups*self.m+self.groups)*4,64)
+    self.weight_groups=self.experts
+    self.weight_patches:list[tuple[int,int]]=[]
+
+  def prepare(self,out:RockchipBuffer,lhs:RockchipBuffer,rhs:RockchipBuffer):
+    if rhs.size<self.experts*self.n*self.k: raise ValueError('Routed expert weight atlas is too small')
+    if rhs.dma<0 or rhs.dma+self.experts*self.n*self.k>1<<32: raise ValueError('Routed expert addresses exceed 32-bit IOVA')
+    # Placeholder groups repeat within the atlas until validated selectors patch them.
+    super().prepare(out,lhs,rhs)
+    self.weight_patches=[]
+    descs=(rk.struct_rknpu_task*self.tasks).from_address(self.task.addr)
+    active=3 if self.cores==3 and self.groups>=3 else 1
+    order=[g for core in range(active) for g in range(core,self.groups,active)]
+    for index,group in enumerate(order):
+      desc=descs[index]
+      address=self.cmd.addr+desc.regcmd_addr-self.cmd.dma
+      words=(ctypes.c_uint64*desc.regcfg_amount).from_address(address)
+      slots=[i for i,w in enumerate(words) if (w>>48,w&0xffff)==(0x201,0x1110)]
+      if len(slots)!=1: raise RuntimeError('Routed expert command has no unique weight address')
+      self.weight_patches.append((address+slots[0]*8,group))
+
+  def update_inputs(self,lhs:RockchipBuffer,rhs:RockchipBuffer):
+    ids=(ctypes.c_int32*self.groups).from_address(lhs.addr+self.selector_offset)
+    if any(not 0<=expert<self.experts for expert in ids): raise ValueError('Rockchip expert selector is out of range')
+    for address,group in self.weight_patches:
+      ctypes.c_uint64.from_address(address).value=_cmd(0x201,0x1110,rhs.dma+ids[group]*self.n*self.k)
+    self.dev.sync(self.cmd,rk.RKNPU_MEM_SYNC_TO_DEVICE)
+
+
+class RockchipBucketedMatmul(RockchipGroupedMatmul):
+  """Dynamic expert counts; ABI 4 has fixed slots, ABI 5 compact row storage."""
+  def __init__(self,dev:RockchipDevice,obj:TinyELF):
+    if len(obj.lib) not in (32,36): raise ValueError('Invalid bucketed INT8 descriptor size')
+    m,n,k,cores,groups,tile,marker,version=struct.unpack('<8I',obj.lib[:32])
+    if version not in (4,5,6) or len(obj.lib)!=(36 if version in (5,6) else 32):
+      raise ValueError('Unsupported bucketed INT8 descriptor')
+    maximum=128 if k<=2048 else 64
+    if version==6:
+      if not 1<=tile<=maximum or not tile<=m<=tile*2:raise ValueError('Unsupported chunked expert row capacity')
+    elif tile!=m:raise ValueError('Unsupported bucketed INT8 tile')
+    rows=struct.unpack('<I',obj.lib[32:])[0] if version in (5,6) else None
+    if rows is not None and not 1<=rows<=groups*m: raise ValueError('Invalid compact expert row storage')
+    super().__init__(dev,replace(obj,lib=struct.pack('<8I',tile,n,k,cores,groups,tile,marker,2)))
+    self.m=m
+    self.task_slots=groups*ceildiv(m,tile)
+    self.storage_rows=self.groups*self.m if rows is None else rows
+    self.count_offset=self.storage_rows*4
+    self.lhs_offset=round_up(self.count_offset+self.groups*4,64)
+    self.dynamic_state=(ctypes.c_uint32*12)()
+    from tinygrad.runtime.support.rockchip_bucketed import updater
+    self.updater=updater(self.groups,self.m,self.n,self.k,self.cores,rows,self.tile)
+
+  def prepare(self,out:RockchipBuffer,lhs:RockchipBuffer,rhs:RockchipBuffer):
+    self.dev.check_domain(out,lhs,rhs)
+    for buf,required in ((out,self.storage_rows*self.n*4),
+                         (lhs,self.lhs_offset+self.storage_rows*self.k),(rhs,self.groups*self.n*self.k)):
+      if buf.size<required: raise ValueError('Bucketed expert matrix exceeds its bound buffers')
+      if buf.dma<0 or buf.dma+required>1<<32: raise ValueError('Bucketed expert addresses exceed 32-bit IOVA')
+    self.close()
+    self.bufs=out,lhs,rhs
+    from tinygrad.runtime.support.rockchip_int8 import int8_body
+    length=len(int8_body(1,self.n,self.k,0,0,0,self.n))
+    stride=round_up(length+4,2)
+    self.cmd=self.dev.allocate(stride*self.task_slots*8)
+    self.owned.append(self.cmd)
+    self.task=self.dev.allocate(self.task_slots*ctypes.sizeof(rk.struct_rknpu_task),rk.RKNPU_MEM_KERNEL_MAPPING)
+    self.owned.append(self.task)
+    ctypes.memset(self.cmd.addr,0,self.cmd.size)
+    descs=(rk.struct_rknpu_task*self.task_slots).from_address(self.task.addr)
+    for slot in range(self.task_slots):
+      descs[slot]=rk.struct_rknpu_task(0,0,0xd,0x300,0x1ffff,0,length,0,self.cmd.dma+slot*stride*8)
+    self.dev.sync(self.task,rk.RKNPU_MEM_SYNC_TO_DEVICE)
+
+  def update_inputs(self,lhs:RockchipBuffer,rhs:RockchipBuffer):
+    result=self.updater.fxn(ctypes.c_void_p(self.cmd.addr),ctypes.c_uint64(self.cmd.dma),ctypes.c_uint64(lhs.dma),
+      ctypes.c_uint64(rhs.dma),ctypes.c_uint64(self.bufs[0].dma),ctypes.c_void_p(lhs.addr+self.count_offset),
+      ctypes.cast(self.dynamic_state,ctypes.c_void_p))
+    if result: raise ValueError('Rockchip expert row counts are out of range or empty')
+    self.tasks,self.core_mask=int(self.dynamic_state[0]),int(self.dynamic_state[1])
+    self.subcores=tuple((int(self.dynamic_state[i]),int(self.dynamic_state[i+1])) for i in range(2,12,2))
+    self.dev.sync(self.cmd,rk.RKNPU_MEM_SYNC_TO_DEVICE)
+
+
 class RockchipProgram(Program['RockchipDevice']):
   """A kernel can occur in many layers; retain each layer's bound command buffers."""
   def __init__(self, dev:RockchipDevice, obj:TinyELF):
@@ -290,7 +481,12 @@ class RockchipProgram(Program['RockchipDevice']):
     key = tuple((id(buf.meta),buf.addr,buf.size) for buf in args)
     if key not in self.bindings:
       binary = getattr(self.obj,'lib',b'')
-      plan = RockchipBatchedMatmul if len(binary)==40 and struct.unpack('<I',binary[-4:])[0]==0x42544d4d else RockchipMatmul
+      plan = (RockchipRoutedMatmul if len(binary)==36 and struct.unpack('<II',binary[24:32])==(0x47524d4d,3) else
+              RockchipBucketedMatmul if len(binary)==32 and struct.unpack('<II',binary[24:32])==(0x47524d4d,4) else
+              RockchipBucketedMatmul if len(binary)==36 and struct.unpack('<II',binary[24:32])==(0x47524d4d,5) else
+              RockchipBucketedMatmul if len(binary)==36 and struct.unpack('<II',binary[24:32])==(0x47524d4d,6) else
+              RockchipGroupedMatmul if len(binary)==32 and struct.unpack('<I',binary[24:28])[0]==0x47524d4d else
+              RockchipBatchedMatmul if len(binary)==40 and struct.unpack('<I',binary[-4:])[0]==0x42544d4d else RockchipMatmul)
       self.bindings[key] = plan(self.dev,self.obj)
       # A live replay can still own an evicted plan. Its final owner releases it.
       if len(self.bindings)>self.binding_limit: self.bindings.popitem(last=False)
@@ -300,17 +496,84 @@ class RockchipProgram(Program['RockchipDevice']):
 class PreparedNPUResource(Protocol):
   def close(self) -> None: ...
 
-class RockchipDevice(Compiled):
-  def __init__(self, device:str):
+class _RockchipHardware:
+  def __init__(self):
     self.owner = open('/tmp/rk3588_npu_submit.lock','a')
-    try: fcntl.flock(self.owner,fcntl.LOCK_EX|fcntl.LOCK_NB)
-    except BlockingIOError: raise RuntimeError('Rockchip NPU is owned by another worker') from None
-    self.fd = FileIOInterface(os.getenv('ROCKCHIP_DRM','/dev/dri/card1'),os.O_RDWR)
+    try:
+      fcntl.flock(self.owner,fcntl.LOCK_EX|fcntl.LOCK_NB)
+      self.fd = FileIOInterface(os.getenv('ROCKCHIP_DRM','/dev/dri/card1'),os.O_RDWR)
+      rk.DRM_IOCTL_RKNPU_ACTION(self.fd,flags=rk.RKNPU_ACT_RESET,value=0)
+    except BaseException:
+      self.owner.close()
+      raise
     self.lock = threading.Lock()
-    self.poisoned, self.released, self.submit_count, self.task_count, self.allocation_count = False, False, 0, 0, 0
+    self.poisoned, self.users, self.weight_domain = False, 0, 0
+    self.submit_count = self.task_count = self.allocation_count = 0
+
+_hardware_lifetime_lock = threading.Lock()
+
+@functools.cache
+def _hardware() -> _RockchipHardware: return _RockchipHardware()
+
+
+def int8_weight_device(size:int) -> str:
+  """Opt-in sequential weight placement; leave room for command and activation buffers."""
+  domains = getenv('ONPU_NPU_DOMAINS',1)
+  budget = getenv('ONPU_NPU_DOMAIN_BYTES',3*1024**3)
+  if not 1<=domains<=16 or not 4096<=budget<2**32 or not 0<size<=budget:
+    raise ValueError('Invalid Rockchip weight domain configuration')
+  base = cast(RockchipDevice,Device['ROCKCHIP'])
+  if domains==1: return 'ROCKCHIP'
+  while True:
+    name = f'ROCKCHIP:{base.hw.weight_domain}' if base.hw.weight_domain else 'ROCKCHIP'
+    dev = cast(RockchipDevice,Device[name])
+    if dev.mapped_bytes+round_up(size,4096)<=budget: return name
+    if base.hw.weight_domain+1>=domains: raise MemoryError('Configured Rockchip weight domains are full')
+    base.hw.weight_domain += 1
+
+
+class RockchipDevice(Compiled):
+  def runtime(self, obj:TinyELF) -> Program:
+    if len(obj.lib)==16 and struct.unpack('<I',obj.lib[12:16])[0]==0x4750464e:
+      from tinygrad.runtime.support.rockchip_gpu import RockchipGPUProgram
+      return RockchipGPUProgram(self,obj)
+    return super().runtime(obj)
+
+  def __init__(self, device:str):
+    self.domain = int(device.partition(':')[2] or '0')
+    if not 0<=self.domain<16: raise ValueError('Rockchip memory domain must be between 0 and 15')
+    with _hardware_lifetime_lock:
+      try: self.hw = _hardware()
+      except BlockingIOError: raise RuntimeError('Rockchip NPU is owned by another worker') from None
+      self.hw.users += 1
+    self.fd, self.lock, self.owner = self.hw.fd, self.hw.lock, self.hw.owner
+    self.released, self.mapped_bytes = False, 0
+    self.allocations:dict[int,RockchipBuffer] = {}
     self.programs:weakref.WeakSet[PreparedNPUResource] = weakref.WeakSet()
-    self.reset()
-    super().__init__(device,RockchipAllocator(self),[],RockchipProgram)
+    try: super().__init__(device,RockchipAllocator(self),[],RockchipProgram)
+    except BaseException:
+      self.finalize()
+      raise
+
+  @property
+  def poisoned(self) -> bool: return self.hw.poisoned
+  @poisoned.setter
+  def poisoned(self, value:bool): self.hw.poisoned = value
+  @property
+  def submit_count(self) -> int: return self.hw.submit_count
+  @submit_count.setter
+  def submit_count(self, value:int): self.hw.submit_count = value
+  @property
+  def task_count(self) -> int: return self.hw.task_count
+  @task_count.setter
+  def task_count(self, value:int): self.hw.task_count = value
+  @property
+  def allocation_count(self) -> int: return self.hw.allocation_count
+  @allocation_count.setter
+  def allocation_count(self, value:int): self.hw.allocation_count = value
+
+  def check_domain(self, *bufs:RockchipBuffer):
+    if any(buf.meta.iommu_domain_id!=self.domain for buf in bufs): raise ValueError('Rockchip matrix buffers cross memory domains')
 
   def check_healthy(self):
     if self.released: raise RuntimeError('This worker released its NPU ownership')
@@ -322,7 +585,7 @@ class RockchipDevice(Compiled):
     self.check_healthy()
     size = max(4096,round_up(size,4096))
     meta = rk.DRM_IOCTL_RKNPU_MEM_CREATE(self.fd,size=size,flags=flags|rk.RKNPU_MEM_NON_CONTIGUOUS|
-                                      rk.RKNPU_MEM_CACHEABLE|rk.RKNPU_MEM_IOMMU_LIMIT_IOVA_ALIGNMENT)
+                                      rk.RKNPU_MEM_CACHEABLE|rk.RKNPU_MEM_IOMMU_LIMIT_IOVA_ALIGNMENT,iommu_domain_id=self.domain)
     try:
       mapping = rk.DRM_IOCTL_RKNPU_MEM_MAP(self.fd,handle=meta.handle)
       addr = self.fd.mmap(0,size,mmap.PROT_READ|mmap.PROT_WRITE,mmap.MAP_SHARED,mapping.offset)
@@ -332,7 +595,10 @@ class RockchipDevice(Compiled):
     meta.version = 0
     meta.cpu_clean_version = -1
     self.allocation_count += 1
-    return RockchipBuffer(addr,int(meta.dma_addr),size,meta)
+    self.mapped_bytes += size
+    buf = RockchipBuffer(addr,int(meta.dma_addr),size,meta)
+    self.allocations[meta.obj_addr] = buf
+    return buf
 
   def sync(self, buf:RockchipBuffer, flags:int):
     self.check_healthy()
@@ -344,16 +610,30 @@ class RockchipDevice(Compiled):
     if flags&rk.RKNPU_MEM_SYNC_TO_DEVICE: buf.meta.cpu_clean_version = buf.meta.version
 
   def free(self, buf:RockchipBuffer):
-    FileIOInterface.munmap(buf.addr,buf.size)
+    if (owned:=self.allocations.get(buf.meta.obj_addr)) is None or owned.meta is not buf.meta: return
+    FileIOInterface.munmap(owned.addr,owned.size)
     if not self.poisoned:
       with contextlib.suppress(OSError): rk.DRM_IOCTL_RKNPU_MEM_DESTROY(self.fd,handle=buf.meta.handle,obj_addr=buf.meta.obj_addr)
+    del self.allocations[buf.meta.obj_addr]
+    self.mapped_bytes -= owned.size
 
   def synchronize(self, timeout=None): self.check_healthy() # Every submission is blocking.
 
   def finalize(self):
-    for program in list(self.programs): program.close()
-    self.allocator.free_cache()
-    if not self.released:
-      fcntl.flock(self.owner,fcntl.LOCK_UN)
-      self.owner.close()
-      self.released = True
+    if self.released: return
+    with self.lock:
+      for program in list(self.programs): program.close()
+      if hasattr(self,'allocator'): self.allocator.free_cache()
+      # Live Tensor storage can outlast the device. Drop every VMA/GEM reference
+      # while ownership is held; later allocator callbacks become harmless.
+      for buf in list(self.allocations.values()): self.free(buf)
+      with _hardware_lifetime_lock:
+        self.hw.users -= 1
+        self.released = True
+        if self.hw.users==0:
+          rk.DRM_IOCTL_RKNPU_ACTION(self.fd,flags=rk.RKNPU_SET_IOMMU_DOMAIN_ID,value=0)
+          os.close(self.fd.fd)
+          del self.fd.fd
+          fcntl.flock(self.owner,fcntl.LOCK_UN)
+          self.owner.close()
+          _hardware.cache_clear()

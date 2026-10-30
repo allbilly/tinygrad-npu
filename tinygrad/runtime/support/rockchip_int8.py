@@ -13,14 +13,36 @@ WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
 ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 """
-from tinygrad.helpers import ceildiv, round_up
+from tinygrad.helpers import ceildiv, getenv, round_up
 from tinygrad.runtime.ops_rockchip import _cmd, _MATMUL_REGISTERS
 
-NATURAL_DEPTHS = frozenset((576,768,1152))
+NATURAL_DEPTHS = frozenset((576,768,1152,2304))
+EXPERT_DEPTHS = frozenset((896,1280))
+SMALL_DEPTHS = frozenset((64,128,256))
+NARROW_DECODE_WIDTHS = frozenset((128,192,256,320,352,416,448,576,608,640,704,768,832,864,896,960))
+SDK_PREFILL_SHAPES = frozenset(((64,2112,1024),(64,3072,2048),(128,3072,1024)))
 
-def supported_depth(k:int) -> bool: return 512<=k<=4096 and (k%512==0 or k in NATURAL_DEPTHS)
+def sdk_prefill_supported(m:int,n:int,k:int) -> bool:return (m,n,k) in SDK_PREFILL_SHAPES
 
-def padded_depth(k:int) -> int: return k if k in NATURAL_DEPTHS else round_up(k,512)
+def int8_sdk_body(m:int,n:int,k:int,lhs:int,rhs:int,dst:int,stride:int) -> tuple[int,...]:
+  """SDK prefill requires 16-channel input blocks and four-channel output blocks."""
+  if (m,n,k) not in ((64,704,1024),(64,1024,2048),(128,1024,1024)):
+    raise ValueError('Unqualified SDK INT8 prefill geometry')
+  changes={(0x201,0x100c):0,(0x201,0x1010):32,(0x201,0x1020):(m<<16)|1,
+    (0x201,0x1028):m,(0x201,0x1044):m*k//64,(0x201,0x107c):k//4,
+    (0x201,0x1080):(-3*m)&0xfffffff,(0x201,0x1084):(m<<16)|1,
+    (0x1001,0x4024):m*16,(0x1001,0x4030):m-1,(0x1001,0x4034):0,
+    (0x1001,0x4038):0,(0x1001,0x40c0):m*128}
+  return tuple(_cmd(w>>48,w&0xffff,changes[(w>>48,w&0xffff)])
+               if (w>>48,w&0xffff) in changes else w for w in int8_body(m,n,k,lhs,rhs,dst,stride))
+
+def supported_depth(k:int) -> bool:
+  return k in SMALL_DEPTHS or 512<=k<=4096 and (k%512==0 or k in NATURAL_DEPTHS or k in EXPERT_DEPTHS)
+
+def padded_depth(k:int) -> int:
+  if 1<=k<=256 and getenv('ONPU_INT8_SMALL_DEPTH',0):return next(depth for depth in sorted(SMALL_DEPTHS) if depth>=k)
+  if k in EXPERT_DEPTHS and getenv('ONPU_INT8_EXPERT_DEPTHS',0):return k
+  return k if k in NATURAL_DEPTHS and (k!=2304 or getenv('ONPU_INT8_NATURAL2304',1)) else round_up(k,512)
 
 def int8_body(m:int,n:int,k:int,lhs:int,rhs:int,dst:int,stride:int) -> tuple[int,...]:
   if not (1<=m<=(128 if k<=2048 else 64) and supported_depth(k)
@@ -31,6 +53,10 @@ def int8_body(m:int,n:int,k:int,lhs:int,rhs:int,dst:int,stride:int) -> tuple[int
   # allocation. Integer golden tests cover narrow, wide and 128-row execution.
   groups = ceildiv(k,512)
   banks = max(0x1b,177-15*(groups-1)-15*groups*(ceildiv(m,64)-1))
+  # One-row wide-K decode needs only one data bank. Retain eleven weight banks
+  # for the qualified wide outputs (extra/rockchip/int8_decode_cbuf.md).
+  if m==1 and k==4096 and (n==512 or n>=1024 or n in NARROW_DECODE_WIDTHS and getenv('ONPU_INT8_DECODE_NARROW_CBUF',0)):
+    banks = 0xb1
   C,O,D = 0x201,0x801,0x1001
   values = {
     (D,0x4004):0xe,(C,0x100c):1<<29,(C,0x1010):16*min(m+1,capacity),(C,0x1014):9,

@@ -64,6 +64,12 @@ class CPUProgram(Program['CPUDevice']):
 class CPUDevice(Compiled):
   wait_timeout_ms = 30000
 
+  def runtime(self, obj:TinyELF) -> Program:
+    if len(obj.lib)==32 and struct.unpack('<I',obj.lib[:4])[0]==0x41504e52:
+      from tinygrad.runtime.support.rockchip_attention import RockchipAttentionProgram
+      return RockchipAttentionProgram(self,obj)
+    return super().runtime(obj)
+
   @property
   def has_copy_queue(self) -> bool: return False
 

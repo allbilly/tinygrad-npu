@@ -39,6 +39,7 @@ class RWKV7Block(FFNBlock):
     if not hasattr(self,'recurrent_state'):
       self.recurrent_state = Tensor.zeros(x.shape[0],self.config.n_heads,self.config.head_dim,self.config.head_dim,device=x.device)
       self.cache_attn_x,self.cache_ffn_x = (Tensor.zeros(x.shape[0],1,self.config.dim,device=x.device) for _ in range(2))
+      if getattr(self,'rwkv_scan',None) is not None:Tensor.realize(self.recurrent_state,self.cache_attn_x,self.cache_ffn_x)
 
   def __call__(self, x:Tensor, start_pos:int|UOp, v_first:Tensor|None=None, *,
                state_trace:GatedDeltaTrace|None=None) -> tuple[Tensor,Tensor]:
@@ -60,28 +61,40 @@ class RWKV7Block(FFNBlock):
       decay = (-math.exp(-.5)*(self.time_mix_w2(self.time_mix_w1(xw).tanh())+self.time_mix_w0['weight']).sigmoid()).exp()
       a = (self.time_mix_a2(self.time_mix_a1(xa))+self.time_mix_a0['weight']).sigmoid()
       gate = self.time_mix_g2(self.time_mix_g1(xg).sigmoid())
+      prediction_key=k.reshape(B,T,heads,width)
       kk = (k*self.time_mix_k_k['weight']).reshape(B,T,heads,width)
-      kk = kk/kk.square().sum(-1,keepdim=True).sqrt().maximum(1e-12)
+      key_norm=kk.square().sum(-1,keepdim=True).sqrt().maximum(1e-12)
+      kk = kk/key_norm
       k = k*(1+(a-1)*self.time_mix_k_a['weight'])
       if self.layer_id:v = v+(v_first-v)*(self.time_mix_v2(self.time_mix_v1(xv))+self.time_mix_v0['weight']).sigmoid()
       else:v_first = v
       correction = ((r*k*self.time_mix_r_k['weight']).reshape(B,T,heads,width).sum(-1,keepdim=True)*v.reshape(B,T,heads,width))
       r,k,v,decay,a = (item.reshape(B,T,heads,width) for item in (r,k,v,decay,a))
       if isinstance(T,UOp):r,k,v,decay,a,kk = (item.pad_to((B,capacity,heads,width)) for item in (r,k,v,decay,a,kk))
-      state = initial.where(0,self.recurrent_state)
-      outputs = []
-      for index in range(capacity):
-        key,value = k[:,index],v[:,index]
-        unit_key,rate = kk[:,index],a[:,index]
-        # The rank-one correction uses the old state, before applying decay.
-        update = state*decay[:,index].unsqueeze(-2)-(state*unit_key.unsqueeze(-2)).sum(-1,keepdim=True)*(unit_key*rate).unsqueeze(-2)
-        update = update+value.unsqueeze(-1)*key.unsqueeze(-2)
-        state = (Tensor(T,device=x.device)>index).where(update,state) if isinstance(T,UOp) else update
-        outputs.append((state*r[:,index].unsqueeze(-2)).sum(-1))
-      store = self.recurrent_state.uop.store(state.uop)
-      core = outputs[0].stack(*outputs[1:],dim=1).contiguous()
-      # Native projections must finish reading the old shift cache before its write.
-      core = Tensor(core.uop.after(store,shift_store))[:,:T].reshape(B*T,C)
+      if (scan:=getattr(self,'rwkv_scan',None)) is not None:
+        # Carry the shift write through the state argument, as in the CPU GDN scan.
+        state=Tensor(self.recurrent_state.uop.after(shift_store))
+        # Preserve the generic fused projection's FP32 order: sum(state*k*weight)/norm.
+        core=scan(r,k,v,decay,a,kk,state,position,T,
+                  prediction_key=prediction_key.pad_to((B,capacity,heads,width)),
+                  prediction_weight=self.time_mix_k_k['weight'].float().reshape(heads,width),
+                  prediction_norm=key_norm.pad_to((B,capacity,heads,1)),
+                  correction_key=(kk*a).pad_to((B,capacity,heads,width)))[:,:T].reshape(B*T,C)
+      else:
+        state = initial.where(0,self.recurrent_state)
+        outputs = []
+        for index in range(capacity):
+          key,value = k[:,index],v[:,index]
+          unit_key,rate = kk[:,index],a[:,index]
+          # The rank-one correction uses the old state, before applying decay.
+          update = state*decay[:,index].unsqueeze(-2)-(state*unit_key.unsqueeze(-2)).sum(-1,keepdim=True)*(unit_key*rate).unsqueeze(-2)
+          update = update+value.unsqueeze(-1)*key.unsqueeze(-2)
+          state = (Tensor(T,device=x.device)>index).where(update,state) if isinstance(T,UOp) else update
+          outputs.append((state*r[:,index].unsqueeze(-2)).sum(-1))
+        store = self.recurrent_state.uop.store(state.uop)
+        core = outputs[0].stack(*outputs[1:],dim=1).contiguous()
+        # Native projections must finish reading the old shift cache before its write.
+        core = Tensor(core.uop.after(store,shift_store))[:,:T].reshape(B*T,C)
       attention = (self.time_mix_ln(core).reshape(B,T,heads,width)+correction).reshape(B,T,C)*gate
       x = x+self.time_mix_output(attention)
       h = self.attn_norm_2(x)

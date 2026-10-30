@@ -72,6 +72,17 @@ class TestRWKV7(unittest.TestCase):
   def test_cpu_prefill_cached_chunks_and_reset(self):
     self.compare(self.model(),'CPU')
 
+  def test_native_cpu_scan_prefill_cached_chunks_reset_and_generation(self):
+    from tinygrad.llm.kernels.rockchip_recurrent import configure
+    model=self.model()
+    self.assertEqual(configure(model),2)
+    self.compare(model,'CPU')
+    prompt=[3,8,12,4,7,6]
+    self.assertEqual(model.prefill_chunk_size(4),4)
+    actual=list(itertools.islice(model.generate(prompt.copy(),chunk_size=4),3))
+    for index,token in enumerate(actual):
+      self.assertEqual(token,int(self.reference(model,[prompt+actual[:index]]).argmax()))
+
   def test_generation_and_recurrent_prefix_reuse(self):
     model = self.model()
     prompt = [3,8,12,4,7,6]

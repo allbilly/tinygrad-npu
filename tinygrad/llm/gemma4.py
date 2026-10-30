@@ -10,6 +10,7 @@ from dataclasses import replace
 from tinygrad import Device, Tensor, UOp, dtypes, function, getenv, nn
 from tinygrad.llm.gguf import _GGML_NATIVE, _GGML_QUANT, gguf_parse, gguf_shard
 from tinygrad.llm.model import Transformer, TransformerBlock, TransformerConfig, apply_rope, precompute_freqs_cis
+from tinygrad.uop.ops import resolve
 
 
 class SegmentedEmbedding:
@@ -49,6 +50,7 @@ def segment_embedding_entries(entries:dict, name:str, rows:int) -> dict:
 
 class Gemma4Block(TransformerBlock):
   prepared_attention_compatible = False  # Generic prepared attention uses a different score scale.
+  attention_score_scale = 1.0
 
   def __init__(self, config:TransformerConfig, side_dim:int, shared:bool):
     super().__init__(config)
@@ -91,6 +93,9 @@ class Gemma4Block(TransformerBlock):
       store = self.cache_kv[:,:,:,start_pos:start_pos+length,:].uop.store(Tensor.stack(k,v).cast(dtypes.half).uop)
       assigned = Tensor(self.cache_kv.uop.after(store))
     end = start_pos+length
+    if batch==1 and (attention:=(self.decode_attention if resolve(length==1) else self.prefill_attention)) is not None:
+      result = attention(q.float(),assigned,end).transpose(1,2).reshape(batch,length,-1)
+      return self.attn_output(result)
     k,v = assigned[0,:,:,:end,:],assigned[1,:,:,:end,:]
     if heads!=kv_heads:k,v = k.repeat_interleave(heads//kv_heads,dim=1),v.repeat_interleave(heads//kv_heads,dim=1)
     query = Tensor.arange(x.max_shape[1],dtype=dtypes.int).to(x.device)[:length]+Tensor(start_pos,device=x.device,dtype=dtypes.int)
@@ -110,7 +115,10 @@ class Gemma4Block(TransformerBlock):
       h = h+self.ffn_post_norm(self._feed_forward(self.ffn_norm(h)))
       if self.side_dim:
         assert side is not None
-        h = h+self.post_norm(self.proj(self.inp_gate(h).gelu(approximate='tanh')*side))
+        gate = self.inp_gate(h)
+        activation = getattr(self,'cpu_gelu_activation',None)
+        activated = activation(gate,side) if activation is not None else gate.gelu(approximate='tanh')*side
+        h = h+self.post_norm(self.proj(activated))
       return (h*self.layer_output_scale['weight']).contiguous()
     return run(self,x,start_pos,side,shared)
 
@@ -161,8 +169,7 @@ class Gemma4Transformer(Transformer):
         # The source block call must complete before a sharing layer reads its cache.
         caches[is_swa] = Tensor(block.cache_kv.uop.after(x.uop))
     logits = self.output(self.output_norm(x[:,-1:]))[:,-1,:]
-    cap = self.config.final_logit_softcap
-    return (logits/cap).tanh()*cap if cap else logits
+    return self._softcap_logits(logits)
 
   def logits(self, tokens:Tensor, start_pos:int|UOp) -> Tensor:
     ids = tokens.to(self.token_embd.weight.device)
@@ -175,7 +182,7 @@ class Gemma4Transformer(Transformer):
 
   @staticmethod
   def from_gguf(gguf:Tensor|str|pathlib.Path, max_context:int|None=None, realize:bool=bool(getenv('REALIZE',0)),
-                shard:int=1) -> tuple[Gemma4Transformer,dict]:
+                shard:int=1,mapped_cpu:bool=False) -> tuple[Gemma4Transformer,dict]:
     if shard!=1:raise ValueError('Gemma4 currently requires a single device')
     kv,entries = gguf_parse(gguf)
     arch = kv['general.architecture']
@@ -194,7 +201,7 @@ class Gemma4Transformer(Transformer):
       entries = segment_embedding_entries(entries,'per_layer_token_embd.weight',rows)
     cast = {name:dtypes.half for name in entries if name!='rope_freqs.weight'} if getenv('HALF',1) else {}
     device = Device.DEFAULT
-    state = gguf_shard(entries,(device,),stream=realize,cast_dtypes=cast)
+    state = gguf_shard(entries,(device,),stream=realize,cast_dtypes=cast,mapped_cpu=mapped_cpu)
     factor_values = state.pop('rope_freqs.weight').tolist()
     if not isinstance(factor_values,list):raise ValueError('Expected a Gemma4 rotary factor vector')
     factors = tuple(float(value) for value in factor_values)
@@ -211,6 +218,6 @@ class Gemma4Transformer(Transformer):
                                sliding_window=kv[arch+'.attention.sliding_window'],swa_rope_theta=kv.get(arch+'.rope.freq_base_swa',10000.))
     model = Gemma4Transformer(config,hiddens,sliding,kv[arch+'.attention.key_length_swa'],shared_layers,side_dim,side_vocab,factors,rows)
     model.gguf_loading = {'streamed':realize,'resident_fp16':bool(getenv('HALF',1)),'devices':(device,),
-                          'segmented_per_layer_embeddings':bool(side_dim)}
+                          'segmented_per_layer_embeddings':bool(side_dim),'mapped_cpu':mapped_cpu}
     nn.state.load_state_dict(model,state,verbose=False,consume=True,realize=realize)
     return model,kv

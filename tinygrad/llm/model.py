@@ -1,12 +1,23 @@
 from __future__ import annotations
-import enum, functools, itertools, math, pathlib, re
+import enum, functools, itertools, math, pathlib, re, struct
 from dataclasses import dataclass, replace
 from typing import Callable, NamedTuple
 from tinygrad import Tensor, nn, UOp, TinyJit, getenv, function, dtypes, Device
 from tinygrad.llm.kernels.amd import Linear, gated_delta_prefill, flash_attention, amd_custom_kernels_supported
 from tinygrad.llm.gguf import gguf_parse, gguf_shard
 from tinygrad.uop.ops import resolve
-from tinygrad.helpers import unwrap, round_up
+from tinygrad.helpers import ContextVar, unwrap, round_up
+
+ONPU_CPU_TOKEN_INPUTS = ContextVar('ONPU_CPU_TOKEN_INPUTS', 0)
+
+
+def _cpu_token_buffer(tokens:list[int], context:int) -> Tensor:
+  """Own a ready CPU token buffer so prefix views need no scheduled copy."""
+  if not 0<len(tokens)<=context:raise ValueError('Prompt must fit the token buffer')
+  data = struct.pack(f'={context}i',*tokens,*([0]*(context-len(tokens))))
+  storage = UOp.new_buffer('CPU',context,dtypes.int32)
+  storage.buffer.ensure_allocated().as_memoryview(allow_zero_copy=True)[:] = data
+  return Tensor(storage.reshape((1,context)))
 
 class ExpertGating(enum.IntEnum):
   SOFTMAX = 1
@@ -221,10 +232,12 @@ class FFNBlock:
       if gating == ExpertGating.SOFTMAX_WEIGHT: probs = probs.softmax(-1)
       if normalize_topk: probs = probs / probs.sum(axis=-1, keepdim=True)
       probs = probs * self.config.routed_scaling_factor
-      gate, up = self.ffn_gate_exps(sel, h), self.ffn_up_exps(sel, h)
+      npu_experts=getattr(self,'npu_experts',None)
+      if npu_experts is not None and not npu_experts.enabled(sel,h):npu_experts=None
+      gate, up = npu_experts.gate_up(sel,h) if npu_experts is not None else (self.ffn_gate_exps(sel,h),self.ffn_up_exps(sel,h))
       act = gated_activation(gate, up, alpha=self.config.swiglu_alpha, limit=self.config.swiglu_limit,
                              up_bias=self.config.swiglu_up_bias,activation=self.config.ffn_activation)
-      x_down = self.ffn_down_exps(sel, act.contiguous())  # (B, T, k, D)
+      x_down = npu_experts.down(sel,act.contiguous()) if npu_experts is not None else self.ffn_down_exps(sel,act.contiguous())
       out = (x_down * probs.unsqueeze(-1)).sum(axis=2)  # (B, T, D)
       if hasattr(self, 'ffn_gate_shexp'):
         shexp = self.ffn_down_shexp(gated_activation(self.ffn_gate_shexp(x), self.ffn_up_shexp(x),limit=self.config.swiglu_limit,
@@ -232,8 +245,12 @@ class FFNBlock:
         if hasattr(self, 'ffn_gate_inp_shexp'): shexp = shexp * (x * self.ffn_gate_inp_shexp["weight"]).sum(axis=-1, keepdim=True).sigmoid()
         out = out + shexp
       return out
+    if self.config.ffn_activation=='silu' and (wide:=getattr(self,'fused_swiglu_ffn',None)) is not None and wide.enabled(x):return wide(x)
     if self.config.ffn_activation=='silu' and (fused:=getattr(self,'fused_ffn',None)) is not None and fused.enabled(x): return fused(x)
+    if self.config.ffn_activation=='gelu_tanh' and (gelu:=getattr(self,'fused_gelu_ffn',None)) is not None and gelu.enabled(x):return gelu(x)
+    if self.config.ffn_activation=='gelu' and (erf:=getattr(self,'fused_erf_gelu_ffn',None)) is not None and erf.enabled(x):return erf(x)
     gate,up = joint(x) if (joint:=getattr(self,'ffn_gate_up',None)) is not None else (self.ffn_gate(x),self.ffn_up(x))
+    if (activation:=getattr(self,'cpu_gelu_activation',None)) is not None:return self.ffn_down(activation(gate,up))
     return self.ffn_down(gated_activation(gate,up,limit=self.config.swiglu_limit,activation=self.config.ffn_activation))
 
   # given the token-prefix match, return how much cached state this block can still reuse
@@ -264,6 +281,7 @@ class FFNBlock:
 class TransformerBlock(FFNBlock):
   decode_attention:Callable[[Tensor,Tensor,int|UOp],Tensor]|None = None
   prefill_attention:Callable[[Tensor,Tensor,int|UOp],Tensor]|None = None
+  attention_logit_softcap:float = 0.0
   bounded_mask:bool = False
 
   def __init__(self, config:TransformerConfig):
@@ -307,9 +325,11 @@ class TransformerBlock(FFNBlock):
     # NOTE: we don't want to change self.cache_kv, the function API doesn't support this well
     store = self.cache_kv[:, :, :, start_pos:start_pos+T, :].uop.store(Tensor.stack(k, v).cast(self.cache_kv.dtype).uop)
     assigned_kv = Tensor(self.cache_kv.uop.after(store))
-    if not self.config.attn_logit_softcap and not self.config.attn_head_gate and B==1 and \
+    if (not self.config.attn_logit_softcap or self.attention_logit_softcap==self.config.attn_logit_softcap) and B==1 and \
        (attention:=(self.decode_attention if resolve(T==1) else self.prefill_attention)) is not None:
-      attn = attention(q,assigned_kv,start_pos+T).transpose(1,2).reshape(B,T,-1)
+      attn = attention(q,assigned_kv,start_pos+T)
+      if self.config.attn_head_gate:attn = attn*self.attn_gate(x).sigmoid().transpose(1,2).unsqueeze(-1)
+      attn = attn.transpose(1,2).reshape(B,T,-1)
       return self.attn_output(attn if not self.config.attn_output_gate else (attn * gate.sigmoid()))
     # on RDNA3/4, hybrid models use custom flash attention kernels on the KV cache
     if amd_custom_kernels_supported(x.device) and self.config.ssm is not None and not self.config.attn_head_gate:
@@ -414,7 +434,8 @@ class MLATransformerBlock(FFNBlock):
     q = q_proj.reshape(B, T, self.config.n_heads, self.config.head_dim).transpose(1, 2)
     q_nope, q_rope = q[..., :q_nope_head_dim], q[..., q_nope_head_dim:]
     if not self.config.ssm or not self.config.ssm.kda: q_rope = apply_rope(q_rope, self.freqs_cis[start_pos:start_pos+T])
-    q = (q_nope @ self.attn_k_b["weight"].transpose(-1, -2)).cat(q_rope, dim=-1)
+    projections=getattr(self,'npu_mla_projections',None) or getattr(self,'cpu_mla_projections',None)
+    q = (projections.query(q_nope) if projections is not None else q_nope @ self.attn_k_b["weight"].transpose(-1, -2)).cat(q_rope, dim=-1)
 
     kv_a = self.attn_kv_a_mqa(x)
     c_kv = self.attn_kv_a_norm(kv_a[..., :self.config.kv_lora_rank])
@@ -422,13 +443,19 @@ class MLATransformerBlock(FFNBlock):
     if not self.config.ssm or not self.config.ssm.kda: k_rope = apply_rope(k_rope, self.freqs_cis[start_pos:start_pos+T])
 
     k_store = c_kv.reshape(B, 1, T, self.config.kv_lora_rank).cat(k_rope.reshape(B, 1, T, self.config.rope_dim), dim=-1)
-    k = Tensor(self.cache_k.uop.after(self.cache_k[:, :, start_pos:start_pos+T, :].uop.store(k_store.uop)))[:, :, 0:start_pos+T, :]
+    cache = Tensor(self.cache_k.uop.after(self.cache_k[:, :, start_pos:start_pos+T, :].uop.store(k_store.uop)))
+    k = cache[:, :, 0:start_pos+T, :]
     v = k[..., :self.config.kv_lora_rank]
 
-    attn = q @ k.transpose(-1, -2) * (1.0 / self.config.head_dim ** 0.5)
-    if (mask:=self._attn_mask(x, start_pos)) is not None: attn = attn + mask
+    mla = getattr(self,'cpu_mla_attention',None)
+    if mla is not None:attn = mla.query_key(q,cache,start_pos)
+    else:
+      attn = q @ k.transpose(-1, -2) * (1.0 / self.config.head_dim ** 0.5)
+      if (mask:=self._attn_mask(x, start_pos)) is not None: attn = attn + mask
     attn = attn.softmax(-1)
-    attn = ((attn @ v) @ self.attn_v_b["weight"].transpose(-1, -2)).transpose(1, 2).reshape(B, T, -1)
+    context = mla.weighted_value(attn,cache,start_pos) if mla is not None else attn @ v
+    attn = (projections.value(context) if projections is not None else context @ self.attn_v_b["weight"].transpose(-1, -2)).transpose(
+      1, 2).reshape(B, T, -1)
     return self.attn_output(attn)
 
   def _attn_mask(self, x:Tensor, start_pos:int|UOp) -> Tensor|None:  # (1, 1, T, start_pos+T), None: everything is visible
@@ -439,6 +466,7 @@ class MLATransformerBlock(FFNBlock):
   def _init_state(self, x:Tensor):
     if not hasattr(self, "cache_k"):
       self.cache_k = Tensor.empty(x.shape[0], 1, self.config.max_context, self.config.kv_lora_rank + self.config.rope_dim, device=x.device)
+      if getattr(self,'cpu_mla_attention',None) is not None:self.cache_k.realize()
       self.freqs_cis = precompute_freqs_cis(self.config.rope_dim, self.config.max_context, self.config.rope_theta,
                                             device=x.device, yarn=self.config.yarn, factors=self.config.rope_factors, mscale=self.config.rope_mscale)
     if self.indexer: self.indexer._init_state(x)
@@ -675,8 +703,13 @@ class Transformer:
 
   def _project_logits(self, x:Tensor) -> Tensor:
     logits = self.output(self.output_norm(x) / self.config.logit_scale).to(x.device)
-    if self.config.final_logit_softcap:logits=(logits/self.config.final_logit_softcap).tanh()*self.config.final_logit_softcap
-    return logits
+    return self._softcap_logits(logits)
+
+  def _softcap_logits(self, logits:Tensor) -> Tensor:
+    cap = self.config.final_logit_softcap
+    if not cap:return logits
+    if (transform:=getattr(self,'cpu_logit_softcap',None)) is not None:return transform(logits,cap)
+    return (logits/cap).tanh()*cap
 
   def target_forward(self, tokens:Tensor, start_pos:int|UOp, *, capture_layers:tuple[int,...]=(), last_only:bool=False,
                      state_trace:tuple[GatedDeltaTrace|None,...]|None=None) -> TargetOutput:
@@ -732,22 +765,27 @@ class Transformer:
     return (logits / temperature.maximum(1e-12) - (Tensor.rand_like(logits).maximum(1e-12).log().neg()).log()).argmax(-1, keepdim=True)
 
   def __call__(self, tokens:Tensor, start_pos:int|UOp, temperature:Tensor) -> Tensor:
+    # CPU embedding kernels accept realized views. Retaining the view also
+    # retains its symbolic start/length, without an input-copy schedule per call.
+    if not (ONPU_CPU_TOKEN_INPUTS and tokens.device=='CPU' and tokens.dtype is dtypes.int32 and tokens.uop.is_realized
+            and tokens.max_shape[1]>1):
+      tokens = tokens.contiguous()
     if self._greedy_generation:
-      return (self.greedy_prefill_jit if resolve(tokens.shape[1] != 1) else self.greedy_rollout_jit)(tokens.contiguous(),start_pos)
-    return (self.prefill_jit if resolve(tokens.shape[1] != 1) else self.rollout_jit)(tokens.contiguous(), start_pos, temperature)
+      return (self.greedy_prefill_jit if resolve(tokens.shape[1] != 1) else self.greedy_rollout_jit)(tokens,start_pos)
+    return (self.prefill_jit if resolve(tokens.shape[1] != 1) else self.rollout_jit)(tokens,start_pos,temperature)
 
   @staticmethod
   def from_gguf(gguf:Tensor|str|pathlib.Path, max_context:int|None=None,
-                realize=bool(getenv("REALIZE", 0)), shard:int=1) -> tuple[Transformer, dict]:
+                realize=bool(getenv("REALIZE", 0)), shard:int=1, mapped_cpu:bool=False) -> tuple[Transformer, dict]:
     # TODO: remove the need for copy to default device
     kv, entries = gguf_parse(gguf.to(None).realize() if isinstance(gguf, Tensor) else gguf)
     arch = kv['general.architecture']
     if arch=='gemma4':
       from tinygrad.llm.gemma4 import Gemma4Transformer
-      return Gemma4Transformer.from_gguf(gguf,max_context=max_context,realize=realize,shard=shard)
+      return Gemma4Transformer.from_gguf(gguf,max_context=max_context,realize=realize,shard=shard,mapped_cpu=mapped_cpu)
     if arch=='gemma3n':
       from tinygrad.llm.gemma3n import Gemma3nTransformer
-      return Gemma3nTransformer.from_gguf(gguf,max_context=max_context,realize=realize,shard=shard)
+      return Gemma3nTransformer.from_gguf(gguf,max_context=max_context,realize=realize,shard=shard,mapped_cpu=mapped_cpu)
     if arch=='rwkv7':
       if shard!=1:raise ValueError('RWKV7 currently requires one device')
       n_heads = n_kv_heads = kv[f'{arch}.embedding_length']//kv[f'{arch}.wkv.head_size']
@@ -768,7 +806,7 @@ class Transformer:
       from tinygrad.llm.chatglm import split_chatglm_ffn_entries
       entries = split_chatglm_ffn_entries(entries,kv[f'{arch}.feed_forward_length'])
     cast_dtypes = {name:dtypes.half for name in entries if not name.startswith('rope_factors_')} if stream and getenv('HALF',1) else {}
-    state_dict = gguf_shard(entries, devices, shard_map,stream=stream,cast_dtypes=cast_dtypes)
+    state_dict = gguf_shard(entries, devices, shard_map,stream=stream,cast_dtypes=cast_dtypes,mapped_cpu=mapped_cpu)
 
     # all state items should be float16, not float32
     state_dict = {k:v.cast('float16') if getenv("HALF", 1) and not k.startswith('rope_factors_') else v for k,v in state_dict.items()}
@@ -930,7 +968,8 @@ class Transformer:
       conv_kernel=conv_kernel,conv_layers=conv_layers,
       rwkv7=tuple(kv[f'{arch}.attention.{name}_lora_rank'] for name in ('decay','iclr','value_residual_mix','gate')) if arch=='rwkv7' else ())
     model = Transformer(config)
-    model.gguf_loading = {'streamed':stream,'resident_fp16':bool(getenv('HALF',1)),'devices':devices,'bounded_layout_conversions':stream}
+    model.gguf_loading = {'streamed':stream,'resident_fp16':bool(getenv('HALF',1)),'devices':devices,
+                          'bounded_layout_conversions':stream,'mapped_cpu':mapped_cpu}
     for p in (nn.state.get_parameters(model) if shard > 1 else []): p.to_(devices)
     nn.state.load_state_dict(model, state_dict, verbose=False, consume=True, realize=False)  # NOTE: rope_freqs.weight (32,) is unused
     # NOTE: without this contiguous, it unpacks the weights from the model every time. we shouldn't need this, but for now it's faster
@@ -960,7 +999,9 @@ class Transformer:
     return min(block._reusable_prefix_len(prefix_len, len(self._cached_tokens)) for block in self.blk)
 
   def prefill_chunk_size(self, requested:int) -> int:
-    if self.config.rwkv7:return 1  # Generic recurrent scan; bounded single-token graphs avoid a large unrolled prefill.
+    if self.config.rwkv7:
+      # Only a fully installed native scan permits batching without unrolling the recurrence.
+      return min(requested,256) if all(getattr(b,'rwkv_scan',None) is not None for b in self.blk) else 1
     if self.has_serial_prefill and not amd_custom_kernels_supported(self.token_embd.weight.device):
       return min(requested,256) if all(getattr(b,'gated_delta_scan',None) is not None
                                      for b in self.blk if isinstance(b,GatedDeltaNetBlock)) else 1
@@ -973,7 +1014,9 @@ class Transformer:
     # TODO: use UOp.variable for temperature once float variables are supported
     temp = Tensor([temperature])
     # assign all input tokens once, then slice from start_pos for the model call
-    t = Tensor(tokens + [0] * (self.max_context - len(tokens)), dtype="int32").reshape(1, self.max_context)
+    t = (_cpu_token_buffer(tokens,self.max_context) if ONPU_CPU_TOKEN_INPUTS and Device.DEFAULT=='CPU'
+         and self.token_embd.weight.device=='CPU' else
+         Tensor(tokens + [0] * (self.max_context - len(tokens)), dtype="int32").reshape(1, self.max_context))
     # recompute start_pos from what's currently valid in the caches
     start_pos = self.get_start_pos(tokens)
     self._cached_tokens = tokens[:start_pos]

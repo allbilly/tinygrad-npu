@@ -46,7 +46,9 @@ class Gemma3nBlock(Gemma4Block):
       mean = gate.mean(-1,keepdim=True)
       std = (gate-mean).square().mean(-1,keepdim=True).sqrt()
       gate = (gate-(mean+std*self.sparsity)).relu()
-    return self.ffn_down(gate.gelu(approximate='tanh')*up)
+    activation = getattr(self,'cpu_gelu_activation',None)
+    activated = activation(gate,up) if activation is not None else gate.gelu(approximate='tanh')*up
+    return self.ffn_down(activated)
 
   def forward_with_inputs(self, states:Tensor, start_pos:int|UOp, side:Tensor|None, shared:Tensor|None) -> Tensor:
     self._init_state(states[self.active])
@@ -63,7 +65,10 @@ class Gemma3nBlock(Gemma4Block):
       corrected = self.correct(predictions,activated)
       output = corrected[self.active]
       if self.correct_scale:output = output*self.altup_correct_scale['weight']
-      extra = self.post_norm(self.proj(self.inp_gate(output).gelu(approximate='tanh')*side))
+      gate = self.inp_gate(output)
+      activation = getattr(self,'cpu_gelu_activation',None)
+      activated = activation(gate,side) if activation is not None else gate.gelu(approximate='tanh')*side
+      extra = self.post_norm(self.proj(activated))
       return corrected[:1].cat(corrected[1:]+extra.unsqueeze(0),dim=0).contiguous()
     return run(self,states,start_pos,side,shared)
 
@@ -106,7 +111,9 @@ class Gemma3nTransformer(Gemma4Transformer):
 
   def _decode(self,x:Tensor,start_pos:int|UOp,side:Tensor|None) -> Tensor:
     target = x.square().mean(-1,keepdim=True).sqrt()
-    branches = [x,*[self._match_magnitude(x@self.altup_proj['weight'][index].T,target) for index in range(self.inputs-1)]]
+    projections = getattr(self,'altup_input_projections',None)
+    branches = [x,*[self._match_magnitude(projections[index](x) if projections is not None else
+                   x@self.altup_proj['weight'][index].T,target) for index in range(self.inputs-1)]]
     states = Tensor.stack(*branches,dim=0)
     caches:dict[bool,Tensor] = {}
     for index,block in enumerate(self.blk):
@@ -116,16 +123,17 @@ class Gemma3nTransformer(Gemma4Transformer):
       states = block.forward_with_inputs(states,start_pos,row,source)
       if not block.shared:caches[bool(block.config.sliding_window)] = Tensor(block.cache_kv.uop.after(states.uop))
     target = states[0].square().mean(-1,keepdim=True).sqrt()
-    branches = [states[0],*[self._match_magnitude(states[index+1]@self.altup_unembd_proj['weight'][index].T,target)
+    projections = getattr(self,'altup_output_projections',None)
+    branches = [states[0],*[self._match_magnitude(projections[index](states[index+1]) if projections is not None else
+                            states[index+1]@self.altup_unembd_proj['weight'][index].T,target)
                             for index in range(self.inputs-1)]]
     output = Tensor.stack(*branches,dim=0).mean(0)
     logits = self.output(self.output_norm(output[:,-1:]))[:,-1,:]
-    cap = self.config.final_logit_softcap
-    return (logits/cap).tanh()*cap if cap else logits
+    return self._softcap_logits(logits)
 
   @staticmethod
   def from_gguf(gguf:Tensor|str|pathlib.Path,max_context:int|None=None,realize:bool=bool(getenv('REALIZE',0)),
-                shard:int=1) -> tuple[Gemma3nTransformer,dict]:
+                shard:int=1,mapped_cpu:bool=False) -> tuple[Gemma3nTransformer,dict]:
     if shard!=1:raise ValueError('Gemma3n currently requires a single device')
     kv,entries = gguf_parse(gguf)
     arch = kv['general.architecture']
@@ -143,7 +151,7 @@ class Gemma3nTransformer(Gemma4Transformer):
     entries = segment_embedding_entries(entries,'per_layer_token_embd.weight',16384)
     device = Device.DEFAULT
     cast = {name:dtypes.half for name in entries} if getenv('HALF',1) else {}
-    state = gguf_shard(entries,(device,),stream=realize,cast_dtypes=cast)
+    state = gguf_shard(entries,(device,),stream=realize,cast_dtypes=cast,mapped_cpu=mapped_cpu)
     state = {name.replace('post_attention_norm','attn_post_norm').replace('post_ffw_norm','ffn_post_norm'):value
              for name,value in state.items()}
     if 'output.weight' not in state:state['output.weight'] = state['token_embd.weight']
@@ -158,6 +166,6 @@ class Gemma3nTransformer(Gemma4Transformer):
                                kv[arch+'.altup.num_inputs'],kv[arch+'.altup.active_idx'],laurel_rank,
                                tuple(kv[arch+'.activation_sparsity_scale']))
     model.gguf_loading = {'streamed':realize,'resident_fp16':bool(getenv('HALF',1)),'devices':(device,),
-                          'segmented_per_layer_embeddings':True}
+                          'segmented_per_layer_embeddings':True,'mapped_cpu':mapped_cpu}
     nn.state.load_state_dict(model,state,verbose=False,consume=True,realize=realize)
     return model,kv

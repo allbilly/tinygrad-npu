@@ -1,4 +1,4 @@
-"""Experimental FP32 CPU GatedDeltaNet scan with explicit opt-in placement."""
+"""Experimental FP32 CPU recurrent scans with explicit opt-in placement."""
 from __future__ import annotations
 import functools
 from dataclasses import replace
@@ -49,6 +49,11 @@ def configure(model, enabled:bool=True, *, pool:AttentionPool|None=None) -> int:
   from tinygrad.llm.model import GatedDeltaNetBlock
   if type(enabled) is not bool:raise ValueError('CPU recurrent scan selection must be a bool')
   blocks=[block for block in getattr(model,'blk',[]) if isinstance(block,GatedDeltaNetBlock)]
+  if not blocks:
+    from tinygrad.llm.rwkv import RWKV7Block
+    if any(isinstance(b,RWKV7Block) for b in getattr(model,'blk',[])):
+      from tinygrad.llm.kernels.rockchip_rwkv import configure as configure_rwkv
+      return configure_rwkv(model,enabled=enabled,pool=pool)
   if not enabled:
     for block in blocks:
       hook = getattr(block,'gated_delta_scan',None)

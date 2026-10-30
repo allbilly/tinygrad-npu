@@ -1,5 +1,6 @@
 """Independent adjacent-pair rotary attention from the pinned ChatGLM3 decoder."""
-import math, os, unittest
+import math, os, tempfile, unittest
+from pathlib import Path
 from unittest.mock import patch
 import numpy as np
 from tinygrad import Tensor, dtypes, nn
@@ -94,6 +95,33 @@ class TestChatGLM3(unittest.TestCase):
     for ids,start in (([3,7,2],0),([9],3)):
       expected = self.reference(state,[3,7,2] if start==0 else [3,7,2,9])
       np.testing.assert_allclose(model.logits(Tensor([ids],device='CPU'),start).numpy().ravel(),expected,rtol=2e-4,atol=2e-5)
+
+  def test_mapped_loader_preserves_permuted_weights_and_cached_decode(self):
+    state = self.fixture()
+    values = {'context_length':16,'block_count':2,'embedding_length':32,'feed_forward_length':64,
+              'attention.head_count':4,'attention.head_count_kv':2,'attention.layer_norm_rms_epsilon':1e-5,
+              'rope.dimension_count':4}
+    kv = {'general.architecture':'chatglm','tokenizer.ggml.tokens':[str(i) for i in range(64)],
+          **{'chatglm.'+key:value for key,value in values.items()}}
+    data = b'prefix!'
+    offsets = {}
+    for name,value in state.items():
+      raw = value.numpy().tobytes()
+      offsets[name] = (len(data),len(raw),value.shape)
+      data += raw
+    with tempfile.TemporaryDirectory() as directory:
+      path = Path(directory)/'weights.bin'
+      path.write_bytes(data)
+      source = Tensor(path)
+      entries = {name:(source[start:start+size],shape,1) for name,(start,size,shape) in offsets.items()}
+      with patch('tinygrad.llm.model.gguf_parse',return_value=(kv,entries)):
+        model,_ = Transformer.from_gguf('fixture',max_context=16,realize=False,mapped_cpu=True)
+      self.assertTrue(model.gguf_loading['mapped_cpu'])
+      for ids,start in (([3,7,2],0),([9],3)):
+        expected = self.reference(state,[3,7,2] if start==0 else [3,7,2,9])
+        actual = model.logits(Tensor([ids],device='CPU'),start).numpy().ravel()
+        np.testing.assert_allclose(actual,expected,rtol=2e-4,atol=2e-5)
+      self.assertEqual(path.read_bytes(),data)
 
   def test_file_entry_split_preserves_q8_rows_and_existing_separate_projections(self):
     from tinygrad.llm.chatglm import split_chatglm_ffn_entries

@@ -122,6 +122,22 @@ def test_per_key_alpha_vector_case_covers_key_dim_multiple_of_four():
   _assert_output_padding_zero(actual,case['dims']['rows'])
 
 
+@pytest.mark.parametrize('key_dim,value_dim,alpha_dim,start',[(17,16,1,0),(17,32,17,5),(5,16,5,0),(8,32,1,5)])
+def test_wider_value_heads_preserve_decay_state_history_and_padding(key_dim,value_dim,alpha_dim,start):
+  case=make_fixture(name='wider_value_heads',batch=2,heads=2,rows=5,capacity=7,
+    key_dim=key_dim,value_dim=value_dim,alpha_dim=alpha_dim,start=start,seed=9281,history=alpha_dim==1)
+  q,k,v,beta,alpha,state=_tensors(case)
+  history=Tensor.full((8,2,2,value_dim,key_dim),float('nan'),device='CPU').realize() if alpha_dim==1 else None
+  expected_out,expected_state,expected_history=_expected_arrays(case,expected_for_call(case))
+  actual=gated_delta_scan(q,k,v,beta,alpha,state,start,5,history=history).numpy()
+  _assert_numeric(actual,expected_out)
+  _assert_numeric(state.numpy(),expected_state)
+  _assert_output_padding_zero(actual,5)
+  if history is not None:
+    _assert_numeric(history.numpy()[:5],expected_history)
+    assert np.isnan(history.numpy()[5:]).all()
+
+
 def test_full_prefill_capacity_and_model_head_geometry_against_scalar_reference():
   case=make_fixture(name='prefill128',batch=1,heads=2,rows=127,capacity=128,
     key_dim=128,value_dim=128,alpha_dim=1,start=0,seed=9200,history=False)
