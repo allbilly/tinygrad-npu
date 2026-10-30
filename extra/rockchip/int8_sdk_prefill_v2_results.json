@@ -1,0 +1,3357 @@
+{
+  "complete": true,
+  "scope": "Ten complete projections with row-blocked CPU conversion. Not full-model timing or RKLLM-quality qualification.",
+  "owner": {
+    "path": "/home/orangepi/vlm-bench/baseline-20261021/main-task-20261023/run-sdk-prefill-pipeline-v2.py",
+    "sha256": "475ea4c49cdbc4b87c199227a3d749bed44a9f4286208d0ae02c6db72629a541"
+  },
+  "owner_session": 33915,
+  "owner_terminal_exit_code": 0,
+  "fresh_helper_session": 20245,
+  "fresh_helper_terminal_exit_code": 0,
+  "fresh_serving": {
+    "path": "/home/orangepi/vlm-bench/baseline-20261021/main-task-20261023/sdk-prefill-pipeline-v2/serving-verification.json",
+    "sha256": "6d4c5fdecbff100d7b20795dff95e86d94abf4ecc4fdb19d26daf6104493eaf7"
+  },
+  "job": {
+    "path": "/home/orangepi/vlm-bench/baseline-20261021/main-task-20261023/sdk-prefill-pipeline-v2/job.json",
+    "sha256": "034dc992e0f6af11222787ba8a6774f9d4db0b975a6eea81d8018fbafaaadbd0"
+  },
+  "stage_manifest": {
+    "path": "/home/orangepi/vlm-bench/baseline-20261021/main-task-20261023/staged/sdk-prefill-pipeline-v2/manifest.json",
+    "sha256": "7c267400e42ebe0dd25749498647850b49c670c58aad7bbcbc9bbd68e3b86877"
+  },
+  "raw": {
+    "path": "/home/orangepi/vlm-bench/baseline-20261021/main-task-20261023/sdk-prefill-pipeline-v2/results/pipeline.json",
+    "sha256": "236356d3414615dd582fce695f694eaa9d9dabe036dcfab965928889d28b759e"
+  },
+  "report": {
+    "complete": true,
+    "source_sha256": {
+      "tinygrad/__init__.py": "fc24d5d0df1b1a14bbee0bd2641a61ca5f34ec7d83f1b0b755adf6eb83d5c0be",
+      "tinygrad/codegen/__init__.py": "b8fc262121b861659cf777d19544138e5a4d9582c5277dd6f93e914e30423727",
+      "tinygrad/codegen/decomp/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tinygrad/codegen/decomp/dtype.py": "b3a04ebdd9f5686936964fefa99a46ac27515edb7be4c9f07201269c42371502",
+      "tinygrad/codegen/decomp/op.py": "2d5ff52711a92c45f8814056d799da3c0aade9498822cc5cdee2a83dc3276ae1",
+      "tinygrad/codegen/decomp/transcendental.py": "1d737c265c9f96b8f09d82b85eb660dbb91b558a5af88512075c5a20540d00c5",
+      "tinygrad/codegen/gpudims.py": "15d368b1a45c237c8d3ea0b28af5f3b80fa49dbe73694bd8b315d835c4335ae5",
+      "tinygrad/codegen/late/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tinygrad/codegen/late/coalesce.py": "36d59f15f202ae20444cd76795e0068b79f4158833e691da3c0ac72848e0d475",
+      "tinygrad/codegen/late/gater.py": "c194d9ffe8d022e62894367d4c0ce0fdf57ff02f34f128efcdac3072334275b9",
+      "tinygrad/codegen/late/linearizer.py": "9c1d7ae56a0381bdb4fd1340fe32eee77ad66617b06a215b8c4c46bf3f97fbe8",
+      "tinygrad/codegen/late/regalloc.py": "e120e26baee8021becfd716e39cb85dc0f5c5992bd30d5a50e48e7a0f528c9e5",
+      "tinygrad/codegen/opt/__init__.py": "6bddcc6a2052b1a39e9a421731275524fa6f0f861abfdefeafae5403747f8778",
+      "tinygrad/codegen/opt/heuristic.py": "029537ca82fadbbc34c9780fee3853466eb5a157a51b7c43dd45a94b3cde2a89",
+      "tinygrad/codegen/opt/postrange.py": "2ee24512630396f82016e709036c8991af7ec7482347060951fe01ebd719d3dd",
+      "tinygrad/codegen/opt/search.py": "670111d23c6360c6bd57f473a0e8877fe9b6615455aa27473f52c6bb99ef81b7",
+      "tinygrad/codegen/simplify.py": "a05ecef8e0f13d104516be51e4289653b00ca3104893000ed09a3b9b639a629f",
+      "tinygrad/device.py": "7a221075b3968b25db62edbc46450616a1e64e20c363466e26aab2a5a2f080f9",
+      "tinygrad/dtype.py": "7800592dcccbdd5a5beaee889342b5f62790d37445938fe601416c8b76057926",
+      "tinygrad/engine/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tinygrad/engine/jit.py": "7e91838fb3f3593661d771459775ef3e2811ba1038c58f06c9d5c359cac0bec8",
+      "tinygrad/engine/realize.py": "a00765bf85f23399020a9b6ee1e397aed12c3d2a2c4f1362001b67130b41a1db",
+      "tinygrad/engine/worker.py": "b9d47164d0b2fa09f4f396efcfd856b8ebe93a4e446ff683692ea9d605bb017d",
+      "tinygrad/function.py": "dbf481c6049a538680e386d2846e0569bb9924f0293dd3356e92e7a428593a22",
+      "tinygrad/helpers.py": "eda095ab2c35d045e40523cf8f025543c45b012ff217ddeaed6143610330f308",
+      "tinygrad/llm/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tinygrad/llm/__main__.py": "2b2aeb15c8e098d5268709723bf52e22845634a68075e5904a474ec01f4165f0",
+      "tinygrad/llm/chatglm.py": "789feb35a21226616e674caf42d687fdc4efb7ffff97445f286931880342bac6",
+      "tinygrad/llm/cli.py": "801120b53b59f15221d014a710df2cf8224728e9699f70629ac87b5db28baf49",
+      "tinygrad/llm/dflash2.py": "fd06909403b5268285116846e9082fa9f451618cd8691e04074fccec36eeeb3a",
+      "tinygrad/llm/dflash2_config.py": "f46fda13e52e26ff9fe7bfeb40d56c5f0f7536424358b4e4bc16bee3ef745a5d",
+      "tinygrad/llm/dflash2_selector.py": "54455105954ca47e44d32dec4974d0f222c8c239d61492c43a1a922b54c95342",
+      "tinygrad/llm/gemma3n.py": "37c434bfe88f8c196271f5dc7f7f6a8421c94e55c86a6ecf6eff0e3d76b1acc3",
+      "tinygrad/llm/gemma4.py": "e218b96aaeb628cf355e5428a09d397f863933b28ac50f924c2c0d48acc78c4c",
+      "tinygrad/llm/gguf.py": "ef7957f1a2bd57c48380bdece85f90ddf829055834eb63465468189927b0f2c1",
+      "tinygrad/llm/kernels/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tinygrad/llm/kernels/amd.py": "05a05aa63391251eea4b8c2dfcc1c56718bdecb712ad9041e56ab84a31edd92c",
+      "tinygrad/llm/kernels/mali.py": "8a52d608e7c22dbaf1605d4aa32b49a8b7af3b88e3678a9c5c3373d95ab961c4",
+      "tinygrad/llm/kernels/mali_attention.py": "aee062ac18b5bb749304decf245a7c52d0a10fcf5d22bddc25e88e172439e778",
+      "tinygrad/llm/kernels/mali_copy.py": "5f9622c02ac6681b4614b777295531ec6de33da9a43253dd4466a3e90d9617e5",
+      "tinygrad/llm/kernels/mali_half_prefill.py": "352996d9b939565f76875960ddb121f648c813d38e5aef313e412c76fe2c8a76",
+      "tinygrad/llm/kernels/mali_linear.py": "31e10be28dea06d51b13383c69a63e24966e7029f7aa4749d3b5e79fe810f96d",
+      "tinygrad/llm/kernels/mali_q8.py": "2d6d4d38b2eb86bb1ca9a546ddaa8ac30ccadc3626332c36acc1328ccfc9459d",
+      "tinygrad/llm/kernels/mali_q8_checkpoint.py": "f96c43dc0489f33db4b2ce084a371af44d0cceb520479d15dc5f63bf65a46387",
+      "tinygrad/llm/kernels/mali_q8_shared.py": "d00c78f07e42ff41424b76b7257916b74055590ddad405f6afcb6c240aca15fc",
+      "tinygrad/llm/kernels/mali_recurrent.py": "35d74bdd1619a786dbf44514a787ce713ad43b9911b4fb7c01812024ca0c281d",
+      "tinygrad/llm/kernels/mali_rows.py": "26dc2d4534ce7cfc6bb6f97e6531b26f1c47de758208ef34f237a95573ca3d58",
+      "tinygrad/llm/kernels/mali_state.py": "c9710fe99c1c78ec06eae0cd8617ef8259a108fe111ace074d6091bbbc6e2c22",
+      "tinygrad/llm/kernels/rockchip.py": "5fdb6266f9d146dd725f0726c865b6a991edb3168cdde81899a56a5e74a16348",
+      "tinygrad/llm/kernels/rockchip_attention.py": "ed1d797b3e2822e779886ffe5f0f8279c9d0669c85a71fa57206a701f65a07fd",
+      "tinygrad/llm/kernels/rockchip_cache.c": "1f64febcecc53033c60a63eca82e0b2fd54c7b57f6ee75daa20e3dea63433611",
+      "tinygrad/llm/kernels/rockchip_cache.py": "d3e3163591ea9833c2da102eab34652db3381d92cd13a261d7df36d4f8b1b2c9",
+      "tinygrad/llm/kernels/rockchip_cpu.py": "dcffed8092dd2247a98dacdf9bef28368fe06a74aab10448b239e3f78f414286",
+      "tinygrad/llm/kernels/rockchip_decode.py": "a560368faa8346ef53ce9905d7844d516a78e77ac90e032175ae7cde9f3a3803",
+      "tinygrad/llm/kernels/rockchip_dot_attention.py": "8d880c2518f699175f664a039133f98281b6781737073841d376a69f9a95b02e",
+      "tinygrad/llm/kernels/rockchip_gelu.py": "450b2a2d6e9f622fd709b78d811639b76e6272cf502a32abbd779a7f0449942b",
+      "tinygrad/llm/kernels/rockchip_gpt2.py": "cb9a53386a3e6aa7f13bbb6a20488eaa3685f0ec86f6a054f1f7e38dabea0698",
+      "tinygrad/llm/kernels/rockchip_gpt2_decode.py": "8153cb1d439880dfa85914d92974e848dd8977f41c13519cad23980f94438359",
+      "tinygrad/llm/kernels/rockchip_greedy.py": "01ac047734624a01c04b6e75850c658cc96abba2a1617d7117e740bd16e60ccc",
+      "tinygrad/llm/kernels/rockchip_idle.c": "4fb7c8022cefd7929907f4abeedaf8894a96f9261763c32015bbd648eeb09b57",
+      "tinygrad/llm/kernels/rockchip_idle.py": "e0fa42189a9c076df1a2da6a1160a63c1a97814e1411ffe2a5297dced29498dc",
+      "tinygrad/llm/kernels/rockchip_int8.py": "d6d458be90b6022a7190b45239e1943981b2de3042d0b530be351d03de08f3b4",
+      "tinygrad/llm/kernels/rockchip_packed_attention.py": "aace3f08085c69a0deb29ce21244c58e1f95b50b99e31cfa3f9ae6abc04e8822",
+      "tinygrad/llm/kernels/rockchip_pool.c": "6b93a5024aa53552da934e475daaa10d84171cc6be6fd7911c5827a646e031a8",
+      "tinygrad/llm/kernels/rockchip_pool.py": "31fff31283e4660faa5b484e5a456be2c0486823e62ef0688cb600552e487709",
+      "tinygrad/llm/kernels/rockchip_qkv.py": "dd284ef8f885495ae38f7c670b127cdf2ae2ba414a0543777cd102f37cf0085d",
+      "tinygrad/llm/kernels/rockchip_recurrent.c": "93ef4514c57ccc7c0dd29f1765ef98cd99df98ceccb4ad8dd41191ad8a7c3d8e",
+      "tinygrad/llm/kernels/rockchip_recurrent.py": "af44165eae7f6c981de046dc55cac90a39adae9c2f6f2a0dc3d1484c9dbcc2e7",
+      "tinygrad/llm/kernels/rockchip_replay.py": "e4b1eeb570f17834ae12d5477bc597ec7656f4b2d77627bb7c3edee069486560",
+      "tinygrad/llm/kernels/rockchip_sigmoid.c": "b6ead2a0abe50364a3fb84ec072cdd9e5bab1caff97bc67f4cb60a3a079dec01",
+      "tinygrad/llm/kernels/rockchip_sigmoid.py": "3e8ab4e113436a4d620d01b5de16a3dc7bb8550ffe2389861e87dfbbedbecb92",
+      "tinygrad/llm/kernels/rockchip_softcap.py": "23da42409134a60761a45e34677e2c7134e8df6e4783700eecb07e862f832bb1",
+      "tinygrad/llm/kernels/rockchip_softmax.py": "f429d46acf50a329ce7f4573f2a55ee0f4686923c4f1de93bdbe1889660bff57",
+      "tinygrad/llm/kernels/rockchip_static.c": "04e7539678968204b48ac5e4d466ca38c06fb4f7c1d600ff20b8ffe24129ed50",
+      "tinygrad/llm/kernels/rockchip_static.py": "3ab6823a9fecf1b9a6d6dd0fd1d43bec6c61391d913dab3e0fd075b335d6550e",
+      "tinygrad/llm/kernels/rockchip_vision.py": "94f26b16273eec73d419fd068483721846f20cb9c1f4225fa6a9f214c038e47c",
+      "tinygrad/llm/kernels/rockchip_vision_mlp.py": "b1644c2dd0ca7da816211d18e7f1c9e9d1f0094c8028a62b137b4e080b716a9b",
+      "tinygrad/llm/kernels/rockchip_vision_pipeline.py": "26cee5cdecf29ff41058296870177930911a8e17e9219774be3a959c15d1aa94",
+      "tinygrad/llm/kernels/rockchip_vision_prepared.py": "683f93b048ab6bb1a98491028852cda8c4a121eacbcc98d924b0d91aa30720e7",
+      "tinygrad/llm/kernels/vision_embed.py": "12102e073bfbdd1484728a7a6e279c4cdd7f59dbd7713ef0d39adb6fa221990f",
+      "tinygrad/llm/model.py": "257abcc33e3ff8cf92d656642efa4375ac61591bde7e07ea43a6b00040046343",
+      "tinygrad/llm/rwkv.py": "4d9912c91212e94983ecc38dde5434cccd54a5cd4b6e17ac50debef99cdd5ee5",
+      "tinygrad/llm/serve.py": "4750c7971d126c91c776886b03f2dbf47815317907d7c05d418388f371e16c00",
+      "tinygrad/llm/speculative.py": "ba6a69a248efa202655d813cf91702b403c4073f85fc51808db51079ffb1a60b",
+      "tinygrad/llm/speculative_adaptive.py": "bdddc414c20e102fb4840d4088097cd73b692288c7e79d1c79df5cb7529105fb",
+      "tinygrad/llm/speculative_budget.py": "79a64b2bc8777d995928a1675d09617f82f4ec20a850796e6c0bb54d30169e0b",
+      "tinygrad/llm/speculative_policy.py": "b6379199d6a3ad09b5d143c0010bc8be19105312a940ad78ea35d806198d7890",
+      "tinygrad/llm/speculative_sampling.py": "fbffa90eca44034b57004b67e4b44f6c0ed06fc6a0d536359220b9a1523e0d67",
+      "tinygrad/llm/speculative_trace.py": "bdd913c8ed34c65c76027109bf2efd1d39c540123f79f4e972d73fd508d7d9da",
+      "tinygrad/llm/vision.py": "d96c9e65478ae86377112ba2831547d093a5e52d00ab93db9faf9f2826fc062a",
+      "tinygrad/mixin/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tinygrad/mixin/creation.py": "4099d41e065e5638f8bb17f6c016ec6b286bac52e5ca6c9a86b89d73cbebbebb",
+      "tinygrad/mixin/dtype.py": "99027a5281c17bfbd572f12a090bf0d31db36bd239202606c1d3d6237486ec64",
+      "tinygrad/mixin/elementwise.py": "951d9d8a83e5cd3ae5a26571d685f2cef44fa8b41b1e4c3e028f1bf4d31076de",
+      "tinygrad/mixin/gradient.py": "c88b1b5557ab5edb450ed0f7e10bd2adebfcfb572f9977446fa04c2f39cc58d6",
+      "tinygrad/mixin/movement.py": "e6412a4f11b8dadb72cab73b260405c0b39389979e4786f0d981be321f121a50",
+      "tinygrad/mixin/op.py": "c09ecfca6522014dbd7b5ac1faae8c85fdc936484cd95084ac41a3ef135e82c7",
+      "tinygrad/mixin/rand.py": "19623f666365a318b6730123dd0fad27469ced754740415b86563ce0857c0363",
+      "tinygrad/mixin/reduce.py": "6981c71968b41ee79e8e97dfdc89db4b62216fd508707b57dfa0cd42b414e79e",
+      "tinygrad/nn/__init__.py": "992c14aec20683a93469d289d5817d1a023f0e3f39ddd5b93181dc8ef5b0691e",
+      "tinygrad/nn/datasets.py": "bc5ff2d74e07452c4f82afc5d6f7e2656978e189cb64689a1e8a1670825dff67",
+      "tinygrad/nn/onnx.py": "670eaffe1386d496e8337f4be5a472cd7b3786fa610a47ba767d89871346503b",
+      "tinygrad/nn/optim.py": "981bdfa9de9baf3b82f7e80f5c32bab954c56d4f8ef902bf9940770e783dee4b",
+      "tinygrad/nn/state.py": "8b709853bca9edf31b99eb7e76c756968cb9bf521747f7dc50a86110ff974e6b",
+      "tinygrad/nn/torch.py": "377d20ff02d4c70e112830be326c8ad9a188cb490c9d15ca7d4bcffc0820d4ca",
+      "tinygrad/renderer/__init__.py": "119d64c9f98c132f9971c8b7c744bcd53ca8d3ec9e2dd0fca2d76f26ad0e8ff7",
+      "tinygrad/renderer/amd/__init__.py": "daa2583cf98a69bf59aa3f842bacb704598445fb23b9166bebc3adb9a9b7112f",
+      "tinygrad/renderer/amd/dsl.py": "dd45cbdf0d63570742eb54a21ef09266eaed95b8f3708de5363ef1c64d86606f",
+      "tinygrad/renderer/amd/elf.py": "faa631ce5f4d71fae646fa4e44b7ef6012f08b9738ba45691b9d901dcfbe77fc",
+      "tinygrad/renderer/amd/generate.py": "2bbf3599176b8dc500b253a97714977e443b7397063e38a775bcc9bd1c709824",
+      "tinygrad/renderer/amd/sqtt.py": "1bb1807a141e2bf5446af8b092e65520ddb775ff08af272271fb22b02362e49b",
+      "tinygrad/renderer/cstyle.py": "aa6c775081a9fcfbcc675e38e0f3b029c788c5a92f1c0fd46bc0c367d661a492",
+      "tinygrad/renderer/isa/__init__.py": "3fd9ff060c1bb591d79e07b5990e264e5ec2b8efd03fc18fb6fe3a5585022d8b",
+      "tinygrad/renderer/isa/x86.py": "523c94a6eeb89dd5f888967f11380b9f298745ec9b1800e3cd2726668b2c8181",
+      "tinygrad/renderer/llvmir.py": "108235c5ad3fd43aa22b6e094136c35314c4fe7c58f7b508c34d666a3a526b4f",
+      "tinygrad/renderer/nir.py": "a3d8186dcb5b6df0ef3c8aaaee3361b6d9433fe35a6b46d4a4aa0dc1193f05a7",
+      "tinygrad/renderer/ptx.py": "906bd04176ef07274e0fc9d9bf99bc86bb8d8bc9674a3099aee2eceff3d3d3e0",
+      "tinygrad/renderer/tc.py": "f8836d7fa6dee7f0f84f6adf29c192a29ffae62ca40e0372f74b128cde4e6654",
+      "tinygrad/renderer/wgsl.py": "8a5f1823834fef671a28822e21775912393f8b718b0b8e3ff7e319d9a926ef8d",
+      "tinygrad/runtime/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tinygrad/runtime/autogen/__init__.py": "89955c8ec8c5cb2d446db169379100b421f51232563eb076b9111e4845a9f5bb",
+      "tinygrad/runtime/autogen/am/__init__.py": "fb2a32843680df3df2ebef7692b0ce5aa4f8ce5da778c6abe456160c0112de74",
+      "tinygrad/runtime/autogen/am/am.py": "075d9d29b885c546897143ade1b18f36d4a4450d1fb1d899d2df8f08aa5853e1",
+      "tinygrad/runtime/autogen/am/fw.py": "c60f58eb1ee6d61cee3817c5af23ef1fdb8c9ac9d4353d07972114cef09c7c02",
+      "tinygrad/runtime/autogen/am/navi_offsets.py": "9080f1a21706918dc9392709804115aa60201c8865ac86ef2b49252a2441c7cf",
+      "tinygrad/runtime/autogen/am/pm4_nv.py": "9bb32046114fd7ddbb976cc25bd5300bad08298b87682539a1a3e860954aad16",
+      "tinygrad/runtime/autogen/am/pm4_soc15.py": "f1ace5672c822d7a728f72b376a4ee5842aa4805944ea5f24dc8289dd341fac8",
+      "tinygrad/runtime/autogen/am/pmc.py": "b65aa28d165f88fd1f17c965e48e5fcbeb7f33bb3da4cba498b819f648ea8b3e",
+      "tinygrad/runtime/autogen/am/regs.py": "81d38816611a1e086e21feca4c2e021174decab385650405e520457aacbfd10f",
+      "tinygrad/runtime/autogen/am/sdma_4_0_0.py": "e2538620e5e73b0a745ce2ba0284c709f158e2893dd478f98bbd86c04c50292b",
+      "tinygrad/runtime/autogen/am/sdma_5_0_0.py": "33e42eb0e8c9be08f698ce8dded66446ad600cf03f64179696556a69617ee5bd",
+      "tinygrad/runtime/autogen/am/sdma_6_0_0.py": "523636d23466359b244b9e5454a8d0a80a5bf8e67882a9238e571ee90d580e88",
+      "tinygrad/runtime/autogen/am/smu_13_0_0.py": "5a2254c980525c8d5c8acc15f56f2ae72520d510aa1c2499b4c2b3586570c125",
+      "tinygrad/runtime/autogen/am/smu_13_0_12.py": "0e558c4f37ef3608d5c0498c96b123bb3362ed0a093ce50acd7a0f2102342919",
+      "tinygrad/runtime/autogen/am/smu_13_0_6.py": "acd6efb5ad0b972a5553c53db400d1f806c1d37d97ee0a583d8e45947060183d",
+      "tinygrad/runtime/autogen/am/smu_14_0_2.py": "f1b5e7d9d10f0a4cfb28dad0b8afe42cd5a276206959bd525bb8e871888991d4",
+      "tinygrad/runtime/autogen/am/soc_11.py": "da4af42a9f6bd4e980cd7a8a2ae3fc34ada4995bb693506f65148ddd7f45ef6c",
+      "tinygrad/runtime/autogen/am/soc_12.py": "8e81635ccab1b30c312778ccd8804e6b5d4df81c0b391a1e9c7f1bb3375e7933",
+      "tinygrad/runtime/autogen/am/soc_9.py": "b5386d6f41ce2ec65e1f9de20bb4439eceedcccfebf0dbd269891367c7cd8d2d",
+      "tinygrad/runtime/autogen/am/vega_offsets.py": "aeedb84cc5ee439c578ab015f0a2c424d95faf3304965041fcb7b116cce2a1eb",
+      "tinygrad/runtime/autogen/amd/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tinygrad/runtime/autogen/amd/cdna/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tinygrad/runtime/autogen/amd/cdna/enum.py": "6273f0c16e079332c354b849f38268527f7bc99bf943a9e5e2831ec3f705eb4a",
+      "tinygrad/runtime/autogen/amd/cdna/ins.py": "d98fad08ef7bd7af6e1ce6459d6bc5f1f7e0f81c6be93561857049675255a3dd",
+      "tinygrad/runtime/autogen/amd/cdna/operands.py": "ae871116dbad3aa9644975ed0f1b6042c9d53d64078f01f6688c7d73ae01f381",
+      "tinygrad/runtime/autogen/amd/cdna/str_pcode.py": "e67649d19bb728278d97065a843518535a87126358710aa85f5a5cd61760fb1a",
+      "tinygrad/runtime/autogen/amd/common.py": "c05fa9bd4e9efb05483d29ddeefb5994ac21560e0d13b4cb18548a57177c7d44",
+      "tinygrad/runtime/autogen/amd/rdna3/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tinygrad/runtime/autogen/amd/rdna3/enum.py": "4c495befe2c1f11f3b2f2820fbd0d3d9b3faf4d4969312ad757c6fa7569cc9dc",
+      "tinygrad/runtime/autogen/amd/rdna3/ins.py": "652a5df671664024650c5f5b6c2eddf7af0354a556e84473a3eb207bacfc4746",
+      "tinygrad/runtime/autogen/amd/rdna3/operands.py": "96fd869a40884dec0247633c49af6e80dffc375afdbf222eb70f6b7d04bcf806",
+      "tinygrad/runtime/autogen/amd/rdna3/str_pcode.py": "b7705c1430b06c5ce1a90ac625a515708ebe11c184068bf89746f3fd5466ae39",
+      "tinygrad/runtime/autogen/amd/rdna4/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tinygrad/runtime/autogen/amd/rdna4/enum.py": "e7f785ef907c6ae1109baf9188a4b63b964e3137bf2f1328196b081396a71388",
+      "tinygrad/runtime/autogen/amd/rdna4/ins.py": "927770e3b602975581ca933998b8e8cd87e8fc9bb2213133835e0059a77c0a0b",
+      "tinygrad/runtime/autogen/amd/rdna4/operands.py": "5cca92ffc1d5f92ab3c31fbf73a8ba47d5d49dc3bdb52f257556b6ce6638d6a8",
+      "tinygrad/runtime/autogen/amd/rdna4/str_pcode.py": "b8a9001477cc9b6cfdf0b5dd8aec0bc2a49b073a6bcec0d0a811cc6fa67d3490",
+      "tinygrad/runtime/autogen/amd_gpu.py": "478e889f08e47ebf4410ea089602dd1cfe62718b92a5fe085d56ef11633ad8b6",
+      "tinygrad/runtime/autogen/amdgpu_drm.py": "c9e226465de3421c70f8986814244ce832b78b3b7643047823053e901f4a68ff",
+      "tinygrad/runtime/autogen/amdgpu_kd.py": "bbb71ab4ab4a69a8acf468222b8562ed6466c72eb3abb6df5186a78f320bd68a",
+      "tinygrad/runtime/autogen/avcodec.py": "b5dd616799a3ed4e69bf0a35b5d05c2c80759a24e6573ad68c849c0dfcc6af05",
+      "tinygrad/runtime/autogen/bnxt.py": "a2c0a2f1b9d85b04701fe1b6279ac3b50064ba5d712c1519443eb27cfe083a8c",
+      "tinygrad/runtime/autogen/comgr.py": "ed3f777f3841706da31d6b186f09e719bdc429d85d08b2c79b5db37e59f257ed",
+      "tinygrad/runtime/autogen/comgr_3.py": "8afed852b5fa28ec802a2de73bcc455ea966973058c63f41371bda444db9a62d",
+      "tinygrad/runtime/autogen/corefoundation.py": "56795809f590e21234877a256681371ee32d8cf5a597417e784988e31622087f",
+      "tinygrad/runtime/autogen/cuda.py": "64bab6b381449254db3cb8d1d60b69e10c9ffa4befa6d8294305c2ae1fa18129",
+      "tinygrad/runtime/autogen/ggml_common.py": "7edaed6afd77bd84459ebaab381c6998bb2e2788eb620a0f4c07b26242a8b891",
+      "tinygrad/runtime/autogen/hip.py": "d69dcb6f55bd4dcac2178065ebe462ad55fbed8acf17a8c3561e918fdf59aa77",
+      "tinygrad/runtime/autogen/hsa.py": "b8457e9fd6ce160d072af0e4ba1e1c34e443dd71cabd767c6511457a72f3d901",
+      "tinygrad/runtime/autogen/io_uring.py": "d8b1658c94ab9727973700f14fe40661eb87272bb9e40a02904563f304ca05ef",
+      "tinygrad/runtime/autogen/iokit.py": "d0033fb9bd4ecf4a796ac01e280d6fb3289614c8008d6e62b312d09894189162",
+      "tinygrad/runtime/autogen/kfd.py": "248a7e74aa98b54f5e9cac56bf7a2495e8f6994386705a3c6c19ab0c7c053197",
+      "tinygrad/runtime/autogen/kgsl.py": "9f050c287acacb79a4e6d15cd32eb12a137c556de9c18d77baaea80b2e8b070d",
+      "tinygrad/runtime/autogen/libc.py": "edc96d14bdacf6992407318faabdf20690ceedbb915084626e59d1514b26f04e",
+      "tinygrad/runtime/autogen/libclang.py": "8f6f44f8065512c002a2e86d3ddd1933aaa89af58b7678077f3ae9d0369f3cfa",
+      "tinygrad/runtime/autogen/libusb.py": "f234ee7c90cc4ac1c7d97724db665f2dba466580bc1205deab1a58de99992a6e",
+      "tinygrad/runtime/autogen/llvm.py": "18ccc5041f5f9227d7b8f43200da1e8cff680d40c6eadb38fc5f883aba1de1bd",
+      "tinygrad/runtime/autogen/llvm_qcom.py": "a0032f4677216211f658b92e11fc7a1060d556133d8b5e9482c7554698f08ea6",
+      "tinygrad/runtime/autogen/mesa.py": "355cc3facb9c31ce6c808a850fa9e3962e9690cf759d776cb05c1da354b61df7",
+      "tinygrad/runtime/autogen/metal.py": "842e5f17ad86aef820af1c14409660cad373c0b7d2559d81dbe978cd028fdb99",
+      "tinygrad/runtime/autogen/mlx5.py": "7b1782a5ec4aed44cf849b3e574d15b85924390b24f9368cc17014ac4ffc1e99",
+      "tinygrad/runtime/autogen/nv.py": "261256ac4322e046ff2db28235ae2ca8f68df081af1ce1509b407e814194aed6",
+      "tinygrad/runtime/autogen/nv_570.py": "411e74f3a283d3f4bed0294fb6a54a34ddf6fe624a3db8ec58df97ab66909abf",
+      "tinygrad/runtime/autogen/nv_580.py": "57157c789576e3107e187bc26242bbaf34b4cfc1a8f67245a8e587e984cd692c",
+      "tinygrad/runtime/autogen/nv_610.py": "9615048a5619c64fbb95ce61b1bea809ca42f1d301366f77a55a813d1047b41c",
+      "tinygrad/runtime/autogen/nv_regs/__init__.py": "cc89dd8a3df44879f7013b61d9d741df9bd77d50a292c6ef81ab5130c66cc8a3",
+      "tinygrad/runtime/autogen/nv_regs/dev_bus.py": "7ba8a3407e27a809be0504d285991c7a1aef1826d9e689b3aa59bb80aae65e6e",
+      "tinygrad/runtime/autogen/nv_regs/dev_falcon_second_pri.py": "391295f032d2c0fbe905d236e52a6e018f9438d2bdd76282d57f0eca5d2bfc0d",
+      "tinygrad/runtime/autogen/nv_regs/dev_falcon_v4.py": "6b3c9aedf59a7a37ba67d9b5b77f77cd5cadaac1b82040b0926e9acf1dedcee9",
+      "tinygrad/runtime/autogen/nv_regs/dev_fb.py": "6cbeb46bc9577e576926fcc982fcc0b8fa31e10206d1615311075eb28b48fe41",
+      "tinygrad/runtime/autogen/nv_regs/dev_fbif_v4.py": "8d2c87027939226d3a910157d41e660427774c3b11a17bd25c0ed1b2a9651c23",
+      "tinygrad/runtime/autogen/nv_regs/dev_fsp_pri.py": "f461181260b8e072b8df132322b03960058ce435d6da71c169153ace417edd1a",
+      "tinygrad/runtime/autogen/nv_regs/dev_gc6_island.py": "16329261e64d0f54104b062155166378319885968a7ff9ae9c2b47979b15f14f",
+      "tinygrad/runtime/autogen/nv_regs/dev_gsp.py": "8425f6b358af1acdf4dbb5549429feb05f95f649d451bccd6dc44eadd4674bc8",
+      "tinygrad/runtime/autogen/nv_regs/dev_mmu.py": "d36ae887aa8026067486e2f3fea295ca1f17c9e7867f2842d4cedea1bbf46355",
+      "tinygrad/runtime/autogen/nv_regs/dev_riscv_pri.py": "bb48da8a9f2f5b92a2aede932076709a4f2ae7266f895c77386b8aa373ab9207",
+      "tinygrad/runtime/autogen/nv_regs/dev_sec_pri.py": "ad4e6690236365ab4edad12c15d49a8a55f787a9ceecdd96d47794e25979808c",
+      "tinygrad/runtime/autogen/nv_regs/dev_therm.py": "af124c35f2ede3c96477d405b588dff2689bbd15fb5e7f1fdb40c7d2e8bdb10a",
+      "tinygrad/runtime/autogen/nv_regs/dev_vm.py": "724a62f3a9b748c63fbe5d04f3ed19cc9ffc2f3e29a8f9f4a9dca37e61887a7b",
+      "tinygrad/runtime/autogen/nv_regs/nv_ref.py": "7486129fa0586428ed6570add35d49db5f9edc4cda83457a5094b58066ba55ef",
+      "tinygrad/runtime/autogen/nvjitlink.py": "272066e86e6d51d0a064e711f22c5baa6fd065a09b640da789d60a3cac2f56d7",
+      "tinygrad/runtime/autogen/nvrtc.py": "26c305997b4f63950e8b0712d9f3cd513dc92b1753595e63235e035b7597592b",
+      "tinygrad/runtime/autogen/opencl.py": "e0da74f9804788dbb88724d5ce1e0f26c027ea4125039d62c08ad98c1f074c9a",
+      "tinygrad/runtime/autogen/pci.py": "baceb6b8c4e45429c8dc3b7eff17259aaed30d30d6ea50935ce28d69534d8bac",
+      "tinygrad/runtime/autogen/qcom_dsp.py": "4838000bcc679270d8beee74bb06d6dcd7d1a52faea0dd3d8c84f7acc160a87f",
+      "tinygrad/runtime/autogen/rockchip.py": "4fcfc349ee15a4d80728dad0a86fd781502315bdf454e4af1ff811e7f79cec2c",
+      "tinygrad/runtime/autogen/rocprof.py": "b7561632d83083620e34fc14472f5c4f1e30878eb8c856df1bf74a764a317c73",
+      "tinygrad/runtime/autogen/sqtt.py": "9f47e053dacbfe732d653db926a3957dd65c33b879b02d809b38baa8eaad98c3",
+      "tinygrad/runtime/autogen/vfio.py": "c501177743326af85725911c225ebe7dbc50f56e8882913ae22ad2d50fa33c27",
+      "tinygrad/runtime/autogen/webgpu.py": "d54d4b783bc925ad3e6b017f96aa5a27159fc2d95742bcf75e0addcb9f8ac4d6",
+      "tinygrad/runtime/ops_amd.py": "719be92c917e2c3a08ad802732dd7d116668649dfd08aef10ddea5dcc84b6436",
+      "tinygrad/runtime/ops_cl.py": "0aa8f63d58c069c6994e37750c8d41b8926f8ec27e8e54745e99bf68bef9fc8a",
+      "tinygrad/runtime/ops_cpu.py": "308017e40f4dfdf57624b535fb8eb1f6288fe8fbbd65a2d5fbbbbde9d9683232",
+      "tinygrad/runtime/ops_cuda.py": "d564db6c6927dfdfcc925f8c2cfd9938f800df2d4219dd96294f402cb92d789a",
+      "tinygrad/runtime/ops_disk.py": "d0133e07537a0e5b358bd40c0992e0abe0eb5c42c858795e9eda4140a3e1708e",
+      "tinygrad/runtime/ops_dsp.py": "67783322e6352f5f52d10e501f6b717e27fcfa716466072e03e46f7875f1676e",
+      "tinygrad/runtime/ops_hip.py": "5a023a90196ae106a0543f59045bb902425f9b3dca4ca6c67a1741b14afcabb3",
+      "tinygrad/runtime/ops_metal.py": "105ab56af475dd0a86b1e06191fbbdd4613697c257093ba61c5401feeef89e04",
+      "tinygrad/runtime/ops_npy.py": "53de851f9d707e6fceb871914b812c138cd5b1ebb669be02b55115c68266710c",
+      "tinygrad/runtime/ops_null.py": "5e1e53e866d17ab1ccf6116ac11b0283e1b329ee6b215b2e5cf4927dbed38cb1",
+      "tinygrad/runtime/ops_nv.py": "e711ef90bab87f8cd444ca2a10fbb0c9e8a602c22d8fa7c165b746b088314f30",
+      "tinygrad/runtime/ops_python.py": "62decc9aa674b47a578e06bec68d46695920524da27b10fb63da75d420df8d7b",
+      "tinygrad/runtime/ops_qcom.py": "618d7f7c97af087f97d3c5b5d1f720fd9d217a9d2c0485589d7d604b8098663b",
+      "tinygrad/runtime/ops_rdma.py": "e6e0d69734269c6501a5b8439651a0364d90285c4671fa6301c9c54f16737769",
+      "tinygrad/runtime/ops_rockchip.py": "0c01b9090b6b17c41b05a451d3fe389edfc3e620d347a67fd490b8e4b0b3bd5b",
+      "tinygrad/runtime/ops_webgpu.py": "52c7689d7fd2acb9ad1f37ec9ce3dd88a16fa51d6de93b74eb8f637ce3802e15",
+      "tinygrad/runtime/support/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tinygrad/runtime/support/am/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tinygrad/runtime/support/am/amdev.py": "dae42e13b5dbf01cff0fd29767eec3df2f7d86f0d4d78d89b0aa731a7c88c09c",
+      "tinygrad/runtime/support/am/ip.py": "972086c5373e7cd83a2b39d598551840c4a7b3e59cd2f19745581fee287bdede",
+      "tinygrad/runtime/support/amd.py": "3c888308b57f5f9b4922ffb008829610f6333a547c9fd9168f9f770fc6315c10",
+      "tinygrad/runtime/support/autogen.py": "3571a0c1e955e2c7173e3066a79040efb0f333e3302013f28e6d478ccdaf763c",
+      "tinygrad/runtime/support/c.py": "a3113a746068d0d0cd8fdbe18dbe54c20692a2cc85691618cf72dcef1cd801ae",
+      "tinygrad/runtime/support/compiler_amd.py": "230b53fbae926583d6a4a1fa4ea085773924e042496ed786aa8fbc2f8aa6ebec",
+      "tinygrad/runtime/support/compiler_cpu.py": "7980be156006d76fbc0e893154e7fb2900597d0c4d5171b4497a44d888d4fe48",
+      "tinygrad/runtime/support/compiler_cuda.py": "44e2eb882f867db26cb0a0c27716cc5c1000e4a7ea2401d3346d226573078bda",
+      "tinygrad/runtime/support/compiler_llvm.py": "4f4128c0cf88860e5445345139e81d360c7c4189912a67159d6822d2649735e5",
+      "tinygrad/runtime/support/compiler_mesa.py": "2301ed834ceea0798128e765fceff5231ec88851ca73b10a34e423952ae7eee0",
+      "tinygrad/runtime/support/compiler_qcom.py": "9c99f6e4c9e594e44c46846558e66f85d8ca700b73d371e0da54a997f72cfe34",
+      "tinygrad/runtime/support/compileserver.py": "f977fbab9038e6b895174f07c540fb26247137c63c989e373745433cd52157ec",
+      "tinygrad/runtime/support/elf.py": "155aaeb2cfdd748814150feafcb10c1ef34eb01cbd702bdbe5e0c9b03be3f388",
+      "tinygrad/runtime/support/hcq2.py": "08ccbd5ba6d0494af350eb4d8851a15d9ed1e5153cc30e7225439e4380d3bd69",
+      "tinygrad/runtime/support/memory.py": "5cd20a3b98a69caa855a7e660a0a53a64bd969fee282b853a5f68097977a5bcb",
+      "tinygrad/runtime/support/nv/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tinygrad/runtime/support/nv/ip.py": "5ad88909badc5d30ab2527569d791b58ac28d56a8d9019f1e7c43eb764b4fe8a",
+      "tinygrad/runtime/support/nv/nvdev.py": "5329dffaa57b690eb516f0d33a219c552d92dcad3f2af8a5563bc8df2b51073b",
+      "tinygrad/runtime/support/objc.py": "c00586d4e58f14adeb899275ab215dbcb75b9c7a3e8d6210c001fd2941f4628b",
+      "tinygrad/runtime/support/rdma/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tinygrad/runtime/support/rdma/bnxtdev.py": "c682c931db0c51c861ce7016a00d7aad5dc0e88bc8bef930bade4117910660f3",
+      "tinygrad/runtime/support/rockchip_int8.py": "37d3965517e0ebd5ef2a3488c0c84f4e4871ccd76edbeedd2d32a17451db10b3",
+      "tinygrad/runtime/support/system.py": "681f819e98ede6ac6451c0e499fd038eb00cc2e0a25f872e58321a39f38d9869",
+      "tinygrad/runtime/support/usb.py": "d57b34b46593c83edc2674d5e5d71ba9ca495e7009f08e116e06a35352d9b6bc",
+      "tinygrad/schedule/__init__.py": "a72195d925810318695055cc87eb1489811a51cc49d7ad9215bf68e2e92d735d",
+      "tinygrad/schedule/allreduce.py": "d736bb1070049ad4c14e9354a66be534bb6ebdc53e75f80328f2ad4f846a8ea1",
+      "tinygrad/schedule/indexing.py": "44feb97662961d7f350667b61ed33b6575c50d50848f6299adea55c7e3cbd1ab",
+      "tinygrad/schedule/memory.py": "24122dbab59fe1856939520e74fdb3828040ed7652fe897a3fac2d14f45785c6",
+      "tinygrad/schedule/multi.py": "5c88ce3832852af4a583d35bcb5ad6834eaf3d0366bf61e6b242ed6818cb72d0",
+      "tinygrad/schedule/prepare.py": "237d5580d8a0279cf49c875907fdb266e206b21d15d5570c90cdf4b2f2dd0a23",
+      "tinygrad/schedule/rangeify.py": "6af2c0e74f67d8380bbe88e6a186f0caad8641680e9f69bb17208a31cc459918",
+      "tinygrad/tensor.py": "5680ec3b2a716e435ae8f8ca42f39697ed46de7a3d50018a7becb9a368bcc56d",
+      "tinygrad/uop/__init__.py": "22495f25f31b744f0362575fe42f2608a349d4642cba4a2d0a71150f234c7db3",
+      "tinygrad/uop/divandmod.py": "40c04f04dc9057eb17c9680304fb797ce78add201e394736f6558d4e145f075c",
+      "tinygrad/uop/movement.py": "7508947bf142145b2e2ec2234d21ac424cd801ef0acb18bd79a2292c886f7a09",
+      "tinygrad/uop/ops.py": "017e94e1ecfc1ada2cb68f9e71d274dec1d744ee9ffff40ebe324387b7b00bc9",
+      "tinygrad/uop/render.py": "03d3fcad5396a0879cd8f8fcddf04c7abed04b76c7a50f5075554260a1ded89a",
+      "tinygrad/uop/spec.py": "13a8e64ad12f24a4c3806b1bce8e3d04be4478e37d84d82b45ae860e776fd4c6",
+      "tinygrad/uop/symbolic.py": "e552dae03bd8057dd5c7708493bf11e5acbcbd17d03b818d5b9c1770727021c2",
+      "tinygrad/uop/upat.py": "f89095353c93afb851b080aff975f861c070f87cc82aab90df481eade4e8c6bd",
+      "tinygrad/uop/validate.py": "9f0f248f17fb9d31e19e6537cc593d5e3e6a4ee41efc657338efc32dac7eef43",
+      "tinygrad/uop/weak.py": "856defae2c4afe2425cf5c58e2c3b2ef17ee63831c878dcdc298816721a3c97d",
+      "tinygrad/viz/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tinygrad/viz/cli.py": "997ee8b2c57f6f17a3773937432f7931591bdd081c98abfb29174ff5d0c91db9",
+      "tinygrad/viz/serve.py": "77c9b2341762caedaa8e6204bec29b95605119400373c5029480127115fa6d87",
+      "extra/rockchip/benchmark_inference.py": "95f4ebacbf406a2679db04fc098033dc58dd4d47e556b35542f96e2be9831665"
+    },
+    "run_token": "80267ee093100b3719c771095fa1225d",
+    "runner_sha256": "a267cf3784e77df8c2559dff9e1f84da41276c503a8ab58f9a45f3c52324d644",
+    "cases": [
+      {
+        "m": 64,
+        "n": 2112,
+        "k": 1024,
+        "previously_qualified": true,
+        "split_64": false,
+        "checks": [
+          {
+            "step": 0,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "978e7a841a9d5cd9a53e7bd464187f2a1701dcbf201bef778266348833b712d7",
+            "actual_sha256": "978e7a841a9d5cd9a53e7bd464187f2a1701dcbf201bef778266348833b712d7"
+          },
+          {
+            "step": 0,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "978e7a841a9d5cd9a53e7bd464187f2a1701dcbf201bef778266348833b712d7",
+            "actual_sha256": "978e7a841a9d5cd9a53e7bd464187f2a1701dcbf201bef778266348833b712d7"
+          },
+          {
+            "step": 1,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "3aff522d5bb51f62606082f6e19519972956314c07a58f5403e292572a1d2ba7",
+            "actual_sha256": "3aff522d5bb51f62606082f6e19519972956314c07a58f5403e292572a1d2ba7"
+          },
+          {
+            "step": 1,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "3aff522d5bb51f62606082f6e19519972956314c07a58f5403e292572a1d2ba7",
+            "actual_sha256": "3aff522d5bb51f62606082f6e19519972956314c07a58f5403e292572a1d2ba7"
+          },
+          {
+            "step": 2,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "11a1af9b4a66041de821d0313105baf38e521a1e90834410eed05e3870e434a1",
+            "actual_sha256": "11a1af9b4a66041de821d0313105baf38e521a1e90834410eed05e3870e434a1"
+          },
+          {
+            "step": 2,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "11a1af9b4a66041de821d0313105baf38e521a1e90834410eed05e3870e434a1",
+            "actual_sha256": "11a1af9b4a66041de821d0313105baf38e521a1e90834410eed05e3870e434a1"
+          },
+          {
+            "step": 3,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "740d47af8196e8494dc1140629fe30ef3ffad49bce8e6cd5cbf509845451c5b0",
+            "actual_sha256": "740d47af8196e8494dc1140629fe30ef3ffad49bce8e6cd5cbf509845451c5b0"
+          },
+          {
+            "step": 3,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "740d47af8196e8494dc1140629fe30ef3ffad49bce8e6cd5cbf509845451c5b0",
+            "actual_sha256": "740d47af8196e8494dc1140629fe30ef3ffad49bce8e6cd5cbf509845451c5b0"
+          },
+          {
+            "step": 4,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "f03c0e804688d3984b722e821ba97708db95291cd6ca57b11c921721db3e4f1c",
+            "actual_sha256": "f03c0e804688d3984b722e821ba97708db95291cd6ca57b11c921721db3e4f1c"
+          },
+          {
+            "step": 4,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "f03c0e804688d3984b722e821ba97708db95291cd6ca57b11c921721db3e4f1c",
+            "actual_sha256": "f03c0e804688d3984b722e821ba97708db95291cd6ca57b11c921721db3e4f1c"
+          },
+          {
+            "step": 5,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "8968e76ee835191ede561a57be7bdac5dd100c05db328cc5a964e46a649b562e",
+            "actual_sha256": "8968e76ee835191ede561a57be7bdac5dd100c05db328cc5a964e46a649b562e"
+          },
+          {
+            "step": 5,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "8968e76ee835191ede561a57be7bdac5dd100c05db328cc5a964e46a649b562e",
+            "actual_sha256": "8968e76ee835191ede561a57be7bdac5dd100c05db328cc5a964e46a649b562e"
+          },
+          {
+            "step": 6,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "0a51fac3f5cf4491373c676815751c10ce22b0b603c1be5e3b368aaed9a39d01",
+            "actual_sha256": "0a51fac3f5cf4491373c676815751c10ce22b0b603c1be5e3b368aaed9a39d01"
+          },
+          {
+            "step": 6,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "0a51fac3f5cf4491373c676815751c10ce22b0b603c1be5e3b368aaed9a39d01",
+            "actual_sha256": "0a51fac3f5cf4491373c676815751c10ce22b0b603c1be5e3b368aaed9a39d01"
+          }
+        ],
+        "times_ns": {
+          "control": [
+            1348649,
+            1170442,
+            1191733,
+            1083236,
+            1096360,
+            1123484,
+            1206900,
+            1140401,
+            1209817,
+            1161692,
+            1334065,
+            1268150,
+            1157901,
+            1120568,
+            1124068,
+            1126984,
+            1271649,
+            1176859,
+            1133984,
+            1131359,
+            1089360,
+            1127860,
+            1136610,
+            1108610,
+            1142443,
+            1197276,
+            1227317,
+            1131359,
+            1255316,
+            1185900,
+            1177442,
+            1088485,
+            1097526,
+            1082360,
+            1181526,
+            1129609,
+            1103943,
+            1147401,
+            1101318,
+            1202817
+          ],
+          "candidate": [
+            1334940,
+            1278649,
+            1332315,
+            1205442,
+            1128735,
+            1162860,
+            1147401,
+            1234316,
+            1193484,
+            1136318,
+            1261733,
+            1268149,
+            1181817,
+            1112110,
+            1115026,
+            1114443,
+            1212150,
+            1114443,
+            1134568,
+            1119402,
+            1102485,
+            1079735,
+            1260858,
+            1281858,
+            1267858,
+            1296149,
+            1244233,
+            1287982,
+            1243358,
+            1254442,
+            1157318,
+            1194650,
+            1090527,
+            1129318,
+            1089068,
+            1149734,
+            1112402,
+            1072443,
+            1092860,
+            1188234
+          ]
+        },
+        "complete": true,
+        "integer_and_float_valid": true,
+        "native_labels": {
+          "control": [
+            "CPU:rockchip_quantize",
+            "COPY:CPU->ROCKCHIP",
+            "ROCKCHIP:rockchip_int8_64_2112_1024",
+            "COPY:ROCKCHIP->CPU",
+            "CPU:rockchip_dequantize"
+          ],
+          "candidate": [
+            "CPU:rockchip_quantize_sdk",
+            "COPY:CPU->ROCKCHIP",
+            "ROCKCHIP:rockchip_int8_64_2112_1024_sdk",
+            "COPY:ROCKCHIP->CPU",
+            "CPU:rockchip_dequantize"
+          ]
+        },
+        "steady_allocations": 0,
+        "paired_speedup_median": 0.9894056289671453,
+        "paired_blocks_faster": 9,
+        "median_ms": {
+          "control": 1.141422,
+          "candidate": 1.1723385
+        },
+        "diagnostic_profile": {
+          "control": [
+            {
+              "name": "CPU:rockchip_quantize",
+              "ms": 0.104123,
+              "calls": 1
+            },
+            {
+              "name": "COPY:CPU->ROCKCHIP",
+              "ms": 0.019833,
+              "calls": 1
+            },
+            {
+              "name": "ROCKCHIP:rockchip_int8_64_2112_1024",
+              "ms": 0.584784,
+              "calls": 1
+            },
+            {
+              "name": "COPY:ROCKCHIP->CPU",
+              "ms": 0.162164,
+              "calls": 1
+            },
+            {
+              "name": "CPU:rockchip_dequantize",
+              "ms": 0.134165,
+              "calls": 1
+            }
+          ],
+          "candidate": [
+            {
+              "name": "CPU:rockchip_quantize_sdk",
+              "ms": 0.115498,
+              "calls": 1
+            },
+            {
+              "name": "COPY:CPU->ROCKCHIP",
+              "ms": 0.030333,
+              "calls": 1
+            },
+            {
+              "name": "ROCKCHIP:rockchip_int8_64_2112_1024_sdk",
+              "ms": 0.538993,
+              "calls": 1
+            },
+            {
+              "name": "COPY:ROCKCHIP->CPU",
+              "ms": 0.172372,
+              "calls": 1
+            },
+            {
+              "name": "CPU:rockchip_dequantize",
+              "ms": 0.156623,
+              "calls": 1
+            }
+          ]
+        }
+      },
+      {
+        "m": 64,
+        "n": 3072,
+        "k": 2048,
+        "previously_qualified": true,
+        "split_64": false,
+        "checks": [
+          {
+            "step": 0,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "d18a80a347acf087e2d713ea0b545e06502a0547c6a0ade5066bc76e0ea9a9c7",
+            "actual_sha256": "d18a80a347acf087e2d713ea0b545e06502a0547c6a0ade5066bc76e0ea9a9c7"
+          },
+          {
+            "step": 0,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "d18a80a347acf087e2d713ea0b545e06502a0547c6a0ade5066bc76e0ea9a9c7",
+            "actual_sha256": "d18a80a347acf087e2d713ea0b545e06502a0547c6a0ade5066bc76e0ea9a9c7"
+          },
+          {
+            "step": 1,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "4005ea6bbda2ed1ba7c0a9d028ae2aef7b1c6d092fd995b48c7f3edbb098f45d",
+            "actual_sha256": "4005ea6bbda2ed1ba7c0a9d028ae2aef7b1c6d092fd995b48c7f3edbb098f45d"
+          },
+          {
+            "step": 1,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "4005ea6bbda2ed1ba7c0a9d028ae2aef7b1c6d092fd995b48c7f3edbb098f45d",
+            "actual_sha256": "4005ea6bbda2ed1ba7c0a9d028ae2aef7b1c6d092fd995b48c7f3edbb098f45d"
+          },
+          {
+            "step": 2,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "c049a2b043d37c60053d51e81e4b5ccb597fc39f40ac073112b0589ac661a3d7",
+            "actual_sha256": "c049a2b043d37c60053d51e81e4b5ccb597fc39f40ac073112b0589ac661a3d7"
+          },
+          {
+            "step": 2,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "c049a2b043d37c60053d51e81e4b5ccb597fc39f40ac073112b0589ac661a3d7",
+            "actual_sha256": "c049a2b043d37c60053d51e81e4b5ccb597fc39f40ac073112b0589ac661a3d7"
+          },
+          {
+            "step": 3,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "b4fe9437444ccc32de07c1383267a6a93d8ab5faeded120b3d6013112b71dc89",
+            "actual_sha256": "b4fe9437444ccc32de07c1383267a6a93d8ab5faeded120b3d6013112b71dc89"
+          },
+          {
+            "step": 3,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "b4fe9437444ccc32de07c1383267a6a93d8ab5faeded120b3d6013112b71dc89",
+            "actual_sha256": "b4fe9437444ccc32de07c1383267a6a93d8ab5faeded120b3d6013112b71dc89"
+          },
+          {
+            "step": 4,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "4e4c6733d30c406ca74f59f378062cd3bdf4af4ab7fa589e727f84f5af9f30f8",
+            "actual_sha256": "4e4c6733d30c406ca74f59f378062cd3bdf4af4ab7fa589e727f84f5af9f30f8"
+          },
+          {
+            "step": 4,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "4e4c6733d30c406ca74f59f378062cd3bdf4af4ab7fa589e727f84f5af9f30f8",
+            "actual_sha256": "4e4c6733d30c406ca74f59f378062cd3bdf4af4ab7fa589e727f84f5af9f30f8"
+          },
+          {
+            "step": 5,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "45fcff74b7c4d38400aef9eb593ff1572cfcd071af6c124a4c0b83d94a8ca4c0",
+            "actual_sha256": "45fcff74b7c4d38400aef9eb593ff1572cfcd071af6c124a4c0b83d94a8ca4c0"
+          },
+          {
+            "step": 5,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "45fcff74b7c4d38400aef9eb593ff1572cfcd071af6c124a4c0b83d94a8ca4c0",
+            "actual_sha256": "45fcff74b7c4d38400aef9eb593ff1572cfcd071af6c124a4c0b83d94a8ca4c0"
+          },
+          {
+            "step": 6,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "c03c4472012c43066303a3ff113c2e3a0c939657f61273fcfecf53f58e77c176",
+            "actual_sha256": "c03c4472012c43066303a3ff113c2e3a0c939657f61273fcfecf53f58e77c176"
+          },
+          {
+            "step": 6,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "c03c4472012c43066303a3ff113c2e3a0c939657f61273fcfecf53f58e77c176",
+            "actual_sha256": "c03c4472012c43066303a3ff113c2e3a0c939657f61273fcfecf53f58e77c176"
+          }
+        ],
+        "times_ns": {
+          "control": [
+            1669477,
+            1646727,
+            1642644,
+            1628352,
+            1588979,
+            1670061,
+            1580228,
+            1554562,
+            1535604,
+            1529188,
+            1537646,
+            1557478,
+            1560979,
+            1621644,
+            1560104,
+            1431480,
+            1476688,
+            1546104,
+            1543479,
+            1637978,
+            1017319,
+            1042402,
+            906196,
+            878196,
+            890738,
+            907071,
+            899196,
+            879363,
+            1024319,
+            1017903,
+            1009445,
+            1034236,
+            1032194,
+            912905,
+            905321,
+            913488,
+            934779,
+            905905,
+            952862,
+            1018194
+          ],
+          "candidate": [
+            1449856,
+            1537354,
+            1539396,
+            1477564,
+            1403772,
+            1385689,
+            1391523,
+            1390940,
+            1392690,
+            1341940,
+            1336981,
+            1356524,
+            1385981,
+            1339607,
+            1396773,
+            1370814,
+            1477855,
+            1284774,
+            1456564,
+            1064568,
+            1218567,
+            975904,
+            824239,
+            806447,
+            813156,
+            800905,
+            875571,
+            1057860,
+            951695,
+            923987,
+            948779,
+            956362,
+            967737,
+            828322,
+            801781,
+            853113,
+            858072,
+            828322,
+            792739,
+            992820
+          ]
+        },
+        "complete": true,
+        "integer_and_float_valid": true,
+        "native_labels": {
+          "control": [
+            "CPU:rockchip_quantize",
+            "COPY:CPU->ROCKCHIP",
+            "ROCKCHIP:rockchip_int8_64_3072_2048",
+            "COPY:ROCKCHIP->CPU",
+            "CPU:rockchip_dequantize"
+          ],
+          "candidate": [
+            "CPU:rockchip_quantize_sdk",
+            "COPY:CPU->ROCKCHIP",
+            "ROCKCHIP:rockchip_int8_64_3072_2048_sdk",
+            "COPY:ROCKCHIP->CPU",
+            "CPU:rockchip_dequantize"
+          ]
+        },
+        "steady_allocations": 0,
+        "paired_speedup_median": 1.096653564979256,
+        "paired_blocks_faster": 18,
+        "median_ms": {
+          "control": 1.236941,
+          "candidate": 1.1415675
+        },
+        "diagnostic_profile": {
+          "control": [
+            {
+              "name": "CPU:rockchip_quantize",
+              "ms": 0.101791,
+              "calls": 1
+            },
+            {
+              "name": "COPY:CPU->ROCKCHIP",
+              "ms": 0.016041,
+              "calls": 1
+            },
+            {
+              "name": "ROCKCHIP:rockchip_int8_64_3072_2048",
+              "ms": 0.761823,
+              "calls": 1
+            },
+            {
+              "name": "COPY:ROCKCHIP->CPU",
+              "ms": 0.139707,
+              "calls": 1
+            },
+            {
+              "name": "CPU:rockchip_dequantize",
+              "ms": 0.134165,
+              "calls": 1
+            }
+          ],
+          "candidate": [
+            {
+              "name": "CPU:rockchip_quantize_sdk",
+              "ms": 0.172081,
+              "calls": 1
+            },
+            {
+              "name": "COPY:CPU->ROCKCHIP",
+              "ms": 0.050166,
+              "calls": 1
+            },
+            {
+              "name": "ROCKCHIP:rockchip_int8_64_3072_2048_sdk",
+              "ms": 1.532979,
+              "calls": 1
+            },
+            {
+              "name": "COPY:ROCKCHIP->CPU",
+              "ms": 0.247914,
+              "calls": 1
+            },
+            {
+              "name": "CPU:rockchip_dequantize",
+              "ms": 0.284079,
+              "calls": 1
+            }
+          ]
+        }
+      },
+      {
+        "m": 128,
+        "n": 3072,
+        "k": 1024,
+        "previously_qualified": true,
+        "split_64": false,
+        "checks": [
+          {
+            "step": 0,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "679a141aa843ea93459ea47df2aaeea35d1e40f567c46175e073a57a007decea",
+            "actual_sha256": "679a141aa843ea93459ea47df2aaeea35d1e40f567c46175e073a57a007decea"
+          },
+          {
+            "step": 0,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "679a141aa843ea93459ea47df2aaeea35d1e40f567c46175e073a57a007decea",
+            "actual_sha256": "679a141aa843ea93459ea47df2aaeea35d1e40f567c46175e073a57a007decea"
+          },
+          {
+            "step": 1,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "b299ab7d049073dac80528ca9df286ccada56e3868a6b2d6ca2bb502407d399b",
+            "actual_sha256": "b299ab7d049073dac80528ca9df286ccada56e3868a6b2d6ca2bb502407d399b"
+          },
+          {
+            "step": 1,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "b299ab7d049073dac80528ca9df286ccada56e3868a6b2d6ca2bb502407d399b",
+            "actual_sha256": "b299ab7d049073dac80528ca9df286ccada56e3868a6b2d6ca2bb502407d399b"
+          },
+          {
+            "step": 2,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "55f352923e7afffdcba78b5a5e4d12a9d30d836a1893419cf16aefac9a9adfa1",
+            "actual_sha256": "55f352923e7afffdcba78b5a5e4d12a9d30d836a1893419cf16aefac9a9adfa1"
+          },
+          {
+            "step": 2,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "55f352923e7afffdcba78b5a5e4d12a9d30d836a1893419cf16aefac9a9adfa1",
+            "actual_sha256": "55f352923e7afffdcba78b5a5e4d12a9d30d836a1893419cf16aefac9a9adfa1"
+          },
+          {
+            "step": 3,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "17fde10d9cd4c08ffcf5d1d6a91315cefd5ae11b6c67587fcd9fe7ff5f0c85a6",
+            "actual_sha256": "17fde10d9cd4c08ffcf5d1d6a91315cefd5ae11b6c67587fcd9fe7ff5f0c85a6"
+          },
+          {
+            "step": 3,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "17fde10d9cd4c08ffcf5d1d6a91315cefd5ae11b6c67587fcd9fe7ff5f0c85a6",
+            "actual_sha256": "17fde10d9cd4c08ffcf5d1d6a91315cefd5ae11b6c67587fcd9fe7ff5f0c85a6"
+          },
+          {
+            "step": 4,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "efe6073969e812f3235f612f0651433e52a5cc538d3d4dd5576059d0bd46e244",
+            "actual_sha256": "efe6073969e812f3235f612f0651433e52a5cc538d3d4dd5576059d0bd46e244"
+          },
+          {
+            "step": 4,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "efe6073969e812f3235f612f0651433e52a5cc538d3d4dd5576059d0bd46e244",
+            "actual_sha256": "efe6073969e812f3235f612f0651433e52a5cc538d3d4dd5576059d0bd46e244"
+          },
+          {
+            "step": 5,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "86f64f0cd0a1ebbadad03b61ba32deaee8f0cf935ef009c2fad55c852ff57fe7",
+            "actual_sha256": "86f64f0cd0a1ebbadad03b61ba32deaee8f0cf935ef009c2fad55c852ff57fe7"
+          },
+          {
+            "step": 5,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "86f64f0cd0a1ebbadad03b61ba32deaee8f0cf935ef009c2fad55c852ff57fe7",
+            "actual_sha256": "86f64f0cd0a1ebbadad03b61ba32deaee8f0cf935ef009c2fad55c852ff57fe7"
+          },
+          {
+            "step": 6,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "573dea0113c8f0f04a0ec794d409402057260d7d64f96ecfcc7fe1fa2b2c6745",
+            "actual_sha256": "573dea0113c8f0f04a0ec794d409402057260d7d64f96ecfcc7fe1fa2b2c6745"
+          },
+          {
+            "step": 6,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "573dea0113c8f0f04a0ec794d409402057260d7d64f96ecfcc7fe1fa2b2c6745",
+            "actual_sha256": "573dea0113c8f0f04a0ec794d409402057260d7d64f96ecfcc7fe1fa2b2c6745"
+          }
+        ],
+        "times_ns": {
+          "control": [
+            2337676,
+            2308218,
+            2223344,
+            2131763,
+            2203803,
+            2090930,
+            2023264,
+            1812392,
+            2198553,
+            2264177,
+            2426050,
+            2082764,
+            2305010,
+            2475633,
+            2288969,
+            2150720,
+            2039597,
+            2254844,
+            2340884,
+            2015681,
+            2214303,
+            2371801,
+            2442675,
+            2284303,
+            2302093,
+            2301510,
+            2235303,
+            2075180,
+            2142262,
+            2267094,
+            2440341,
+            2212845,
+            2226845,
+            2282261,
+            2152179,
+            2118638,
+            2174054,
+            2288677,
+            1974557,
+            2134388
+          ],
+          "candidate": [
+            2181637,
+            2028222,
+            2218387,
+            2269135,
+            2349926,
+            2260094,
+            2005764,
+            2120680,
+            2139346,
+            2147804,
+            2639547,
+            2129721,
+            2310552,
+            2180178,
+            2327760,
+            2193304,
+            2317844,
+            2237636,
+            2213429,
+            2403009,
+            2125638,
+            2237637,
+            2423133,
+            2381134,
+            2229178,
+            2351968,
+            2312010,
+            2121554,
+            2063805,
+            2082764,
+            2134971,
+            2277594,
+            2229178,
+            2078389,
+            2176970,
+            2234719,
+            2223053,
+            2144304,
+            2085097,
+            2069347
+          ]
+        },
+        "complete": true,
+        "integer_and_float_valid": true,
+        "native_labels": {
+          "control": [
+            "CPU:rockchip_quantize",
+            "COPY:CPU->ROCKCHIP",
+            "ROCKCHIP:rockchip_int8_128_3072_1024",
+            "COPY:ROCKCHIP->CPU",
+            "CPU:rockchip_dequantize"
+          ],
+          "candidate": [
+            "CPU:rockchip_quantize_sdk",
+            "COPY:CPU->ROCKCHIP",
+            "ROCKCHIP:rockchip_int8_128_3072_1024_sdk",
+            "COPY:ROCKCHIP->CPU",
+            "CPU:rockchip_dequantize"
+          ]
+        },
+        "steady_allocations": 0,
+        "paired_speedup_median": 0.9864802697401396,
+        "paired_blocks_faster": 9,
+        "median_ms": {
+          "control": 2.2250945,
+          "candidate": 2.215908
+        },
+        "diagnostic_profile": {
+          "control": [
+            {
+              "name": "CPU:rockchip_quantize",
+              "ms": 0.45616,
+              "calls": 1
+            },
+            {
+              "name": "COPY:CPU->ROCKCHIP",
+              "ms": 0.025666,
+              "calls": 1
+            },
+            {
+              "name": "ROCKCHIP:rockchip_int8_128_3072_1024",
+              "ms": 1.064861,
+              "calls": 1
+            },
+            {
+              "name": "COPY:ROCKCHIP->CPU",
+              "ms": 0.284954,
+              "calls": 1
+            },
+            {
+              "name": "CPU:rockchip_dequantize",
+              "ms": 0.386745,
+              "calls": 1
+            }
+          ],
+          "candidate": [
+            {
+              "name": "CPU:rockchip_quantize_sdk",
+              "ms": 0.466952,
+              "calls": 1
+            },
+            {
+              "name": "COPY:CPU->ROCKCHIP",
+              "ms": 0.031791,
+              "calls": 1
+            },
+            {
+              "name": "ROCKCHIP:rockchip_int8_128_3072_1024_sdk",
+              "ms": 0.973862,
+              "calls": 1
+            },
+            {
+              "name": "COPY:ROCKCHIP->CPU",
+              "ms": 0.289912,
+              "calls": 1
+            },
+            {
+              "name": "CPU:rockchip_dequantize",
+              "ms": 0.553868,
+              "calls": 1
+            }
+          ]
+        }
+      },
+      {
+        "m": 128,
+        "n": 2048,
+        "k": 1024,
+        "previously_qualified": false,
+        "split_64": false,
+        "checks": [
+          {
+            "step": 0,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "e2e5a6973c2e6b53d1668ee13024ba2ef5b48e4545fb0196a1f8cb01d5e9d466",
+            "actual_sha256": "e2e5a6973c2e6b53d1668ee13024ba2ef5b48e4545fb0196a1f8cb01d5e9d466"
+          },
+          {
+            "step": 0,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "e2e5a6973c2e6b53d1668ee13024ba2ef5b48e4545fb0196a1f8cb01d5e9d466",
+            "actual_sha256": "e2e5a6973c2e6b53d1668ee13024ba2ef5b48e4545fb0196a1f8cb01d5e9d466"
+          },
+          {
+            "step": 1,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "0a775cfbaa0243e0113b475067800cd631d97cc8d72b8b7e287b54fdaab2f9aa",
+            "actual_sha256": "0a775cfbaa0243e0113b475067800cd631d97cc8d72b8b7e287b54fdaab2f9aa"
+          },
+          {
+            "step": 1,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "0a775cfbaa0243e0113b475067800cd631d97cc8d72b8b7e287b54fdaab2f9aa",
+            "actual_sha256": "0a775cfbaa0243e0113b475067800cd631d97cc8d72b8b7e287b54fdaab2f9aa"
+          },
+          {
+            "step": 2,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "ff502b24c7bb42ba0752ec3b79ec3acfa3fef5e6e68dfff47838ffd99eb6086f",
+            "actual_sha256": "ff502b24c7bb42ba0752ec3b79ec3acfa3fef5e6e68dfff47838ffd99eb6086f"
+          },
+          {
+            "step": 2,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "ff502b24c7bb42ba0752ec3b79ec3acfa3fef5e6e68dfff47838ffd99eb6086f",
+            "actual_sha256": "ff502b24c7bb42ba0752ec3b79ec3acfa3fef5e6e68dfff47838ffd99eb6086f"
+          },
+          {
+            "step": 3,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "f1a6fc14d31440ce7ed619d690987017e58610685299a00cec2698c26318703b",
+            "actual_sha256": "f1a6fc14d31440ce7ed619d690987017e58610685299a00cec2698c26318703b"
+          },
+          {
+            "step": 3,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "f1a6fc14d31440ce7ed619d690987017e58610685299a00cec2698c26318703b",
+            "actual_sha256": "f1a6fc14d31440ce7ed619d690987017e58610685299a00cec2698c26318703b"
+          },
+          {
+            "step": 4,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "ff56b1f5a61821bb81c6e9d714c92c8888a89849591033f8c11baa037a75bcc8",
+            "actual_sha256": "ff56b1f5a61821bb81c6e9d714c92c8888a89849591033f8c11baa037a75bcc8"
+          },
+          {
+            "step": 4,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "ff56b1f5a61821bb81c6e9d714c92c8888a89849591033f8c11baa037a75bcc8",
+            "actual_sha256": "ff56b1f5a61821bb81c6e9d714c92c8888a89849591033f8c11baa037a75bcc8"
+          },
+          {
+            "step": 5,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "ff5351c72a397cbb863fc1f1f70e869379860a9081371442c44cb116c32cb6db",
+            "actual_sha256": "ff5351c72a397cbb863fc1f1f70e869379860a9081371442c44cb116c32cb6db"
+          },
+          {
+            "step": 5,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "ff5351c72a397cbb863fc1f1f70e869379860a9081371442c44cb116c32cb6db",
+            "actual_sha256": "ff5351c72a397cbb863fc1f1f70e869379860a9081371442c44cb116c32cb6db"
+          },
+          {
+            "step": 6,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "5eed2cbdd09c09f13951a0abe99d3eea8ce004326d7d08d1f368ca8c0c87a041",
+            "actual_sha256": "5eed2cbdd09c09f13951a0abe99d3eea8ce004326d7d08d1f368ca8c0c87a041"
+          },
+          {
+            "step": 6,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "5eed2cbdd09c09f13951a0abe99d3eea8ce004326d7d08d1f368ca8c0c87a041",
+            "actual_sha256": "5eed2cbdd09c09f13951a0abe99d3eea8ce004326d7d08d1f368ca8c0c87a041"
+          }
+        ],
+        "times_ns": {
+          "control": [
+            1132818,
+            1160235,
+            1153526,
+            1043278,
+            1196692,
+            1300524,
+            1281566,
+            1199900,
+            1136610,
+            1199609,
+            1466189,
+            1451605,
+            1378398,
+            1360606,
+            1300232,
+            1291191,
+            1155859,
+            1151775,
+            1130193,
+            1095777,
+            1109193,
+            1147109,
+            1156442,
+            1255024,
+            2172595,
+            1419231,
+            1756101,
+            1447813,
+            1285066,
+            846405,
+            872654,
+            830655,
+            762989,
+            758032,
+            770281,
+            727699,
+            820739,
+            808489,
+            837072,
+            802656
+          ],
+          "candidate": [
+            1293233,
+            1197567,
+            1271358,
+            1404064,
+            1404648,
+            1431772,
+            1456271,
+            1470563,
+            1306066,
+            1277774,
+            1543770,
+            1658102,
+            1527730,
+            1463271,
+            1490105,
+            1497105,
+            1331149,
+            1439647,
+            1332899,
+            1327941,
+            1320649,
+            1247733,
+            1499146,
+            1668311,
+            1909224,
+            1591895,
+            1638561,
+            1798684,
+            987278,
+            881405,
+            905613,
+            884321,
+            810823,
+            808781,
+            806739,
+            863030,
+            917862,
+            852822,
+            900071,
+            900946
+          ]
+        },
+        "complete": true,
+        "integer_and_float_valid": true,
+        "native_labels": {
+          "control": [
+            "CPU:rockchip_quantize",
+            "COPY:CPU->ROCKCHIP",
+            "ROCKCHIP:rockchip_int8_128_2048_1024",
+            "COPY:ROCKCHIP->CPU",
+            "CPU:rockchip_dequantize"
+          ],
+          "candidate": [
+            "CPU:rockchip_quantize_sdk",
+            "COPY:CPU->ROCKCHIP",
+            "ROCKCHIP:rockchip_int8_128_2048_1024_sdk",
+            "COPY:ROCKCHIP->CPU",
+            "CPU:rockchip_dequantize"
+          ]
+        },
+        "steady_allocations": 0,
+        "paired_speedup_median": 0.9073055519205291,
+        "paired_blocks_faster": 2,
+        "median_ms": {
+          "control": 1.1546925,
+          "candidate": 1.329545
+        },
+        "diagnostic_profile": {
+          "control": [
+            {
+              "name": "CPU:rockchip_quantize",
+              "ms": 0.10354,
+              "calls": 1
+            },
+            {
+              "name": "COPY:CPU->ROCKCHIP",
+              "ms": 0.014875,
+              "calls": 1
+            },
+            {
+              "name": "ROCKCHIP:rockchip_int8_128_2048_1024",
+              "ms": 0.339204,
+              "calls": 1
+            },
+            {
+              "name": "COPY:ROCKCHIP->CPU",
+              "ms": 0.144664,
+              "calls": 1
+            },
+            {
+              "name": "CPU:rockchip_dequantize",
+              "ms": 0.125707,
+              "calls": 1
+            }
+          ],
+          "candidate": [
+            {
+              "name": "CPU:rockchip_quantize_sdk",
+              "ms": 0.508076,
+              "calls": 1
+            },
+            {
+              "name": "COPY:CPU->ROCKCHIP",
+              "ms": 0.046375,
+              "calls": 1
+            },
+            {
+              "name": "ROCKCHIP:rockchip_int8_128_2048_1024_sdk",
+              "ms": 1.240149,
+              "calls": 1
+            },
+            {
+              "name": "COPY:ROCKCHIP->CPU",
+              "ms": 0.325204,
+              "calls": 1
+            },
+            {
+              "name": "CPU:rockchip_dequantize",
+              "ms": 0.5947,
+              "calls": 1
+            }
+          ]
+        }
+      },
+      {
+        "m": 128,
+        "n": 2304,
+        "k": 1024,
+        "previously_qualified": false,
+        "split_64": false,
+        "checks": [
+          {
+            "step": 0,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "6ced42166a9351d66f998ab542e071a2d00d4bd09af7db7fe1d85b082a40e251",
+            "actual_sha256": "6ced42166a9351d66f998ab542e071a2d00d4bd09af7db7fe1d85b082a40e251"
+          },
+          {
+            "step": 0,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "6ced42166a9351d66f998ab542e071a2d00d4bd09af7db7fe1d85b082a40e251",
+            "actual_sha256": "6ced42166a9351d66f998ab542e071a2d00d4bd09af7db7fe1d85b082a40e251"
+          },
+          {
+            "step": 1,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "6b373f2eaf28869a116d73b35c5126929deb9048509158eaab680b5e1e10be88",
+            "actual_sha256": "6b373f2eaf28869a116d73b35c5126929deb9048509158eaab680b5e1e10be88"
+          },
+          {
+            "step": 1,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "6b373f2eaf28869a116d73b35c5126929deb9048509158eaab680b5e1e10be88",
+            "actual_sha256": "6b373f2eaf28869a116d73b35c5126929deb9048509158eaab680b5e1e10be88"
+          },
+          {
+            "step": 2,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "a0d30f634b0923b368888a9832a87249fdbd941ff88bd75c8815b7d28cbeb056",
+            "actual_sha256": "a0d30f634b0923b368888a9832a87249fdbd941ff88bd75c8815b7d28cbeb056"
+          },
+          {
+            "step": 2,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "a0d30f634b0923b368888a9832a87249fdbd941ff88bd75c8815b7d28cbeb056",
+            "actual_sha256": "a0d30f634b0923b368888a9832a87249fdbd941ff88bd75c8815b7d28cbeb056"
+          },
+          {
+            "step": 3,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "98f4d4cca57f1fd0116a9863ca63e9065860ba3bba30169e947941bf0efcbe3a",
+            "actual_sha256": "98f4d4cca57f1fd0116a9863ca63e9065860ba3bba30169e947941bf0efcbe3a"
+          },
+          {
+            "step": 3,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "98f4d4cca57f1fd0116a9863ca63e9065860ba3bba30169e947941bf0efcbe3a",
+            "actual_sha256": "98f4d4cca57f1fd0116a9863ca63e9065860ba3bba30169e947941bf0efcbe3a"
+          },
+          {
+            "step": 4,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "2442ccc2e4106c6907b404d8f1a341ceb2d3572a787e3c661a14e9d8fb679f31",
+            "actual_sha256": "2442ccc2e4106c6907b404d8f1a341ceb2d3572a787e3c661a14e9d8fb679f31"
+          },
+          {
+            "step": 4,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "2442ccc2e4106c6907b404d8f1a341ceb2d3572a787e3c661a14e9d8fb679f31",
+            "actual_sha256": "2442ccc2e4106c6907b404d8f1a341ceb2d3572a787e3c661a14e9d8fb679f31"
+          },
+          {
+            "step": 5,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "0e56558f965cbcf33863e50cbf32f05ede6c46ebd05f28153c8ce4b73a40c3ab",
+            "actual_sha256": "0e56558f965cbcf33863e50cbf32f05ede6c46ebd05f28153c8ce4b73a40c3ab"
+          },
+          {
+            "step": 5,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "0e56558f965cbcf33863e50cbf32f05ede6c46ebd05f28153c8ce4b73a40c3ab",
+            "actual_sha256": "0e56558f965cbcf33863e50cbf32f05ede6c46ebd05f28153c8ce4b73a40c3ab"
+          },
+          {
+            "step": 6,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "3ee678cc21fcced076bd5d5e9706693c77c1ad0adbfb1fae5d1a61a6b547b6af",
+            "actual_sha256": "3ee678cc21fcced076bd5d5e9706693c77c1ad0adbfb1fae5d1a61a6b547b6af"
+          },
+          {
+            "step": 6,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "3ee678cc21fcced076bd5d5e9706693c77c1ad0adbfb1fae5d1a61a6b547b6af",
+            "actual_sha256": "3ee678cc21fcced076bd5d5e9706693c77c1ad0adbfb1fae5d1a61a6b547b6af"
+          }
+        ],
+        "times_ns": {
+          "control": [
+            1600061,
+            1512271,
+            1436439,
+            1440231,
+            1405523,
+            1408731,
+            1330857,
+            1292941,
+            1531229,
+            1505854,
+            1507313,
+            1418064,
+            1480771,
+            1390648,
+            1471147,
+            1437605,
+            1399981,
+            1417481,
+            1385981,
+            1235192,
+            1340482,
+            1449272,
+            1457147,
+            1542896,
+            1553687,
+            1448980,
+            1068068,
+            863614,
+            1035403,
+            1043861,
+            1064569,
+            1010902,
+            1326482,
+            908529,
+            890154,
+            849905,
+            899488,
+            1103068,
+            1063694,
+            971237
+          ],
+          "candidate": [
+            1754351,
+            1673269,
+            1678227,
+            1682894,
+            1541729,
+            1480480,
+            1508479,
+            1624562,
+            1701852,
+            1706518,
+            1783809,
+            1612312,
+            1644395,
+            1542603,
+            1653728,
+            1670935,
+            1680852,
+            1649644,
+            1525687,
+            1538521,
+            1505854,
+            1681144,
+            1908057,
+            1720227,
+            1596561,
+            1693102,
+            1642936,
+            1145067,
+            1195525,
+            1195234,
+            1182692,
+            1179192,
+            1093444,
+            1005070,
+            996029,
+            1018195,
+            983778,
+            1008278,
+            1206900,
+            1148860
+          ]
+        },
+        "complete": true,
+        "integer_and_float_valid": true,
+        "native_labels": {
+          "control": [
+            "CPU:rockchip_quantize",
+            "COPY:CPU->ROCKCHIP",
+            "ROCKCHIP:rockchip_int8_128_2304_1024",
+            "COPY:ROCKCHIP->CPU",
+            "CPU:rockchip_dequantize"
+          ],
+          "candidate": [
+            "CPU:rockchip_quantize_sdk",
+            "COPY:CPU->ROCKCHIP",
+            "ROCKCHIP:rockchip_int8_128_2304_1024_sdk",
+            "COPY:ROCKCHIP->CPU",
+            "CPU:rockchip_dequantize"
+          ]
+        },
+        "steady_allocations": 0,
+        "paired_speedup_median": 0.8723050234090475,
+        "paired_blocks_faster": 2,
+        "median_ms": {
+          "control": 1.3953145,
+          "candidate": 1.569582
+        },
+        "diagnostic_profile": {
+          "control": [
+            {
+              "name": "CPU:rockchip_quantize",
+              "ms": 0.114624,
+              "calls": 1
+            },
+            {
+              "name": "COPY:CPU->ROCKCHIP",
+              "ms": 0.013999,
+              "calls": 1
+            },
+            {
+              "name": "ROCKCHIP:rockchip_int8_128_2304_1024",
+              "ms": 0.592659,
+              "calls": 1
+            },
+            {
+              "name": "COPY:ROCKCHIP->CPU",
+              "ms": 0.328704,
+              "calls": 1
+            },
+            {
+              "name": "CPU:rockchip_dequantize",
+              "ms": 0.306537,
+              "calls": 1
+            }
+          ],
+          "candidate": [
+            {
+              "name": "CPU:rockchip_quantize_sdk",
+              "ms": 0.541034,
+              "calls": 1
+            },
+            {
+              "name": "COPY:CPU->ROCKCHIP",
+              "ms": 0.045208,
+              "calls": 1
+            },
+            {
+              "name": "ROCKCHIP:rockchip_int8_128_2304_1024_sdk",
+              "ms": 1.256775,
+              "calls": 1
+            },
+            {
+              "name": "COPY:ROCKCHIP->CPU",
+              "ms": 0.353787,
+              "calls": 1
+            },
+            {
+              "name": "CPU:rockchip_dequantize",
+              "ms": 0.617158,
+              "calls": 1
+            }
+          ]
+        }
+      },
+      {
+        "m": 128,
+        "n": 2560,
+        "k": 1024,
+        "previously_qualified": false,
+        "split_64": false,
+        "checks": [
+          {
+            "step": 0,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "4d4b2b4923cb5784fe41c1449cfb09420923ff3c03f601b9a18bb1fc8d3b5c43",
+            "actual_sha256": "4d4b2b4923cb5784fe41c1449cfb09420923ff3c03f601b9a18bb1fc8d3b5c43"
+          },
+          {
+            "step": 0,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "4d4b2b4923cb5784fe41c1449cfb09420923ff3c03f601b9a18bb1fc8d3b5c43",
+            "actual_sha256": "4d4b2b4923cb5784fe41c1449cfb09420923ff3c03f601b9a18bb1fc8d3b5c43"
+          },
+          {
+            "step": 1,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "c434fc39f5e72c3f8dba575000ff6ed7d7d50d4ab34fc7356c00fc5f98029a4a",
+            "actual_sha256": "c434fc39f5e72c3f8dba575000ff6ed7d7d50d4ab34fc7356c00fc5f98029a4a"
+          },
+          {
+            "step": 1,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "c434fc39f5e72c3f8dba575000ff6ed7d7d50d4ab34fc7356c00fc5f98029a4a",
+            "actual_sha256": "c434fc39f5e72c3f8dba575000ff6ed7d7d50d4ab34fc7356c00fc5f98029a4a"
+          },
+          {
+            "step": 2,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "8d3a786d319dd023f9dd7f7d54c14afaa273c85b2a01941003356a8a785ca64d",
+            "actual_sha256": "8d3a786d319dd023f9dd7f7d54c14afaa273c85b2a01941003356a8a785ca64d"
+          },
+          {
+            "step": 2,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "8d3a786d319dd023f9dd7f7d54c14afaa273c85b2a01941003356a8a785ca64d",
+            "actual_sha256": "8d3a786d319dd023f9dd7f7d54c14afaa273c85b2a01941003356a8a785ca64d"
+          },
+          {
+            "step": 3,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "1d6cab47c2a98718ba3fb9f736d459321a0ed36a48eaa14be92d225209150575",
+            "actual_sha256": "1d6cab47c2a98718ba3fb9f736d459321a0ed36a48eaa14be92d225209150575"
+          },
+          {
+            "step": 3,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "1d6cab47c2a98718ba3fb9f736d459321a0ed36a48eaa14be92d225209150575",
+            "actual_sha256": "1d6cab47c2a98718ba3fb9f736d459321a0ed36a48eaa14be92d225209150575"
+          },
+          {
+            "step": 4,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "31f4c6de938d4e509de7a4e40a8490e86680bbf3cb481946a041d5fef0844368",
+            "actual_sha256": "31f4c6de938d4e509de7a4e40a8490e86680bbf3cb481946a041d5fef0844368"
+          },
+          {
+            "step": 4,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "31f4c6de938d4e509de7a4e40a8490e86680bbf3cb481946a041d5fef0844368",
+            "actual_sha256": "31f4c6de938d4e509de7a4e40a8490e86680bbf3cb481946a041d5fef0844368"
+          },
+          {
+            "step": 5,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "3161aa01e08dd884e9767b1be2e612070ed2c5f6b0e8339e945183cef119d358",
+            "actual_sha256": "3161aa01e08dd884e9767b1be2e612070ed2c5f6b0e8339e945183cef119d358"
+          },
+          {
+            "step": 5,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "3161aa01e08dd884e9767b1be2e612070ed2c5f6b0e8339e945183cef119d358",
+            "actual_sha256": "3161aa01e08dd884e9767b1be2e612070ed2c5f6b0e8339e945183cef119d358"
+          },
+          {
+            "step": 6,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "79ee9a7546a93e6d697642d5e1c84c65fd7ef28ac94d9354de21037dc4ee72ad",
+            "actual_sha256": "79ee9a7546a93e6d697642d5e1c84c65fd7ef28ac94d9354de21037dc4ee72ad"
+          },
+          {
+            "step": 6,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "79ee9a7546a93e6d697642d5e1c84c65fd7ef28ac94d9354de21037dc4ee72ad",
+            "actual_sha256": "79ee9a7546a93e6d697642d5e1c84c65fd7ef28ac94d9354de21037dc4ee72ad"
+          }
+        ],
+        "times_ns": {
+          "control": [
+            1381023,
+            1503521,
+            1505563,
+            1716727,
+            1427689,
+            1508771,
+            1484854,
+            1420689,
+            1592770,
+            1417189,
+            1347773,
+            1311316,
+            1408731,
+            1569146,
+            1576728,
+            1417772,
+            1471730,
+            1451897,
+            1345731,
+            1288566,
+            1436439,
+            1510812,
+            1495647,
+            1417772,
+            1434688,
+            1559812,
+            1531521,
+            1370815,
+            1434981,
+            1507605,
+            1449272,
+            1378107,
+            1343107,
+            1394731,
+            1362940,
+            1505854,
+            1706227,
+            1589270,
+            1504979,
+            1350981
+          ],
+          "candidate": [
+            1651394,
+            1591311,
+            1643519,
+            2135554,
+            1807433,
+            1705935,
+            1689310,
+            1959098,
+            1705060,
+            1671227,
+            1595978,
+            1610562,
+            1705352,
+            1710893,
+            1916516,
+            1738309,
+            1842142,
+            1781767,
+            1647602,
+            1746185,
+            1843600,
+            1730726,
+            1719060,
+            1996139,
+            1708269,
+            1725185,
+            1934598,
+            1799850,
+            1780601,
+            1724018,
+            1689602,
+            1620770,
+            1650810,
+            1579645,
+            1644103,
+            1843016,
+            1989139,
+            2116596,
+            1717602,
+            1711477
+          ]
+        },
+        "complete": true,
+        "integer_and_float_valid": true,
+        "native_labels": {
+          "control": [
+            "CPU:rockchip_quantize",
+            "COPY:CPU->ROCKCHIP",
+            "ROCKCHIP:rockchip_int8_128_2560_1024",
+            "COPY:ROCKCHIP->CPU",
+            "CPU:rockchip_dequantize"
+          ],
+          "candidate": [
+            "CPU:rockchip_quantize_sdk",
+            "COPY:CPU->ROCKCHIP",
+            "ROCKCHIP:rockchip_int8_128_2560_1024_sdk",
+            "COPY:ROCKCHIP->CPU",
+            "CPU:rockchip_dequantize"
+          ]
+        },
+        "steady_allocations": 0,
+        "paired_speedup_median": 0.8310677627698276,
+        "paired_blocks_faster": 0,
+        "median_ms": {
+          "control": 1.4428555,
+          "candidate": 1.718331
+        },
+        "diagnostic_profile": {
+          "control": [
+            {
+              "name": "CPU:rockchip_quantize",
+              "ms": 0.111415,
+              "calls": 1
+            },
+            {
+              "name": "COPY:CPU->ROCKCHIP",
+              "ms": 0.016333,
+              "calls": 1
+            },
+            {
+              "name": "ROCKCHIP:rockchip_int8_128_2560_1024",
+              "ms": 0.542785,
+              "calls": 1
+            },
+            {
+              "name": "COPY:ROCKCHIP->CPU",
+              "ms": 0.210581,
+              "calls": 1
+            },
+            {
+              "name": "CPU:rockchip_dequantize",
+              "ms": 0.191622,
+              "calls": 1
+            }
+          ],
+          "candidate": [
+            {
+              "name": "CPU:rockchip_quantize_sdk",
+              "ms": 0.175581,
+              "calls": 1
+            },
+            {
+              "name": "COPY:CPU->ROCKCHIP",
+              "ms": 0.032083,
+              "calls": 1
+            },
+            {
+              "name": "ROCKCHIP:rockchip_int8_128_2560_1024_sdk",
+              "ms": 0.795655,
+              "calls": 1
+            },
+            {
+              "name": "COPY:ROCKCHIP->CPU",
+              "ms": 0.239747,
+              "calls": 1
+            },
+            {
+              "name": "CPU:rockchip_dequantize",
+              "ms": 0.438953,
+              "calls": 1
+            }
+          ]
+        }
+      },
+      {
+        "m": 128,
+        "n": 4096,
+        "k": 1024,
+        "previously_qualified": false,
+        "split_64": false,
+        "checks": [
+          {
+            "step": 0,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "8120f6825a1e4a925553ac23024a41a9e77e3a771c5600dcd5397fe1db073348",
+            "actual_sha256": "8120f6825a1e4a925553ac23024a41a9e77e3a771c5600dcd5397fe1db073348"
+          },
+          {
+            "step": 0,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "8120f6825a1e4a925553ac23024a41a9e77e3a771c5600dcd5397fe1db073348",
+            "actual_sha256": "8120f6825a1e4a925553ac23024a41a9e77e3a771c5600dcd5397fe1db073348"
+          },
+          {
+            "step": 1,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "48eec074ed8d61f3e6ee82dd913a4fa3e9e477ef7554c4a3623799e379ba76bc",
+            "actual_sha256": "48eec074ed8d61f3e6ee82dd913a4fa3e9e477ef7554c4a3623799e379ba76bc"
+          },
+          {
+            "step": 1,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "48eec074ed8d61f3e6ee82dd913a4fa3e9e477ef7554c4a3623799e379ba76bc",
+            "actual_sha256": "48eec074ed8d61f3e6ee82dd913a4fa3e9e477ef7554c4a3623799e379ba76bc"
+          },
+          {
+            "step": 2,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "e750a11335096c9360dd11609272efcaa4eb57b3aec20b6b654f786f4966a661",
+            "actual_sha256": "e750a11335096c9360dd11609272efcaa4eb57b3aec20b6b654f786f4966a661"
+          },
+          {
+            "step": 2,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "e750a11335096c9360dd11609272efcaa4eb57b3aec20b6b654f786f4966a661",
+            "actual_sha256": "e750a11335096c9360dd11609272efcaa4eb57b3aec20b6b654f786f4966a661"
+          },
+          {
+            "step": 3,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "95ef8a8aac3f87360d25692bcdc7c470eb0aeefcf7e835456f54f2ef9069931d",
+            "actual_sha256": "95ef8a8aac3f87360d25692bcdc7c470eb0aeefcf7e835456f54f2ef9069931d"
+          },
+          {
+            "step": 3,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "95ef8a8aac3f87360d25692bcdc7c470eb0aeefcf7e835456f54f2ef9069931d",
+            "actual_sha256": "95ef8a8aac3f87360d25692bcdc7c470eb0aeefcf7e835456f54f2ef9069931d"
+          },
+          {
+            "step": 4,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "a94a6bf7b6ec569415fdcb00be8c51f3e676159949b4531ed9600a163110458d",
+            "actual_sha256": "a94a6bf7b6ec569415fdcb00be8c51f3e676159949b4531ed9600a163110458d"
+          },
+          {
+            "step": 4,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "a94a6bf7b6ec569415fdcb00be8c51f3e676159949b4531ed9600a163110458d",
+            "actual_sha256": "a94a6bf7b6ec569415fdcb00be8c51f3e676159949b4531ed9600a163110458d"
+          },
+          {
+            "step": 5,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "5d67d5d2edef2a48c7246727720b2aa10c72e2aaec8084b02635e20345b680c7",
+            "actual_sha256": "5d67d5d2edef2a48c7246727720b2aa10c72e2aaec8084b02635e20345b680c7"
+          },
+          {
+            "step": 5,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "5d67d5d2edef2a48c7246727720b2aa10c72e2aaec8084b02635e20345b680c7",
+            "actual_sha256": "5d67d5d2edef2a48c7246727720b2aa10c72e2aaec8084b02635e20345b680c7"
+          },
+          {
+            "step": 6,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "a6c824d39caf82159b056d542b6582f00f5c324efbc95a713d79d1b3555be272",
+            "actual_sha256": "a6c824d39caf82159b056d542b6582f00f5c324efbc95a713d79d1b3555be272"
+          },
+          {
+            "step": 6,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "a6c824d39caf82159b056d542b6582f00f5c324efbc95a713d79d1b3555be272",
+            "actual_sha256": "a6c824d39caf82159b056d542b6582f00f5c324efbc95a713d79d1b3555be272"
+          }
+        ],
+        "times_ns": {
+          "control": [
+            2137305,
+            2364218,
+            2348760,
+            2294802,
+            2294802,
+            2343509,
+            2214012,
+            1813559,
+            1689894,
+            1551937,
+            1519562,
+            1459480,
+            1429147,
+            1312774,
+            1308982,
+            1214192,
+            1258233,
+            1333482,
+            1485729,
+            1319774,
+            2196220,
+            2072846,
+            1593061,
+            1290024,
+            1490105,
+            1410189,
+            1342232,
+            1307816,
+            1346315,
+            1641478,
+            1473188,
+            1222942,
+            1248316,
+            1283899,
+            1305190,
+            1281274,
+            1332607,
+            1461230,
+            1485147,
+            1336399
+          ],
+          "candidate": [
+            2874627,
+            2902335,
+            2680964,
+            2712463,
+            2589382,
+            2692047,
+            2695838,
+            1693393,
+            2063513,
+            1728102,
+            1692227,
+            1699519,
+            1682602,
+            1636519,
+            1517229,
+            1534145,
+            1518396,
+            1481063,
+            1472022,
+            1805392,
+            2471549,
+            2509466,
+            2335926,
+            1600645,
+            1627478,
+            1620770,
+            1580229,
+            1549021,
+            1798100,
+            1600062,
+            2127680,
+            1536187,
+            1441980,
+            1405231,
+            1499729,
+            1586354,
+            1539979,
+            1649061,
+            1691935,
+            1676477
+          ]
+        },
+        "complete": true,
+        "integer_and_float_valid": true,
+        "native_labels": {
+          "control": [
+            "CPU:rockchip_quantize",
+            "COPY:CPU->ROCKCHIP",
+            "ROCKCHIP:rockchip_int8_128_4096_1024",
+            "COPY:ROCKCHIP->CPU",
+            "CPU:rockchip_dequantize"
+          ],
+          "candidate": [
+            "CPU:rockchip_quantize_sdk",
+            "COPY:CPU->ROCKCHIP",
+            "ROCKCHIP:rockchip_int8_128_4096_1024_sdk",
+            "COPY:ROCKCHIP->CPU",
+            "CPU:rockchip_dequantize"
+          ]
+        },
+        "steady_allocations": 0,
+        "paired_speedup_median": 0.85653932873222,
+        "paired_blocks_faster": 0,
+        "median_ms": {
+          "control": 1.460355,
+          "candidate": 1.6795395
+        },
+        "diagnostic_profile": {
+          "control": [
+            {
+              "name": "CPU:rockchip_quantize",
+              "ms": 0.116957,
+              "calls": 1
+            },
+            {
+              "name": "COPY:CPU->ROCKCHIP",
+              "ms": 0.016624,
+              "calls": 1
+            },
+            {
+              "name": "ROCKCHIP:rockchip_int8_128_4096_1024",
+              "ms": 0.790115,
+              "calls": 1
+            },
+            {
+              "name": "COPY:ROCKCHIP->CPU",
+              "ms": 0.351161,
+              "calls": 1
+            },
+            {
+              "name": "CPU:rockchip_dequantize",
+              "ms": 0.324329,
+              "calls": 1
+            }
+          ],
+          "candidate": [
+            {
+              "name": "CPU:rockchip_quantize_sdk",
+              "ms": 0.132998,
+              "calls": 1
+            },
+            {
+              "name": "COPY:CPU->ROCKCHIP",
+              "ms": 0.027417,
+              "calls": 1
+            },
+            {
+              "name": "ROCKCHIP:rockchip_int8_128_4096_1024_sdk",
+              "ms": 1.161984,
+              "calls": 1
+            },
+            {
+              "name": "COPY:ROCKCHIP->CPU",
+              "ms": 0.349703,
+              "calls": 1
+            },
+            {
+              "name": "CPU:rockchip_dequantize",
+              "ms": 0.509535,
+              "calls": 1
+            }
+          ]
+        }
+      },
+      {
+        "m": 128,
+        "n": 6144,
+        "k": 1024,
+        "previously_qualified": false,
+        "split_64": false,
+        "checks": [
+          {
+            "step": 0,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "3a5ea6ddc3cfd848f1217658ffd3c6fe1d01f7034dbbdd50f0d781fedff1e3c2",
+            "actual_sha256": "3a5ea6ddc3cfd848f1217658ffd3c6fe1d01f7034dbbdd50f0d781fedff1e3c2"
+          },
+          {
+            "step": 0,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "3a5ea6ddc3cfd848f1217658ffd3c6fe1d01f7034dbbdd50f0d781fedff1e3c2",
+            "actual_sha256": "3a5ea6ddc3cfd848f1217658ffd3c6fe1d01f7034dbbdd50f0d781fedff1e3c2"
+          },
+          {
+            "step": 1,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "19916de904a4a34571bc4f442bbec9692cb7940ed6586f8526b98f3fd7325cdc",
+            "actual_sha256": "19916de904a4a34571bc4f442bbec9692cb7940ed6586f8526b98f3fd7325cdc"
+          },
+          {
+            "step": 1,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "19916de904a4a34571bc4f442bbec9692cb7940ed6586f8526b98f3fd7325cdc",
+            "actual_sha256": "19916de904a4a34571bc4f442bbec9692cb7940ed6586f8526b98f3fd7325cdc"
+          },
+          {
+            "step": 2,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "cb0cfd82ac88aa252fd8b9f94fdccb5e795203113b7b704da0c429841fd51637",
+            "actual_sha256": "cb0cfd82ac88aa252fd8b9f94fdccb5e795203113b7b704da0c429841fd51637"
+          },
+          {
+            "step": 2,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "cb0cfd82ac88aa252fd8b9f94fdccb5e795203113b7b704da0c429841fd51637",
+            "actual_sha256": "cb0cfd82ac88aa252fd8b9f94fdccb5e795203113b7b704da0c429841fd51637"
+          },
+          {
+            "step": 3,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "f9407597a99d4efc74bc2740ebae70e0140cf86a4adb0e6f6bbbb637e74812a8",
+            "actual_sha256": "f9407597a99d4efc74bc2740ebae70e0140cf86a4adb0e6f6bbbb637e74812a8"
+          },
+          {
+            "step": 3,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "f9407597a99d4efc74bc2740ebae70e0140cf86a4adb0e6f6bbbb637e74812a8",
+            "actual_sha256": "f9407597a99d4efc74bc2740ebae70e0140cf86a4adb0e6f6bbbb637e74812a8"
+          },
+          {
+            "step": 4,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "3106c65a0e26b8a6a089e29aea3f86658206238da198f183e680b5a9adeadd85",
+            "actual_sha256": "3106c65a0e26b8a6a089e29aea3f86658206238da198f183e680b5a9adeadd85"
+          },
+          {
+            "step": 4,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "3106c65a0e26b8a6a089e29aea3f86658206238da198f183e680b5a9adeadd85",
+            "actual_sha256": "3106c65a0e26b8a6a089e29aea3f86658206238da198f183e680b5a9adeadd85"
+          },
+          {
+            "step": 5,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "961ce18d2bca02b092374e94519cfd6d7bbcf7c14af8e9d609a447680f2fd7b3",
+            "actual_sha256": "961ce18d2bca02b092374e94519cfd6d7bbcf7c14af8e9d609a447680f2fd7b3"
+          },
+          {
+            "step": 5,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "961ce18d2bca02b092374e94519cfd6d7bbcf7c14af8e9d609a447680f2fd7b3",
+            "actual_sha256": "961ce18d2bca02b092374e94519cfd6d7bbcf7c14af8e9d609a447680f2fd7b3"
+          },
+          {
+            "step": 6,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "0fffc14412574080b6696d290e4d0a9360a2b2918453172b23cc8081690dcfe6",
+            "actual_sha256": "0fffc14412574080b6696d290e4d0a9360a2b2918453172b23cc8081690dcfe6"
+          },
+          {
+            "step": 6,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "0fffc14412574080b6696d290e4d0a9360a2b2918453172b23cc8081690dcfe6",
+            "actual_sha256": "0fffc14412574080b6696d290e4d0a9360a2b2918453172b23cc8081690dcfe6"
+          }
+        ],
+        "times_ns": {
+          "control": [
+            3737365,
+            3611659,
+            3556826,
+            3301622,
+            2621756,
+            2322219,
+            2230637,
+            2009847,
+            2360426,
+            2170262,
+            2214595,
+            2101138,
+            2131763,
+            2156262,
+            2287802,
+            2036972,
+            2302385,
+            2222470,
+            2192428,
+            2206720,
+            2108429,
+            2186012,
+            2192721,
+            2047764,
+            2326302,
+            2327469,
+            2114263,
+            2059722,
+            2208470,
+            2188345,
+            2192720,
+            1999348,
+            2116888,
+            2136138,
+            2134679,
+            1921183,
+            2305011,
+            2257761,
+            2257761,
+            2083347
+          ],
+          "candidate": [
+            3922572,
+            3837990,
+            4025237,
+            3771490,
+            2393093,
+            2475341,
+            2414384,
+            2490216,
+            2543007,
+            2475341,
+            2409718,
+            2420509,
+            2286053,
+            2390176,
+            2466008,
+            2501008,
+            2595215,
+            2354884,
+            2380259,
+            2300344,
+            2340885,
+            2331260,
+            2396009,
+            2683296,
+            2455508,
+            2342051,
+            2396301,
+            2269136,
+            2405634,
+            2338552,
+            2267677,
+            2748630,
+            2288677,
+            2217511,
+            2270303,
+            2168803,
+            2385509,
+            2438883,
+            2394259,
+            2680963
+          ]
+        },
+        "complete": true,
+        "integer_and_float_valid": true,
+        "native_labels": {
+          "control": [
+            "CPU:rockchip_quantize",
+            "COPY:CPU->ROCKCHIP",
+            "ROCKCHIP:rockchip_int8_128_6144_1024",
+            "COPY:ROCKCHIP->CPU",
+            "CPU:rockchip_dequantize"
+          ],
+          "candidate": [
+            "CPU:rockchip_quantize_sdk",
+            "COPY:CPU->ROCKCHIP",
+            "ROCKCHIP:rockchip_int8_128_6144_1024_sdk",
+            "COPY:ROCKCHIP->CPU",
+            "CPU:rockchip_dequantize"
+          ]
+        },
+        "steady_allocations": 0,
+        "paired_speedup_median": 0.9138801198660855,
+        "paired_blocks_faster": 1,
+        "median_ms": {
+          "control": 2.1927205,
+          "candidate": 2.4009675
+        },
+        "diagnostic_profile": {
+          "control": [
+            {
+              "name": "CPU:rockchip_quantize",
+              "ms": 0.218164,
+              "calls": 1
+            },
+            {
+              "name": "COPY:CPU->ROCKCHIP",
+              "ms": 0.014583,
+              "calls": 1
+            },
+            {
+              "name": "ROCKCHIP:rockchip_int8_128_6144_1024",
+              "ms": 1.61202,
+              "calls": 1
+            },
+            {
+              "name": "COPY:ROCKCHIP->CPU",
+              "ms": 0.61045,
+              "calls": 1
+            },
+            {
+              "name": "CPU:rockchip_dequantize",
+              "ms": 0.555617,
+              "calls": 1
+            }
+          ],
+          "candidate": [
+            {
+              "name": "CPU:rockchip_quantize_sdk",
+              "ms": 0.776989,
+              "calls": 1
+            },
+            {
+              "name": "COPY:CPU->ROCKCHIP",
+              "ms": 0.068249,
+              "calls": 1
+            },
+            {
+              "name": "ROCKCHIP:rockchip_int8_128_6144_1024_sdk",
+              "ms": 3.198373,
+              "calls": 1
+            },
+            {
+              "name": "COPY:ROCKCHIP->CPU",
+              "ms": 0.990195,
+              "calls": 1
+            },
+            {
+              "name": "CPU:rockchip_dequantize",
+              "ms": 1.511396,
+              "calls": 1
+            }
+          ]
+        }
+      },
+      {
+        "m": 128,
+        "n": 7168,
+        "k": 1024,
+        "previously_qualified": false,
+        "split_64": false,
+        "checks": [
+          {
+            "step": 0,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "636868a8e3da87eb6647efcfdcbd762d3040cfc491124d5491de6441880de7a6",
+            "actual_sha256": "636868a8e3da87eb6647efcfdcbd762d3040cfc491124d5491de6441880de7a6"
+          },
+          {
+            "step": 0,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "636868a8e3da87eb6647efcfdcbd762d3040cfc491124d5491de6441880de7a6",
+            "actual_sha256": "636868a8e3da87eb6647efcfdcbd762d3040cfc491124d5491de6441880de7a6"
+          },
+          {
+            "step": 1,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "d48fa1a462ecac703b8a264279e46a386a5de60c099590ac55f7ef372482984b",
+            "actual_sha256": "d48fa1a462ecac703b8a264279e46a386a5de60c099590ac55f7ef372482984b"
+          },
+          {
+            "step": 1,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "d48fa1a462ecac703b8a264279e46a386a5de60c099590ac55f7ef372482984b",
+            "actual_sha256": "d48fa1a462ecac703b8a264279e46a386a5de60c099590ac55f7ef372482984b"
+          },
+          {
+            "step": 2,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "5f8352d2830279aee21526bac3b04c64cbb52b78fa51a3bdf29b7788fca41382",
+            "actual_sha256": "5f8352d2830279aee21526bac3b04c64cbb52b78fa51a3bdf29b7788fca41382"
+          },
+          {
+            "step": 2,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "5f8352d2830279aee21526bac3b04c64cbb52b78fa51a3bdf29b7788fca41382",
+            "actual_sha256": "5f8352d2830279aee21526bac3b04c64cbb52b78fa51a3bdf29b7788fca41382"
+          },
+          {
+            "step": 3,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "c89247849f7d0f61528cf541e3050ab42249eaa9eeecec7872097e4b5ab02691",
+            "actual_sha256": "c89247849f7d0f61528cf541e3050ab42249eaa9eeecec7872097e4b5ab02691"
+          },
+          {
+            "step": 3,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "c89247849f7d0f61528cf541e3050ab42249eaa9eeecec7872097e4b5ab02691",
+            "actual_sha256": "c89247849f7d0f61528cf541e3050ab42249eaa9eeecec7872097e4b5ab02691"
+          },
+          {
+            "step": 4,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "22c3ae12f96631e11858f3351ce21af11476b489353195e0b99d07c305f411ce",
+            "actual_sha256": "22c3ae12f96631e11858f3351ce21af11476b489353195e0b99d07c305f411ce"
+          },
+          {
+            "step": 4,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "22c3ae12f96631e11858f3351ce21af11476b489353195e0b99d07c305f411ce",
+            "actual_sha256": "22c3ae12f96631e11858f3351ce21af11476b489353195e0b99d07c305f411ce"
+          },
+          {
+            "step": 5,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "57e6cb09dd5d76309a7efa62cbd449c89fe5309be37d08fc2122f5316415c05f",
+            "actual_sha256": "57e6cb09dd5d76309a7efa62cbd449c89fe5309be37d08fc2122f5316415c05f"
+          },
+          {
+            "step": 5,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "57e6cb09dd5d76309a7efa62cbd449c89fe5309be37d08fc2122f5316415c05f",
+            "actual_sha256": "57e6cb09dd5d76309a7efa62cbd449c89fe5309be37d08fc2122f5316415c05f"
+          },
+          {
+            "step": 6,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "d50695fe1486b7b4ed0e031b505a3fba87dcbaa34909756cbef89ca256e588da",
+            "actual_sha256": "d50695fe1486b7b4ed0e031b505a3fba87dcbaa34909756cbef89ca256e588da"
+          },
+          {
+            "step": 6,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "d50695fe1486b7b4ed0e031b505a3fba87dcbaa34909756cbef89ca256e588da",
+            "actual_sha256": "d50695fe1486b7b4ed0e031b505a3fba87dcbaa34909756cbef89ca256e588da"
+          }
+        ],
+        "times_ns": {
+          "control": [
+            3878823,
+            3156082,
+            3330205,
+            3207998,
+            3340996,
+            3417121,
+            3346538,
+            3107958,
+            2271761,
+            2243177,
+            2223928,
+            2149554,
+            2152471,
+            2258052,
+            2160637,
+            2063514,
+            1928474,
+            2000806,
+            1991181,
+            1839517,
+            1943057,
+            2142263,
+            2135846,
+            2085096,
+            1996139,
+            2137596,
+            2225678,
+            1988556,
+            1988265,
+            1935765,
+            2141679,
+            2074305,
+            2110180,
+            1931682,
+            2061180,
+            1990890,
+            2177846,
+            1953265,
+            1931098,
+            1978348
+          ],
+          "candidate": [
+            4232317,
+            4181859,
+            3980613,
+            4228526,
+            4345483,
+            4378148,
+            4127611,
+            3835365,
+            2747463,
+            2757962,
+            2624089,
+            2693796,
+            2666089,
+            2737838,
+            2602506,
+            2497215,
+            2517632,
+            2478842,
+            2501299,
+            2431592,
+            2386092,
+            2592589,
+            2534840,
+            2547382,
+            2406218,
+            2444717,
+            2693505,
+            2665213,
+            2575673,
+            2413800,
+            2508008,
+            2539216,
+            2499841,
+            2461633,
+            2447342,
+            2707797,
+            2566048,
+            2454633,
+            2316093,
+            2547965
+          ]
+        },
+        "complete": true,
+        "integer_and_float_valid": true,
+        "native_labels": {
+          "control": [
+            "CPU:rockchip_quantize",
+            "COPY:CPU->ROCKCHIP",
+            "ROCKCHIP:rockchip_int8_128_7168_1024",
+            "COPY:ROCKCHIP->CPU",
+            "CPU:rockchip_dequantize"
+          ],
+          "candidate": [
+            "CPU:rockchip_quantize_sdk",
+            "COPY:CPU->ROCKCHIP",
+            "ROCKCHIP:rockchip_int8_128_7168_1024_sdk",
+            "COPY:ROCKCHIP->CPU",
+            "CPU:rockchip_dequantize"
+          ]
+        },
+        "steady_allocations": 0,
+        "paired_speedup_median": 0.8154097092057775,
+        "paired_blocks_faster": 0,
+        "median_ms": {
+          "control": 2.136721,
+          "candidate": 2.5708605
+        },
+        "diagnostic_profile": {
+          "control": [
+            {
+              "name": "CPU:rockchip_quantize",
+              "ms": 0.115498,
+              "calls": 1
+            },
+            {
+              "name": "COPY:CPU->ROCKCHIP",
+              "ms": 0.011666,
+              "calls": 1
+            },
+            {
+              "name": "ROCKCHIP:rockchip_int8_128_7168_1024",
+              "ms": 0.788073,
+              "calls": 1
+            },
+            {
+              "name": "COPY:ROCKCHIP->CPU",
+              "ms": 0.398703,
+              "calls": 1
+            },
+            {
+              "name": "CPU:rockchip_dequantize",
+              "ms": 0.340954,
+              "calls": 1
+            }
+          ],
+          "candidate": [
+            {
+              "name": "CPU:rockchip_quantize_sdk",
+              "ms": 0.114915,
+              "calls": 1
+            },
+            {
+              "name": "COPY:CPU->ROCKCHIP",
+              "ms": 0.019833,
+              "calls": 1
+            },
+            {
+              "name": "ROCKCHIP:rockchip_int8_128_7168_1024_sdk",
+              "ms": 1.002445,
+              "calls": 1
+            },
+            {
+              "name": "COPY:ROCKCHIP->CPU",
+              "ms": 0.37537,
+              "calls": 1
+            },
+            {
+              "name": "CPU:rockchip_dequantize",
+              "ms": 0.579242,
+              "calls": 1
+            }
+          ]
+        }
+      },
+      {
+        "m": 128,
+        "n": 3072,
+        "k": 2048,
+        "previously_qualified": false,
+        "split_64": true,
+        "checks": [
+          {
+            "step": 0,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "70d75f430b4a78ff26abfe57e8a316bf0c9e02a13098a66f96d67a228330b1f8",
+            "actual_sha256": "70d75f430b4a78ff26abfe57e8a316bf0c9e02a13098a66f96d67a228330b1f8"
+          },
+          {
+            "step": 0,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "70d75f430b4a78ff26abfe57e8a316bf0c9e02a13098a66f96d67a228330b1f8",
+            "actual_sha256": "70d75f430b4a78ff26abfe57e8a316bf0c9e02a13098a66f96d67a228330b1f8"
+          },
+          {
+            "step": 1,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "77678c764be49021e6250647539123167e4196fafae329b340b2b83e92bc594c",
+            "actual_sha256": "77678c764be49021e6250647539123167e4196fafae329b340b2b83e92bc594c"
+          },
+          {
+            "step": 1,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "77678c764be49021e6250647539123167e4196fafae329b340b2b83e92bc594c",
+            "actual_sha256": "77678c764be49021e6250647539123167e4196fafae329b340b2b83e92bc594c"
+          },
+          {
+            "step": 2,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "866d5c0f76157448ead0aad85d8e8c50b206ad7bdf5730a5cafcd64ed5a3637a",
+            "actual_sha256": "866d5c0f76157448ead0aad85d8e8c50b206ad7bdf5730a5cafcd64ed5a3637a"
+          },
+          {
+            "step": 2,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "866d5c0f76157448ead0aad85d8e8c50b206ad7bdf5730a5cafcd64ed5a3637a",
+            "actual_sha256": "866d5c0f76157448ead0aad85d8e8c50b206ad7bdf5730a5cafcd64ed5a3637a"
+          },
+          {
+            "step": 3,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "d4d6887508032deb43091850782943906b8a0cbd0e2e497f0ee09f14ef91d84b",
+            "actual_sha256": "d4d6887508032deb43091850782943906b8a0cbd0e2e497f0ee09f14ef91d84b"
+          },
+          {
+            "step": 3,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "d4d6887508032deb43091850782943906b8a0cbd0e2e497f0ee09f14ef91d84b",
+            "actual_sha256": "d4d6887508032deb43091850782943906b8a0cbd0e2e497f0ee09f14ef91d84b"
+          },
+          {
+            "step": 4,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "a3b09bc4942ced6673b2e265d62dedf2f2a04240a58979a50009cb8b943d56ce",
+            "actual_sha256": "a3b09bc4942ced6673b2e265d62dedf2f2a04240a58979a50009cb8b943d56ce"
+          },
+          {
+            "step": 4,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "a3b09bc4942ced6673b2e265d62dedf2f2a04240a58979a50009cb8b943d56ce",
+            "actual_sha256": "a3b09bc4942ced6673b2e265d62dedf2f2a04240a58979a50009cb8b943d56ce"
+          },
+          {
+            "step": 5,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "f8b19b24217acd7117b9966cf1bda23d443ba893133b79a993ccede846d43f91",
+            "actual_sha256": "f8b19b24217acd7117b9966cf1bda23d443ba893133b79a993ccede846d43f91"
+          },
+          {
+            "step": 5,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "f8b19b24217acd7117b9966cf1bda23d443ba893133b79a993ccede846d43f91",
+            "actual_sha256": "f8b19b24217acd7117b9966cf1bda23d443ba893133b79a993ccede846d43f91"
+          },
+          {
+            "step": 6,
+            "variant": "control",
+            "exact_bits": true,
+            "expected_sha256": "b015e2a8384e48f0d8875ab7e14b0917b7f177bf892a09988866baed9d138f03",
+            "actual_sha256": "b015e2a8384e48f0d8875ab7e14b0917b7f177bf892a09988866baed9d138f03"
+          },
+          {
+            "step": 6,
+            "variant": "candidate",
+            "exact_bits": true,
+            "expected_sha256": "b015e2a8384e48f0d8875ab7e14b0917b7f177bf892a09988866baed9d138f03",
+            "actual_sha256": "b015e2a8384e48f0d8875ab7e14b0917b7f177bf892a09988866baed9d138f03"
+          }
+        ],
+        "times_ns": {
+          "control": [
+            2793254,
+            2834961,
+            3070041,
+            2982542,
+            2983709,
+            2869669,
+            2928293,
+            2902044,
+            2970293,
+            1998473,
+            2085388,
+            2107263,
+            2025306,
+            1952681,
+            1975140,
+            1888516,
+            1919140,
+            1991473,
+            2031430,
+            1860516,
+            1574979,
+            1558354,
+            1545520,
+            1486022,
+            1555729,
+            1519271,
+            1562437,
+            1479313,
+            1536479,
+            1616686,
+            1660144,
+            1660436,
+            1617270,
+            1549895,
+            1693685,
+            1617853,
+            1667727,
+            1679685,
+            1680852,
+            1526563
+          ],
+          "candidate": [
+            2941418,
+            3020459,
+            3345371,
+            3529993,
+            3387954,
+            3099791,
+            3175915,
+            3245330,
+            3368413,
+            2462216,
+            2371217,
+            2302677,
+            2410884,
+            2207887,
+            2271469,
+            2378801,
+            2109596,
+            2153054,
+            2154804,
+            2021806,
+            1826683,
+            1652561,
+            1669185,
+            1721685,
+            1665686,
+            1623103,
+            1703019,
+            1661602,
+            1677644,
+            1686102,
+            1907765,
+            1880641,
+            1700685,
+            1652269,
+            1862850,
+            1799267,
+            1832225,
+            1762226,
+            1814434,
+            1766893
+          ]
+        },
+        "complete": true,
+        "integer_and_float_valid": true,
+        "native_labels": {
+          "control": [
+            "CPU:rockchip_quantize",
+            "COPY:CPU->ROCKCHIP",
+            "ROCKCHIP:rockchip_int8_128_3072_2048",
+            "COPY:ROCKCHIP->CPU",
+            "CPU:rockchip_dequantize"
+          ],
+          "candidate": [
+            "CPU:rockchip_quantize_sdk",
+            "CPU:rockchip_quantize_sdk",
+            "COPY:CPU->ROCKCHIP",
+            "COPY:CPU->ROCKCHIP",
+            "ROCKCHIP:rockchip_int8_64_3072_2048_sdk",
+            "ROCKCHIP:rockchip_int8_64_3072_2048_sdk",
+            "COPY:ROCKCHIP->CPU",
+            "COPY:ROCKCHIP->CPU",
+            "CPU:rockchip_dequantize"
+          ]
+        },
+        "steady_allocations": 0,
+        "paired_speedup_median": 0.9031300701117466,
+        "paired_blocks_faster": 0,
+        "median_ms": {
+          "control": 1.7771005,
+          "candidate": 1.9647855
+        },
+        "diagnostic_profile": {
+          "control": [
+            {
+              "name": "CPU:rockchip_quantize",
+              "ms": 0.265705,
+              "calls": 1
+            },
+            {
+              "name": "COPY:CPU->ROCKCHIP",
+              "ms": 0.024208,
+              "calls": 1
+            },
+            {
+              "name": "ROCKCHIP:rockchip_int8_128_3072_2048",
+              "ms": 0.790697,
+              "calls": 1
+            },
+            {
+              "name": "COPY:ROCKCHIP->CPU",
+              "ms": 0.188998,
+              "calls": 1
+            },
+            {
+              "name": "CPU:rockchip_dequantize",
+              "ms": 0.26833,
+              "calls": 1
+            }
+          ],
+          "candidate": [
+            {
+              "name": "CPU:rockchip_quantize_sdk",
+              "ms": 0.591201,
+              "calls": 2
+            },
+            {
+              "name": "COPY:CPU->ROCKCHIP",
+              "ms": 0.076415,
+              "calls": 2
+            },
+            {
+              "name": "ROCKCHIP:rockchip_int8_64_3072_2048_sdk",
+              "ms": 1.462688,
+              "calls": 2
+            },
+            {
+              "name": "COPY:ROCKCHIP->CPU",
+              "ms": 0.367786,
+              "calls": 2
+            },
+            {
+              "name": "CPU:rockchip_dequantize",
+              "ms": 0.52091,
+              "calls": 1
+            }
+          ]
+        }
+      }
+    ],
+    "cpu_conversion": "four-row blocking; default row-major arithmetic unchanged",
+    "scope": "CPUquantization,upload,NPUmatmul,readback,FP32dequantization andnative dispatch; not fullmodel timing. Expanded shapes are experimental.",
+    "timing_scope": "Complete native projection replay; Tensor input alreadyresident; numerical readback/checks excluded.",
+    "source_sha256_after": {
+      "tinygrad/__init__.py": "fc24d5d0df1b1a14bbee0bd2641a61ca5f34ec7d83f1b0b755adf6eb83d5c0be",
+      "tinygrad/codegen/__init__.py": "b8fc262121b861659cf777d19544138e5a4d9582c5277dd6f93e914e30423727",
+      "tinygrad/codegen/decomp/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tinygrad/codegen/decomp/dtype.py": "b3a04ebdd9f5686936964fefa99a46ac27515edb7be4c9f07201269c42371502",
+      "tinygrad/codegen/decomp/op.py": "2d5ff52711a92c45f8814056d799da3c0aade9498822cc5cdee2a83dc3276ae1",
+      "tinygrad/codegen/decomp/transcendental.py": "1d737c265c9f96b8f09d82b85eb660dbb91b558a5af88512075c5a20540d00c5",
+      "tinygrad/codegen/gpudims.py": "15d368b1a45c237c8d3ea0b28af5f3b80fa49dbe73694bd8b315d835c4335ae5",
+      "tinygrad/codegen/late/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tinygrad/codegen/late/coalesce.py": "36d59f15f202ae20444cd76795e0068b79f4158833e691da3c0ac72848e0d475",
+      "tinygrad/codegen/late/gater.py": "c194d9ffe8d022e62894367d4c0ce0fdf57ff02f34f128efcdac3072334275b9",
+      "tinygrad/codegen/late/linearizer.py": "9c1d7ae56a0381bdb4fd1340fe32eee77ad66617b06a215b8c4c46bf3f97fbe8",
+      "tinygrad/codegen/late/regalloc.py": "e120e26baee8021becfd716e39cb85dc0f5c5992bd30d5a50e48e7a0f528c9e5",
+      "tinygrad/codegen/opt/__init__.py": "6bddcc6a2052b1a39e9a421731275524fa6f0f861abfdefeafae5403747f8778",
+      "tinygrad/codegen/opt/heuristic.py": "029537ca82fadbbc34c9780fee3853466eb5a157a51b7c43dd45a94b3cde2a89",
+      "tinygrad/codegen/opt/postrange.py": "2ee24512630396f82016e709036c8991af7ec7482347060951fe01ebd719d3dd",
+      "tinygrad/codegen/opt/search.py": "670111d23c6360c6bd57f473a0e8877fe9b6615455aa27473f52c6bb99ef81b7",
+      "tinygrad/codegen/simplify.py": "a05ecef8e0f13d104516be51e4289653b00ca3104893000ed09a3b9b639a629f",
+      "tinygrad/device.py": "7a221075b3968b25db62edbc46450616a1e64e20c363466e26aab2a5a2f080f9",
+      "tinygrad/dtype.py": "7800592dcccbdd5a5beaee889342b5f62790d37445938fe601416c8b76057926",
+      "tinygrad/engine/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tinygrad/engine/jit.py": "7e91838fb3f3593661d771459775ef3e2811ba1038c58f06c9d5c359cac0bec8",
+      "tinygrad/engine/realize.py": "a00765bf85f23399020a9b6ee1e397aed12c3d2a2c4f1362001b67130b41a1db",
+      "tinygrad/engine/worker.py": "b9d47164d0b2fa09f4f396efcfd856b8ebe93a4e446ff683692ea9d605bb017d",
+      "tinygrad/function.py": "dbf481c6049a538680e386d2846e0569bb9924f0293dd3356e92e7a428593a22",
+      "tinygrad/helpers.py": "eda095ab2c35d045e40523cf8f025543c45b012ff217ddeaed6143610330f308",
+      "tinygrad/llm/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tinygrad/llm/__main__.py": "2b2aeb15c8e098d5268709723bf52e22845634a68075e5904a474ec01f4165f0",
+      "tinygrad/llm/chatglm.py": "789feb35a21226616e674caf42d687fdc4efb7ffff97445f286931880342bac6",
+      "tinygrad/llm/cli.py": "801120b53b59f15221d014a710df2cf8224728e9699f70629ac87b5db28baf49",
+      "tinygrad/llm/dflash2.py": "fd06909403b5268285116846e9082fa9f451618cd8691e04074fccec36eeeb3a",
+      "tinygrad/llm/dflash2_config.py": "f46fda13e52e26ff9fe7bfeb40d56c5f0f7536424358b4e4bc16bee3ef745a5d",
+      "tinygrad/llm/dflash2_selector.py": "54455105954ca47e44d32dec4974d0f222c8c239d61492c43a1a922b54c95342",
+      "tinygrad/llm/gemma3n.py": "37c434bfe88f8c196271f5dc7f7f6a8421c94e55c86a6ecf6eff0e3d76b1acc3",
+      "tinygrad/llm/gemma4.py": "e218b96aaeb628cf355e5428a09d397f863933b28ac50f924c2c0d48acc78c4c",
+      "tinygrad/llm/gguf.py": "ef7957f1a2bd57c48380bdece85f90ddf829055834eb63465468189927b0f2c1",
+      "tinygrad/llm/kernels/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tinygrad/llm/kernels/amd.py": "05a05aa63391251eea4b8c2dfcc1c56718bdecb712ad9041e56ab84a31edd92c",
+      "tinygrad/llm/kernels/mali.py": "8a52d608e7c22dbaf1605d4aa32b49a8b7af3b88e3678a9c5c3373d95ab961c4",
+      "tinygrad/llm/kernels/mali_attention.py": "aee062ac18b5bb749304decf245a7c52d0a10fcf5d22bddc25e88e172439e778",
+      "tinygrad/llm/kernels/mali_copy.py": "5f9622c02ac6681b4614b777295531ec6de33da9a43253dd4466a3e90d9617e5",
+      "tinygrad/llm/kernels/mali_half_prefill.py": "352996d9b939565f76875960ddb121f648c813d38e5aef313e412c76fe2c8a76",
+      "tinygrad/llm/kernels/mali_linear.py": "31e10be28dea06d51b13383c69a63e24966e7029f7aa4749d3b5e79fe810f96d",
+      "tinygrad/llm/kernels/mali_q8.py": "2d6d4d38b2eb86bb1ca9a546ddaa8ac30ccadc3626332c36acc1328ccfc9459d",
+      "tinygrad/llm/kernels/mali_q8_checkpoint.py": "f96c43dc0489f33db4b2ce084a371af44d0cceb520479d15dc5f63bf65a46387",
+      "tinygrad/llm/kernels/mali_q8_shared.py": "d00c78f07e42ff41424b76b7257916b74055590ddad405f6afcb6c240aca15fc",
+      "tinygrad/llm/kernels/mali_recurrent.py": "35d74bdd1619a786dbf44514a787ce713ad43b9911b4fb7c01812024ca0c281d",
+      "tinygrad/llm/kernels/mali_rows.py": "26dc2d4534ce7cfc6bb6f97e6531b26f1c47de758208ef34f237a95573ca3d58",
+      "tinygrad/llm/kernels/mali_state.py": "c9710fe99c1c78ec06eae0cd8617ef8259a108fe111ace074d6091bbbc6e2c22",
+      "tinygrad/llm/kernels/rockchip.py": "5fdb6266f9d146dd725f0726c865b6a991edb3168cdde81899a56a5e74a16348",
+      "tinygrad/llm/kernels/rockchip_attention.py": "ed1d797b3e2822e779886ffe5f0f8279c9d0669c85a71fa57206a701f65a07fd",
+      "tinygrad/llm/kernels/rockchip_cache.c": "1f64febcecc53033c60a63eca82e0b2fd54c7b57f6ee75daa20e3dea63433611",
+      "tinygrad/llm/kernels/rockchip_cache.py": "d3e3163591ea9833c2da102eab34652db3381d92cd13a261d7df36d4f8b1b2c9",
+      "tinygrad/llm/kernels/rockchip_cpu.py": "dcffed8092dd2247a98dacdf9bef28368fe06a74aab10448b239e3f78f414286",
+      "tinygrad/llm/kernels/rockchip_decode.py": "a560368faa8346ef53ce9905d7844d516a78e77ac90e032175ae7cde9f3a3803",
+      "tinygrad/llm/kernels/rockchip_dot_attention.py": "8d880c2518f699175f664a039133f98281b6781737073841d376a69f9a95b02e",
+      "tinygrad/llm/kernels/rockchip_gelu.py": "450b2a2d6e9f622fd709b78d811639b76e6272cf502a32abbd779a7f0449942b",
+      "tinygrad/llm/kernels/rockchip_gpt2.py": "cb9a53386a3e6aa7f13bbb6a20488eaa3685f0ec86f6a054f1f7e38dabea0698",
+      "tinygrad/llm/kernels/rockchip_gpt2_decode.py": "8153cb1d439880dfa85914d92974e848dd8977f41c13519cad23980f94438359",
+      "tinygrad/llm/kernels/rockchip_greedy.py": "01ac047734624a01c04b6e75850c658cc96abba2a1617d7117e740bd16e60ccc",
+      "tinygrad/llm/kernels/rockchip_idle.c": "4fb7c8022cefd7929907f4abeedaf8894a96f9261763c32015bbd648eeb09b57",
+      "tinygrad/llm/kernels/rockchip_idle.py": "e0fa42189a9c076df1a2da6a1160a63c1a97814e1411ffe2a5297dced29498dc",
+      "tinygrad/llm/kernels/rockchip_int8.py": "d6d458be90b6022a7190b45239e1943981b2de3042d0b530be351d03de08f3b4",
+      "tinygrad/llm/kernels/rockchip_packed_attention.py": "aace3f08085c69a0deb29ce21244c58e1f95b50b99e31cfa3f9ae6abc04e8822",
+      "tinygrad/llm/kernels/rockchip_pool.c": "6b93a5024aa53552da934e475daaa10d84171cc6be6fd7911c5827a646e031a8",
+      "tinygrad/llm/kernels/rockchip_pool.py": "31fff31283e4660faa5b484e5a456be2c0486823e62ef0688cb600552e487709",
+      "tinygrad/llm/kernels/rockchip_qkv.py": "dd284ef8f885495ae38f7c670b127cdf2ae2ba414a0543777cd102f37cf0085d",
+      "tinygrad/llm/kernels/rockchip_recurrent.c": "93ef4514c57ccc7c0dd29f1765ef98cd99df98ceccb4ad8dd41191ad8a7c3d8e",
+      "tinygrad/llm/kernels/rockchip_recurrent.py": "af44165eae7f6c981de046dc55cac90a39adae9c2f6f2a0dc3d1484c9dbcc2e7",
+      "tinygrad/llm/kernels/rockchip_replay.py": "e4b1eeb570f17834ae12d5477bc597ec7656f4b2d77627bb7c3edee069486560",
+      "tinygrad/llm/kernels/rockchip_sigmoid.c": "b6ead2a0abe50364a3fb84ec072cdd9e5bab1caff97bc67f4cb60a3a079dec01",
+      "tinygrad/llm/kernels/rockchip_sigmoid.py": "3e8ab4e113436a4d620d01b5de16a3dc7bb8550ffe2389861e87dfbbedbecb92",
+      "tinygrad/llm/kernels/rockchip_softcap.py": "23da42409134a60761a45e34677e2c7134e8df6e4783700eecb07e862f832bb1",
+      "tinygrad/llm/kernels/rockchip_softmax.py": "f429d46acf50a329ce7f4573f2a55ee0f4686923c4f1de93bdbe1889660bff57",
+      "tinygrad/llm/kernels/rockchip_static.c": "04e7539678968204b48ac5e4d466ca38c06fb4f7c1d600ff20b8ffe24129ed50",
+      "tinygrad/llm/kernels/rockchip_static.py": "3ab6823a9fecf1b9a6d6dd0fd1d43bec6c61391d913dab3e0fd075b335d6550e",
+      "tinygrad/llm/kernels/rockchip_vision.py": "94f26b16273eec73d419fd068483721846f20cb9c1f4225fa6a9f214c038e47c",
+      "tinygrad/llm/kernels/rockchip_vision_mlp.py": "b1644c2dd0ca7da816211d18e7f1c9e9d1f0094c8028a62b137b4e080b716a9b",
+      "tinygrad/llm/kernels/rockchip_vision_pipeline.py": "26cee5cdecf29ff41058296870177930911a8e17e9219774be3a959c15d1aa94",
+      "tinygrad/llm/kernels/rockchip_vision_prepared.py": "683f93b048ab6bb1a98491028852cda8c4a121eacbcc98d924b0d91aa30720e7",
+      "tinygrad/llm/kernels/vision_embed.py": "12102e073bfbdd1484728a7a6e279c4cdd7f59dbd7713ef0d39adb6fa221990f",
+      "tinygrad/llm/model.py": "257abcc33e3ff8cf92d656642efa4375ac61591bde7e07ea43a6b00040046343",
+      "tinygrad/llm/rwkv.py": "4d9912c91212e94983ecc38dde5434cccd54a5cd4b6e17ac50debef99cdd5ee5",
+      "tinygrad/llm/serve.py": "4750c7971d126c91c776886b03f2dbf47815317907d7c05d418388f371e16c00",
+      "tinygrad/llm/speculative.py": "ba6a69a248efa202655d813cf91702b403c4073f85fc51808db51079ffb1a60b",
+      "tinygrad/llm/speculative_adaptive.py": "bdddc414c20e102fb4840d4088097cd73b692288c7e79d1c79df5cb7529105fb",
+      "tinygrad/llm/speculative_budget.py": "79a64b2bc8777d995928a1675d09617f82f4ec20a850796e6c0bb54d30169e0b",
+      "tinygrad/llm/speculative_policy.py": "b6379199d6a3ad09b5d143c0010bc8be19105312a940ad78ea35d806198d7890",
+      "tinygrad/llm/speculative_sampling.py": "fbffa90eca44034b57004b67e4b44f6c0ed06fc6a0d536359220b9a1523e0d67",
+      "tinygrad/llm/speculative_trace.py": "bdd913c8ed34c65c76027109bf2efd1d39c540123f79f4e972d73fd508d7d9da",
+      "tinygrad/llm/vision.py": "d96c9e65478ae86377112ba2831547d093a5e52d00ab93db9faf9f2826fc062a",
+      "tinygrad/mixin/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tinygrad/mixin/creation.py": "4099d41e065e5638f8bb17f6c016ec6b286bac52e5ca6c9a86b89d73cbebbebb",
+      "tinygrad/mixin/dtype.py": "99027a5281c17bfbd572f12a090bf0d31db36bd239202606c1d3d6237486ec64",
+      "tinygrad/mixin/elementwise.py": "951d9d8a83e5cd3ae5a26571d685f2cef44fa8b41b1e4c3e028f1bf4d31076de",
+      "tinygrad/mixin/gradient.py": "c88b1b5557ab5edb450ed0f7e10bd2adebfcfb572f9977446fa04c2f39cc58d6",
+      "tinygrad/mixin/movement.py": "e6412a4f11b8dadb72cab73b260405c0b39389979e4786f0d981be321f121a50",
+      "tinygrad/mixin/op.py": "c09ecfca6522014dbd7b5ac1faae8c85fdc936484cd95084ac41a3ef135e82c7",
+      "tinygrad/mixin/rand.py": "19623f666365a318b6730123dd0fad27469ced754740415b86563ce0857c0363",
+      "tinygrad/mixin/reduce.py": "6981c71968b41ee79e8e97dfdc89db4b62216fd508707b57dfa0cd42b414e79e",
+      "tinygrad/nn/__init__.py": "992c14aec20683a93469d289d5817d1a023f0e3f39ddd5b93181dc8ef5b0691e",
+      "tinygrad/nn/datasets.py": "bc5ff2d74e07452c4f82afc5d6f7e2656978e189cb64689a1e8a1670825dff67",
+      "tinygrad/nn/onnx.py": "670eaffe1386d496e8337f4be5a472cd7b3786fa610a47ba767d89871346503b",
+      "tinygrad/nn/optim.py": "981bdfa9de9baf3b82f7e80f5c32bab954c56d4f8ef902bf9940770e783dee4b",
+      "tinygrad/nn/state.py": "8b709853bca9edf31b99eb7e76c756968cb9bf521747f7dc50a86110ff974e6b",
+      "tinygrad/nn/torch.py": "377d20ff02d4c70e112830be326c8ad9a188cb490c9d15ca7d4bcffc0820d4ca",
+      "tinygrad/renderer/__init__.py": "119d64c9f98c132f9971c8b7c744bcd53ca8d3ec9e2dd0fca2d76f26ad0e8ff7",
+      "tinygrad/renderer/amd/__init__.py": "daa2583cf98a69bf59aa3f842bacb704598445fb23b9166bebc3adb9a9b7112f",
+      "tinygrad/renderer/amd/dsl.py": "dd45cbdf0d63570742eb54a21ef09266eaed95b8f3708de5363ef1c64d86606f",
+      "tinygrad/renderer/amd/elf.py": "faa631ce5f4d71fae646fa4e44b7ef6012f08b9738ba45691b9d901dcfbe77fc",
+      "tinygrad/renderer/amd/generate.py": "2bbf3599176b8dc500b253a97714977e443b7397063e38a775bcc9bd1c709824",
+      "tinygrad/renderer/amd/sqtt.py": "1bb1807a141e2bf5446af8b092e65520ddb775ff08af272271fb22b02362e49b",
+      "tinygrad/renderer/cstyle.py": "aa6c775081a9fcfbcc675e38e0f3b029c788c5a92f1c0fd46bc0c367d661a492",
+      "tinygrad/renderer/isa/__init__.py": "3fd9ff060c1bb591d79e07b5990e264e5ec2b8efd03fc18fb6fe3a5585022d8b",
+      "tinygrad/renderer/isa/x86.py": "523c94a6eeb89dd5f888967f11380b9f298745ec9b1800e3cd2726668b2c8181",
+      "tinygrad/renderer/llvmir.py": "108235c5ad3fd43aa22b6e094136c35314c4fe7c58f7b508c34d666a3a526b4f",
+      "tinygrad/renderer/nir.py": "a3d8186dcb5b6df0ef3c8aaaee3361b6d9433fe35a6b46d4a4aa0dc1193f05a7",
+      "tinygrad/renderer/ptx.py": "906bd04176ef07274e0fc9d9bf99bc86bb8d8bc9674a3099aee2eceff3d3d3e0",
+      "tinygrad/renderer/tc.py": "f8836d7fa6dee7f0f84f6adf29c192a29ffae62ca40e0372f74b128cde4e6654",
+      "tinygrad/renderer/wgsl.py": "8a5f1823834fef671a28822e21775912393f8b718b0b8e3ff7e319d9a926ef8d",
+      "tinygrad/runtime/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tinygrad/runtime/autogen/__init__.py": "89955c8ec8c5cb2d446db169379100b421f51232563eb076b9111e4845a9f5bb",
+      "tinygrad/runtime/autogen/am/__init__.py": "fb2a32843680df3df2ebef7692b0ce5aa4f8ce5da778c6abe456160c0112de74",
+      "tinygrad/runtime/autogen/am/am.py": "075d9d29b885c546897143ade1b18f36d4a4450d1fb1d899d2df8f08aa5853e1",
+      "tinygrad/runtime/autogen/am/fw.py": "c60f58eb1ee6d61cee3817c5af23ef1fdb8c9ac9d4353d07972114cef09c7c02",
+      "tinygrad/runtime/autogen/am/navi_offsets.py": "9080f1a21706918dc9392709804115aa60201c8865ac86ef2b49252a2441c7cf",
+      "tinygrad/runtime/autogen/am/pm4_nv.py": "9bb32046114fd7ddbb976cc25bd5300bad08298b87682539a1a3e860954aad16",
+      "tinygrad/runtime/autogen/am/pm4_soc15.py": "f1ace5672c822d7a728f72b376a4ee5842aa4805944ea5f24dc8289dd341fac8",
+      "tinygrad/runtime/autogen/am/pmc.py": "b65aa28d165f88fd1f17c965e48e5fcbeb7f33bb3da4cba498b819f648ea8b3e",
+      "tinygrad/runtime/autogen/am/regs.py": "81d38816611a1e086e21feca4c2e021174decab385650405e520457aacbfd10f",
+      "tinygrad/runtime/autogen/am/sdma_4_0_0.py": "e2538620e5e73b0a745ce2ba0284c709f158e2893dd478f98bbd86c04c50292b",
+      "tinygrad/runtime/autogen/am/sdma_5_0_0.py": "33e42eb0e8c9be08f698ce8dded66446ad600cf03f64179696556a69617ee5bd",
+      "tinygrad/runtime/autogen/am/sdma_6_0_0.py": "523636d23466359b244b9e5454a8d0a80a5bf8e67882a9238e571ee90d580e88",
+      "tinygrad/runtime/autogen/am/smu_13_0_0.py": "5a2254c980525c8d5c8acc15f56f2ae72520d510aa1c2499b4c2b3586570c125",
+      "tinygrad/runtime/autogen/am/smu_13_0_12.py": "0e558c4f37ef3608d5c0498c96b123bb3362ed0a093ce50acd7a0f2102342919",
+      "tinygrad/runtime/autogen/am/smu_13_0_6.py": "acd6efb5ad0b972a5553c53db400d1f806c1d37d97ee0a583d8e45947060183d",
+      "tinygrad/runtime/autogen/am/smu_14_0_2.py": "f1b5e7d9d10f0a4cfb28dad0b8afe42cd5a276206959bd525bb8e871888991d4",
+      "tinygrad/runtime/autogen/am/soc_11.py": "da4af42a9f6bd4e980cd7a8a2ae3fc34ada4995bb693506f65148ddd7f45ef6c",
+      "tinygrad/runtime/autogen/am/soc_12.py": "8e81635ccab1b30c312778ccd8804e6b5d4df81c0b391a1e9c7f1bb3375e7933",
+      "tinygrad/runtime/autogen/am/soc_9.py": "b5386d6f41ce2ec65e1f9de20bb4439eceedcccfebf0dbd269891367c7cd8d2d",
+      "tinygrad/runtime/autogen/am/vega_offsets.py": "aeedb84cc5ee439c578ab015f0a2c424d95faf3304965041fcb7b116cce2a1eb",
+      "tinygrad/runtime/autogen/amd/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tinygrad/runtime/autogen/amd/cdna/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tinygrad/runtime/autogen/amd/cdna/enum.py": "6273f0c16e079332c354b849f38268527f7bc99bf943a9e5e2831ec3f705eb4a",
+      "tinygrad/runtime/autogen/amd/cdna/ins.py": "d98fad08ef7bd7af6e1ce6459d6bc5f1f7e0f81c6be93561857049675255a3dd",
+      "tinygrad/runtime/autogen/amd/cdna/operands.py": "ae871116dbad3aa9644975ed0f1b6042c9d53d64078f01f6688c7d73ae01f381",
+      "tinygrad/runtime/autogen/amd/cdna/str_pcode.py": "e67649d19bb728278d97065a843518535a87126358710aa85f5a5cd61760fb1a",
+      "tinygrad/runtime/autogen/amd/common.py": "c05fa9bd4e9efb05483d29ddeefb5994ac21560e0d13b4cb18548a57177c7d44",
+      "tinygrad/runtime/autogen/amd/rdna3/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tinygrad/runtime/autogen/amd/rdna3/enum.py": "4c495befe2c1f11f3b2f2820fbd0d3d9b3faf4d4969312ad757c6fa7569cc9dc",
+      "tinygrad/runtime/autogen/amd/rdna3/ins.py": "652a5df671664024650c5f5b6c2eddf7af0354a556e84473a3eb207bacfc4746",
+      "tinygrad/runtime/autogen/amd/rdna3/operands.py": "96fd869a40884dec0247633c49af6e80dffc375afdbf222eb70f6b7d04bcf806",
+      "tinygrad/runtime/autogen/amd/rdna3/str_pcode.py": "b7705c1430b06c5ce1a90ac625a515708ebe11c184068bf89746f3fd5466ae39",
+      "tinygrad/runtime/autogen/amd/rdna4/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tinygrad/runtime/autogen/amd/rdna4/enum.py": "e7f785ef907c6ae1109baf9188a4b63b964e3137bf2f1328196b081396a71388",
+      "tinygrad/runtime/autogen/amd/rdna4/ins.py": "927770e3b602975581ca933998b8e8cd87e8fc9bb2213133835e0059a77c0a0b",
+      "tinygrad/runtime/autogen/amd/rdna4/operands.py": "5cca92ffc1d5f92ab3c31fbf73a8ba47d5d49dc3bdb52f257556b6ce6638d6a8",
+      "tinygrad/runtime/autogen/amd/rdna4/str_pcode.py": "b8a9001477cc9b6cfdf0b5dd8aec0bc2a49b073a6bcec0d0a811cc6fa67d3490",
+      "tinygrad/runtime/autogen/amd_gpu.py": "478e889f08e47ebf4410ea089602dd1cfe62718b92a5fe085d56ef11633ad8b6",
+      "tinygrad/runtime/autogen/amdgpu_drm.py": "c9e226465de3421c70f8986814244ce832b78b3b7643047823053e901f4a68ff",
+      "tinygrad/runtime/autogen/amdgpu_kd.py": "bbb71ab4ab4a69a8acf468222b8562ed6466c72eb3abb6df5186a78f320bd68a",
+      "tinygrad/runtime/autogen/avcodec.py": "b5dd616799a3ed4e69bf0a35b5d05c2c80759a24e6573ad68c849c0dfcc6af05",
+      "tinygrad/runtime/autogen/bnxt.py": "a2c0a2f1b9d85b04701fe1b6279ac3b50064ba5d712c1519443eb27cfe083a8c",
+      "tinygrad/runtime/autogen/comgr.py": "ed3f777f3841706da31d6b186f09e719bdc429d85d08b2c79b5db37e59f257ed",
+      "tinygrad/runtime/autogen/comgr_3.py": "8afed852b5fa28ec802a2de73bcc455ea966973058c63f41371bda444db9a62d",
+      "tinygrad/runtime/autogen/corefoundation.py": "56795809f590e21234877a256681371ee32d8cf5a597417e784988e31622087f",
+      "tinygrad/runtime/autogen/cuda.py": "64bab6b381449254db3cb8d1d60b69e10c9ffa4befa6d8294305c2ae1fa18129",
+      "tinygrad/runtime/autogen/ggml_common.py": "7edaed6afd77bd84459ebaab381c6998bb2e2788eb620a0f4c07b26242a8b891",
+      "tinygrad/runtime/autogen/hip.py": "d69dcb6f55bd4dcac2178065ebe462ad55fbed8acf17a8c3561e918fdf59aa77",
+      "tinygrad/runtime/autogen/hsa.py": "b8457e9fd6ce160d072af0e4ba1e1c34e443dd71cabd767c6511457a72f3d901",
+      "tinygrad/runtime/autogen/io_uring.py": "d8b1658c94ab9727973700f14fe40661eb87272bb9e40a02904563f304ca05ef",
+      "tinygrad/runtime/autogen/iokit.py": "d0033fb9bd4ecf4a796ac01e280d6fb3289614c8008d6e62b312d09894189162",
+      "tinygrad/runtime/autogen/kfd.py": "248a7e74aa98b54f5e9cac56bf7a2495e8f6994386705a3c6c19ab0c7c053197",
+      "tinygrad/runtime/autogen/kgsl.py": "9f050c287acacb79a4e6d15cd32eb12a137c556de9c18d77baaea80b2e8b070d",
+      "tinygrad/runtime/autogen/libc.py": "edc96d14bdacf6992407318faabdf20690ceedbb915084626e59d1514b26f04e",
+      "tinygrad/runtime/autogen/libclang.py": "8f6f44f8065512c002a2e86d3ddd1933aaa89af58b7678077f3ae9d0369f3cfa",
+      "tinygrad/runtime/autogen/libusb.py": "f234ee7c90cc4ac1c7d97724db665f2dba466580bc1205deab1a58de99992a6e",
+      "tinygrad/runtime/autogen/llvm.py": "18ccc5041f5f9227d7b8f43200da1e8cff680d40c6eadb38fc5f883aba1de1bd",
+      "tinygrad/runtime/autogen/llvm_qcom.py": "a0032f4677216211f658b92e11fc7a1060d556133d8b5e9482c7554698f08ea6",
+      "tinygrad/runtime/autogen/mesa.py": "355cc3facb9c31ce6c808a850fa9e3962e9690cf759d776cb05c1da354b61df7",
+      "tinygrad/runtime/autogen/metal.py": "842e5f17ad86aef820af1c14409660cad373c0b7d2559d81dbe978cd028fdb99",
+      "tinygrad/runtime/autogen/mlx5.py": "7b1782a5ec4aed44cf849b3e574d15b85924390b24f9368cc17014ac4ffc1e99",
+      "tinygrad/runtime/autogen/nv.py": "261256ac4322e046ff2db28235ae2ca8f68df081af1ce1509b407e814194aed6",
+      "tinygrad/runtime/autogen/nv_570.py": "411e74f3a283d3f4bed0294fb6a54a34ddf6fe624a3db8ec58df97ab66909abf",
+      "tinygrad/runtime/autogen/nv_580.py": "57157c789576e3107e187bc26242bbaf34b4cfc1a8f67245a8e587e984cd692c",
+      "tinygrad/runtime/autogen/nv_610.py": "9615048a5619c64fbb95ce61b1bea809ca42f1d301366f77a55a813d1047b41c",
+      "tinygrad/runtime/autogen/nv_regs/__init__.py": "cc89dd8a3df44879f7013b61d9d741df9bd77d50a292c6ef81ab5130c66cc8a3",
+      "tinygrad/runtime/autogen/nv_regs/dev_bus.py": "7ba8a3407e27a809be0504d285991c7a1aef1826d9e689b3aa59bb80aae65e6e",
+      "tinygrad/runtime/autogen/nv_regs/dev_falcon_second_pri.py": "391295f032d2c0fbe905d236e52a6e018f9438d2bdd76282d57f0eca5d2bfc0d",
+      "tinygrad/runtime/autogen/nv_regs/dev_falcon_v4.py": "6b3c9aedf59a7a37ba67d9b5b77f77cd5cadaac1b82040b0926e9acf1dedcee9",
+      "tinygrad/runtime/autogen/nv_regs/dev_fb.py": "6cbeb46bc9577e576926fcc982fcc0b8fa31e10206d1615311075eb28b48fe41",
+      "tinygrad/runtime/autogen/nv_regs/dev_fbif_v4.py": "8d2c87027939226d3a910157d41e660427774c3b11a17bd25c0ed1b2a9651c23",
+      "tinygrad/runtime/autogen/nv_regs/dev_fsp_pri.py": "f461181260b8e072b8df132322b03960058ce435d6da71c169153ace417edd1a",
+      "tinygrad/runtime/autogen/nv_regs/dev_gc6_island.py": "16329261e64d0f54104b062155166378319885968a7ff9ae9c2b47979b15f14f",
+      "tinygrad/runtime/autogen/nv_regs/dev_gsp.py": "8425f6b358af1acdf4dbb5549429feb05f95f649d451bccd6dc44eadd4674bc8",
+      "tinygrad/runtime/autogen/nv_regs/dev_mmu.py": "d36ae887aa8026067486e2f3fea295ca1f17c9e7867f2842d4cedea1bbf46355",
+      "tinygrad/runtime/autogen/nv_regs/dev_riscv_pri.py": "bb48da8a9f2f5b92a2aede932076709a4f2ae7266f895c77386b8aa373ab9207",
+      "tinygrad/runtime/autogen/nv_regs/dev_sec_pri.py": "ad4e6690236365ab4edad12c15d49a8a55f787a9ceecdd96d47794e25979808c",
+      "tinygrad/runtime/autogen/nv_regs/dev_therm.py": "af124c35f2ede3c96477d405b588dff2689bbd15fb5e7f1fdb40c7d2e8bdb10a",
+      "tinygrad/runtime/autogen/nv_regs/dev_vm.py": "724a62f3a9b748c63fbe5d04f3ed19cc9ffc2f3e29a8f9f4a9dca37e61887a7b",
+      "tinygrad/runtime/autogen/nv_regs/nv_ref.py": "7486129fa0586428ed6570add35d49db5f9edc4cda83457a5094b58066ba55ef",
+      "tinygrad/runtime/autogen/nvjitlink.py": "272066e86e6d51d0a064e711f22c5baa6fd065a09b640da789d60a3cac2f56d7",
+      "tinygrad/runtime/autogen/nvrtc.py": "26c305997b4f63950e8b0712d9f3cd513dc92b1753595e63235e035b7597592b",
+      "tinygrad/runtime/autogen/opencl.py": "e0da74f9804788dbb88724d5ce1e0f26c027ea4125039d62c08ad98c1f074c9a",
+      "tinygrad/runtime/autogen/pci.py": "baceb6b8c4e45429c8dc3b7eff17259aaed30d30d6ea50935ce28d69534d8bac",
+      "tinygrad/runtime/autogen/qcom_dsp.py": "4838000bcc679270d8beee74bb06d6dcd7d1a52faea0dd3d8c84f7acc160a87f",
+      "tinygrad/runtime/autogen/rockchip.py": "4fcfc349ee15a4d80728dad0a86fd781502315bdf454e4af1ff811e7f79cec2c",
+      "tinygrad/runtime/autogen/rocprof.py": "b7561632d83083620e34fc14472f5c4f1e30878eb8c856df1bf74a764a317c73",
+      "tinygrad/runtime/autogen/sqtt.py": "9f47e053dacbfe732d653db926a3957dd65c33b879b02d809b38baa8eaad98c3",
+      "tinygrad/runtime/autogen/vfio.py": "c501177743326af85725911c225ebe7dbc50f56e8882913ae22ad2d50fa33c27",
+      "tinygrad/runtime/autogen/webgpu.py": "d54d4b783bc925ad3e6b017f96aa5a27159fc2d95742bcf75e0addcb9f8ac4d6",
+      "tinygrad/runtime/ops_amd.py": "719be92c917e2c3a08ad802732dd7d116668649dfd08aef10ddea5dcc84b6436",
+      "tinygrad/runtime/ops_cl.py": "0aa8f63d58c069c6994e37750c8d41b8926f8ec27e8e54745e99bf68bef9fc8a",
+      "tinygrad/runtime/ops_cpu.py": "308017e40f4dfdf57624b535fb8eb1f6288fe8fbbd65a2d5fbbbbde9d9683232",
+      "tinygrad/runtime/ops_cuda.py": "d564db6c6927dfdfcc925f8c2cfd9938f800df2d4219dd96294f402cb92d789a",
+      "tinygrad/runtime/ops_disk.py": "d0133e07537a0e5b358bd40c0992e0abe0eb5c42c858795e9eda4140a3e1708e",
+      "tinygrad/runtime/ops_dsp.py": "67783322e6352f5f52d10e501f6b717e27fcfa716466072e03e46f7875f1676e",
+      "tinygrad/runtime/ops_hip.py": "5a023a90196ae106a0543f59045bb902425f9b3dca4ca6c67a1741b14afcabb3",
+      "tinygrad/runtime/ops_metal.py": "105ab56af475dd0a86b1e06191fbbdd4613697c257093ba61c5401feeef89e04",
+      "tinygrad/runtime/ops_npy.py": "53de851f9d707e6fceb871914b812c138cd5b1ebb669be02b55115c68266710c",
+      "tinygrad/runtime/ops_null.py": "5e1e53e866d17ab1ccf6116ac11b0283e1b329ee6b215b2e5cf4927dbed38cb1",
+      "tinygrad/runtime/ops_nv.py": "e711ef90bab87f8cd444ca2a10fbb0c9e8a602c22d8fa7c165b746b088314f30",
+      "tinygrad/runtime/ops_python.py": "62decc9aa674b47a578e06bec68d46695920524da27b10fb63da75d420df8d7b",
+      "tinygrad/runtime/ops_qcom.py": "618d7f7c97af087f97d3c5b5d1f720fd9d217a9d2c0485589d7d604b8098663b",
+      "tinygrad/runtime/ops_rdma.py": "e6e0d69734269c6501a5b8439651a0364d90285c4671fa6301c9c54f16737769",
+      "tinygrad/runtime/ops_rockchip.py": "0c01b9090b6b17c41b05a451d3fe389edfc3e620d347a67fd490b8e4b0b3bd5b",
+      "tinygrad/runtime/ops_webgpu.py": "52c7689d7fd2acb9ad1f37ec9ce3dd88a16fa51d6de93b74eb8f637ce3802e15",
+      "tinygrad/runtime/support/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tinygrad/runtime/support/am/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tinygrad/runtime/support/am/amdev.py": "dae42e13b5dbf01cff0fd29767eec3df2f7d86f0d4d78d89b0aa731a7c88c09c",
+      "tinygrad/runtime/support/am/ip.py": "972086c5373e7cd83a2b39d598551840c4a7b3e59cd2f19745581fee287bdede",
+      "tinygrad/runtime/support/amd.py": "3c888308b57f5f9b4922ffb008829610f6333a547c9fd9168f9f770fc6315c10",
+      "tinygrad/runtime/support/autogen.py": "3571a0c1e955e2c7173e3066a79040efb0f333e3302013f28e6d478ccdaf763c",
+      "tinygrad/runtime/support/c.py": "a3113a746068d0d0cd8fdbe18dbe54c20692a2cc85691618cf72dcef1cd801ae",
+      "tinygrad/runtime/support/compiler_amd.py": "230b53fbae926583d6a4a1fa4ea085773924e042496ed786aa8fbc2f8aa6ebec",
+      "tinygrad/runtime/support/compiler_cpu.py": "7980be156006d76fbc0e893154e7fb2900597d0c4d5171b4497a44d888d4fe48",
+      "tinygrad/runtime/support/compiler_cuda.py": "44e2eb882f867db26cb0a0c27716cc5c1000e4a7ea2401d3346d226573078bda",
+      "tinygrad/runtime/support/compiler_llvm.py": "4f4128c0cf88860e5445345139e81d360c7c4189912a67159d6822d2649735e5",
+      "tinygrad/runtime/support/compiler_mesa.py": "2301ed834ceea0798128e765fceff5231ec88851ca73b10a34e423952ae7eee0",
+      "tinygrad/runtime/support/compiler_qcom.py": "9c99f6e4c9e594e44c46846558e66f85d8ca700b73d371e0da54a997f72cfe34",
+      "tinygrad/runtime/support/compileserver.py": "f977fbab9038e6b895174f07c540fb26247137c63c989e373745433cd52157ec",
+      "tinygrad/runtime/support/elf.py": "155aaeb2cfdd748814150feafcb10c1ef34eb01cbd702bdbe5e0c9b03be3f388",
+      "tinygrad/runtime/support/hcq2.py": "08ccbd5ba6d0494af350eb4d8851a15d9ed1e5153cc30e7225439e4380d3bd69",
+      "tinygrad/runtime/support/memory.py": "5cd20a3b98a69caa855a7e660a0a53a64bd969fee282b853a5f68097977a5bcb",
+      "tinygrad/runtime/support/nv/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tinygrad/runtime/support/nv/ip.py": "5ad88909badc5d30ab2527569d791b58ac28d56a8d9019f1e7c43eb764b4fe8a",
+      "tinygrad/runtime/support/nv/nvdev.py": "5329dffaa57b690eb516f0d33a219c552d92dcad3f2af8a5563bc8df2b51073b",
+      "tinygrad/runtime/support/objc.py": "c00586d4e58f14adeb899275ab215dbcb75b9c7a3e8d6210c001fd2941f4628b",
+      "tinygrad/runtime/support/rdma/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tinygrad/runtime/support/rdma/bnxtdev.py": "c682c931db0c51c861ce7016a00d7aad5dc0e88bc8bef930bade4117910660f3",
+      "tinygrad/runtime/support/rockchip_int8.py": "37d3965517e0ebd5ef2a3488c0c84f4e4871ccd76edbeedd2d32a17451db10b3",
+      "tinygrad/runtime/support/system.py": "681f819e98ede6ac6451c0e499fd038eb00cc2e0a25f872e58321a39f38d9869",
+      "tinygrad/runtime/support/usb.py": "d57b34b46593c83edc2674d5e5d71ba9ca495e7009f08e116e06a35352d9b6bc",
+      "tinygrad/schedule/__init__.py": "a72195d925810318695055cc87eb1489811a51cc49d7ad9215bf68e2e92d735d",
+      "tinygrad/schedule/allreduce.py": "d736bb1070049ad4c14e9354a66be534bb6ebdc53e75f80328f2ad4f846a8ea1",
+      "tinygrad/schedule/indexing.py": "44feb97662961d7f350667b61ed33b6575c50d50848f6299adea55c7e3cbd1ab",
+      "tinygrad/schedule/memory.py": "24122dbab59fe1856939520e74fdb3828040ed7652fe897a3fac2d14f45785c6",
+      "tinygrad/schedule/multi.py": "5c88ce3832852af4a583d35bcb5ad6834eaf3d0366bf61e6b242ed6818cb72d0",
+      "tinygrad/schedule/prepare.py": "237d5580d8a0279cf49c875907fdb266e206b21d15d5570c90cdf4b2f2dd0a23",
+      "tinygrad/schedule/rangeify.py": "6af2c0e74f67d8380bbe88e6a186f0caad8641680e9f69bb17208a31cc459918",
+      "tinygrad/tensor.py": "5680ec3b2a716e435ae8f8ca42f39697ed46de7a3d50018a7becb9a368bcc56d",
+      "tinygrad/uop/__init__.py": "22495f25f31b744f0362575fe42f2608a349d4642cba4a2d0a71150f234c7db3",
+      "tinygrad/uop/divandmod.py": "40c04f04dc9057eb17c9680304fb797ce78add201e394736f6558d4e145f075c",
+      "tinygrad/uop/movement.py": "7508947bf142145b2e2ec2234d21ac424cd801ef0acb18bd79a2292c886f7a09",
+      "tinygrad/uop/ops.py": "017e94e1ecfc1ada2cb68f9e71d274dec1d744ee9ffff40ebe324387b7b00bc9",
+      "tinygrad/uop/render.py": "03d3fcad5396a0879cd8f8fcddf04c7abed04b76c7a50f5075554260a1ded89a",
+      "tinygrad/uop/spec.py": "13a8e64ad12f24a4c3806b1bce8e3d04be4478e37d84d82b45ae860e776fd4c6",
+      "tinygrad/uop/symbolic.py": "e552dae03bd8057dd5c7708493bf11e5acbcbd17d03b818d5b9c1770727021c2",
+      "tinygrad/uop/upat.py": "f89095353c93afb851b080aff975f861c070f87cc82aab90df481eade4e8c6bd",
+      "tinygrad/uop/validate.py": "9f0f248f17fb9d31e19e6537cc593d5e3e6a4ee41efc657338efc32dac7eef43",
+      "tinygrad/uop/weak.py": "856defae2c4afe2425cf5c58e2c3b2ef17ee63831c878dcdc298816721a3c97d",
+      "tinygrad/viz/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tinygrad/viz/cli.py": "997ee8b2c57f6f17a3773937432f7931591bdd081c98abfb29174ff5d0c91db9",
+      "tinygrad/viz/serve.py": "77c9b2341762caedaa8e6204bec29b95605119400373c5029480127115fa6d87",
+      "extra/rockchip/benchmark_inference.py": "95f4ebacbf406a2679db04fc098033dc58dd4d47e556b35542f96e2be9831665"
+    }
+  },
+  "cpu_owner_session": 39755,
+  "cpu_owner_terminal_exit_code": 0,
+  "cpu_owner": {
+    "path": "/home/orangepi/vlm-bench/baseline-20261021/main-task-20261023/sdk-prefill-cpu-check-v2.json",
+    "sha256": "f0f7c9729d44b6b1799861e1e1ed12f439fe282b704278e2392e8061adf781e2"
+  },
+  "cpu_logs": [
+    {
+      "path": "/home/orangepi/vlm-bench/baseline-20261021/main-task-20261023/sdk-prefill-cpu-pytest-v2.log",
+      "sha256": "83d8afb97cceadf772e57cbb66a308b9cb37e427ef1a441b012766adf1eb2230"
+    },
+    {
+      "path": "/home/orangepi/vlm-bench/baseline-20261021/main-task-20261023/sdk-prefill-cpu-mypy-v2.log",
+      "sha256": "2a0bfb13358a378b2e9ee2c7608025d98ae34b87a89ad9407afee313572167e9"
+    },
+    {
+      "path": "/home/orangepi/vlm-bench/baseline-20261021/main-task-20261023/sdk-prefill-cpu-ruff-v2.log",
+      "sha256": "902795e10c8b4745c35906cf0550c31e1c574bf211447d2ae48149d9990144d5"
+    }
+  ],
+  "policy": "Default off; broader shapes and128to2x64 dispatch not enabled. One64x3072x2048case wins1.09665x18of20pairs. Other shapes remain nearparity or slower.",
+  "profile_scope": "One separate diagnostic projection pervariant afterwarmups; not latency samples or repeated profile qualification. Profileenvironment toggles clear cachedgetenv.",
+  "next_priority": "Full Gemma2 cappedCPUattention model control/candidate. No further blind SDKwidth expansion."
+}

@@ -16,6 +16,322 @@ that this objective has already been reached.
 
 ## Latest scoped results
 
+The [causal CPU MLA work reduction](extra/rockchip/cpu_mla_attention.md) improves
+matched trained prefill from 10.69 to 11.68 proxy tok/s while preserving all 32
+fixed-teacher full-vocabulary logit vectors bit for bit. Decode remains about
+4.01 tok/s. Complete serial QK/PV operators improve 1.66×/1.59× after 14 frozen-C
+bitwise tests and 25 integrated tests. This is a validated local prefill gain;
+the existing preferred row remains because both phase medians did not improve.
+Held-out and RKLLM quality qualification remain open.
+
+The [grouped NPU projection API](extra/rockchip/grouped_mla_npu.md)
+uses one submission for forty distinct head weights, distributing whole heads
+across three register-command chains. Complete synthetic query/value projections
+are 1.69–1.89× faster than CPU at one row and 4.56–5.22× at 128 rows, including
+conversion, packing, transfers and native replay. Outputs match separate NPU
+calls bit for bit. Symbolic-token integration now exists, but trained mixed
+FP16 execution fails a finite-activation guard. The subsequent grouped INT8
+model candidate completes at 19.84 prefill proxy/4.81 decode tok/s versus
+10.62/3.97 for its matched control. It fails the unchanged local logit RMS and
+probability-distribution limits, so its faster timings are rejected for
+preferred-row promotion. CPU attention remains; these results establish neither
+comparable model quality nor an RKLLM win.
+
+The subsequent three-product residual INT8 experiment improves its matched
+control from 10.64/3.98 to 16.20/4.41 prefill-proxy/decode tok/s. Independent
+NPU operator and small-model tests pass, but the trained run still fails all
+three local quality limits: relative logit RMS 0.159280, mean probability total
+variation 0.063834 and perplexity ratio 1.028491. It is rejected for preferred-row
+promotion. The complete model error remains close to the single-product result
+despite much smaller sampled projection error; the full-path cause needs
+isolation. [Residual experiment and failed gates](../oNPU/docs/benchmark-minicpm3-mla-int8-residual-verification-v2.json).
+
+An invariant trace then checks all 124 projections at the final fixed-teacher
+decode position: actual outputs match the independent scaled integer recipe
+bit for bit. Source weights, packed codes and scales match independent hashes.
+This does not check prefill or earlier cache history. A query-only follow-up
+retains original CPU value projections and measures 12.69/4.27 tok/s versus
+10.74/4.03 for its control, but still fails every local numerical gate. It is
+also rejected for preferred-row promotion. Neither register correctness for
+one position nor faster matrix paths establish whole-model quality.
+[Actual traces](../oNPU/docs/benchmark-minicpm3-projection-trace-verification-v1.json)
+and [query-only failed gates](../oNPU/docs/benchmark-minicpm3-mla-query-only-verification-v1.json).
+
+The [CPU MLA attention kernels](extra/rockchip/cpu_mla_attention.md) now improve
+MiniCPM3 from 5.63 to 10.62 prefill proxy tok/s and from 2.89 to 3.86 decode tok/s.
+Both runs use prepared per-head FP16 tables; only the candidate adds vectorized,
+pooled FP32 QK/PV dots. Generic softmax remains, and all twelve generated sequences
+match. Captured phases contain 62 QK and 62 PV kernels per candidate call. The
+54-test CPU suite checks exact dynamic projections, cached model logits and pool
+behavior. Full-model quality qualification and RKLLM's 90.88/5.94 tok/s target
+remain open.
+
+The earlier [MLA/MoE profiles](extra/rockchip/mla_moe_profile.md) identify CPU work
+behind the largest remaining prefill gaps. NPU kernels account for only 4.6% of
+MiniCPM3's recorded native prefill time and 0.3% of DeepSeekOCR's. MiniCPM3's
+generic per-head projections repeatedly decode Q8 weights inside dot products;
+latent attention adds substantial CPU cost. DeepSeekOCR spends 98.8% of native
+prefill time in two routed expert-matmul kernels. These are measured component
+attributions with exact generated sources, not new throughput rows or wins.
+
+The subsequent [grouped CPU expert path](extra/rockchip/cpu_experts.md) measures
+95.11 prefill proxy tok/s and 23.29 decode tok/s for DeepSeekOCR, versus the
+earlier realized-weight candidate's 3.43/3.15. All 32 checked full-vocabulary
+logit vectors match the new matched control bit for bit. Both new arms defer
+weight realization; that control decodes Q8 inside expert loops, so its
+1.56/1.47 rates are distinct from the earlier baseline. The grouped path prepares
+FP16 tables and executes all 33 expert projections per captured phase, while
+dense NPU packed weights remain unchanged. It still trails RKLLM's
+182.54/31.60, uses 8,856 MiB peak RSS and has no held-out/RKLLM quality
+qualification. The earlier profile percentages do not describe this new path.
+Its subsequent component profile still attributes 81.17% of recorded prefill
+kernel time and 50.42% of decode time to CPU experts; NPU execution alone is
+4.46% and 39.24%. Copies are separate. Larger CPU row tiles subsequently passed
+exact model-logit checks but lost in complete-model timing: 96.91/23.83 versus
+98.84/24.71 tok/s for their control. The experimental runtime option was removed;
+the four-row implementation and preferred benchmark remain unchanged.
+[Current profile](../oNPU/docs/benchmark-deepseek-cpu-experts-profile-verification-v1.json).
+
+The next [selected-expert NPU API](extra/rockchip/routed_experts.md) changes weight
+addresses from guarded runtime routing IDs while retaining the atlas and task
+chains. Exact integer and ordinary/native replay tests pass. Removing padding
+at depths 896/1280 gives 1.081x/1.134x paired complete decode-projection speedups,
+with bitwise outputs against the padded path. The option remains off by default.
+A balanced prefill probe measures a 5.090x paired NPU speedup with twelve rows
+per expert, but only 1.225x when 128 rows are reserved/computed for each expert.
+Route-map construction is outside these timings. This identifies dynamic row
+counts and padded work as implementation targets; it does not certify model
+quality or an RKLLM win. Application placement and preferred model rows are
+unchanged. [Operator samples](../oNPU/docs/benchmark-expert-depths-prefill-verification-v1.json).
+
+The subsequent [dynamic-row implementation](extra/rockchip/bucketed_experts.md)
+passes exact output and task-count checks while rebuilding active command
+chains in native replay. It helps skewed routing but does not consistently beat
+fixed-capacity NPU execution: balanced/mixed cases remain slower. Full reserved
+row buffers still flow through gather, quantization and copies. Compact input
+and output storage is therefore the next target before model integration.
+
+The [compact-storage follow-up](extra/rockchip/bucketed_experts.md#compact-row-storage)
+now passes exact output and task-count tests with 768 routed rows instead of
+8,192 reserved slots. It measures 10.77/6.54/11.03 ms for balanced/skewed/mixed
+routing, with paired 3.575x/7.491x/3.660x speedups over fixed NPU storage.
+Route-map construction is excluded; model integration and trained quality remain
+open. This shows why reducing NPU matrix work alone was insufficient: the
+compact format also reduces host gather, quantization and transfer volume.
+[Complete operator proof](../oNPU/docs/benchmark-compact-experts-verification-v1.json).
+
+The first [MLA preparation experiment](extra/rockchip/cpu_mla_weights.md) now
+improves MiniCPM3 from 3.94 to 5.63 prefill proxy tok/s and from 2.19 to 2.89
+decode tok/s. Preparing its 124 per-head FP16 tables removes Q8-reading projection
+programs from each captured phase while preserving all twelve output sequences.
+The CPU suite also checks decoded weight bits and captured projection outputs.
+The original stale byte-count validation failure and its correction are preserved
+with the resumed measurement. Full-model logits/perplexity, comparable RKLLM
+quality and the remaining attention/expert optimizations are still open.
+
+GDB first captured the first twelve submissions per phase of a real
+Qwen3-0.6B RKLLM W8A8 workload: 27 tasks and 2,799 register words. It led to the qualified
+[decode buffer allocation](extra/rockchip/int8_decode_cbuf.md) and optional
+[prefill layout](extra/rockchip/int8_sdk_prefill.md). Several prefill layouts
+lose once CPU packing and conversion are included, despite faster NPU calls.
+A subsequent complete bounded 128-input/2-output pass captures 2,657 submissions,
+3,751 tasks and 367,308 register words, including active per-core task ranges
+and matrix-address bindings. Prefill includes FP16-family matrices and DPU
+conversions; decode uses INT8-family matrices without observed FP16-family
+matrices. Register-pattern families do not by themselves establish operator
+roles. This is scheduling evidence, not debugger throughput or a matched-quality
+benchmark. [Full trace and verification](../oNPU/docs/benchmark-rkllm-full-register-capture-v2.json).
+
+A separate controlled SDK capture qualified smaller physical INT8 depths.
+[Complete projections](extra/rockchip/int8_small_depth.md) improve by
+1.23–1.88x for single-row cases, but the matched RWKV7 model improves decode
+only from 12.65 to 13.10 tok/s; prefill remains about 66.8 tok/s. Correcting the
+native recurrence's normalized-key reduction order also restores exact agreement
+on all 192 fixed-prefix logit vectors against existing INT8 inference. This is
+local regression coverage, not FP16 or RKLLM quality qualification. The latest
+profile attributes 12.2% of native prefill time and 72.2% of decode time to NPU
+kernels. CPU recurrence and other CPU kernels therefore remain major prefill
+targets. [Model measurements, raw quality and restored serving](../oNPU/docs/benchmark-rwkv7-small-depth-verification-v2.json).
+
+The subsequent [RWKV7 worker-dispatch comparison](../oNPU/docs/benchmark-rwkv7-pool-spin-verification-v1.json)
+improves decode from 13.05 to 14.51 tok/s by keeping CPU workers awake between
+single-row scans and parking them at inference-call exit. All twelve timing
+sequences and all 192 full logit vectors match the checked local INT8 cohort.
+Prefill remains about 65 tok/s. The decode number exceeds the published RKLLM
+13.82 tok/s reference; prefill and matched RKLLM output quality remain open.
+The subsequent API check below covers the pinned 512-context serving path.
+This improvement changes CPU dispatch rather than NPU registers.
+It remains opt-in because the checked scope is limited and spinning consumes
+more CPU time in the separate proxy experiment.
+
+The [fresh API qualification](../oNPU/docs/benchmark-rwkv7-api-verification-v1.json)
+selects the measured RWKV7 configuration by checkpoint identity with Auto NPU
+prefill and a 128-token chunk limit. Eighteen uncached greedy chat requests
+across counting, story and code workloads reproduce the independent backend
+reference, usage, stopping behavior and NPU submission counts. Served decode
+medians are 14.44, 14.30 and 14.03 tok/s; prefill remains about 65–66 tok/s.
+These first-visible-text API metrics are separate from the canonical backend
+row. GPU-first defaults remain in place. Broader context and matched RKLLM
+quality remain unqualified; the existing normal server was preserved and both
+original models answered fresh requests after the test.
+
+The optional raw INT8 GELU feed-forward path now fuses projection scaling,
+activation and independent down-group quantization. Complete Gemma2 requests
+measure 183.86/9.93 prefill-proxy/decode tok/s against the current unfused
+control's 140.37/9.93. All twelve 64-token sequences match the prior candidate.
+The graph executes 26 fused pack calls in prefill and none in decode. This
+31.0% prefill gain preserves CPU payload bytes and native FFN outputs; the
+[implementation and evidence](extra/rockchip/fused_gelu_ffn.md) describe its
+bounds and fallback. The option remains off by default pending serving API
+qualification. RKLLM remains faster at 213.90/10.37 tok/s.
+
+Gemma2 now avoids padding 2,304 input channels to 2,560. Full 128/64/512 runs
+measure 140.29/9.79 prefill-proxy/decode tok/s against the identically configured
+padded control's 136.94/9.30. All twelve sequences match the prior host-kernel
+candidate, and packed weights save 205.5 MiB. Independent integer, FP32 and
+native-replay boundary tests passed. The [natural-depth proof](extra/rockchip/int8_natural2304.md)
+records the default promotion; broader quality, fixed-clock RKLLM parity and
+all-options API qualification remain open. The published RKLLM rates are
+still higher at 213.90/10.37 tok/s.
+
+Gemma2's capped-score attention now uses the bounded CPU kernel, preserving
+the scale, softcap, mask and softmax order. With vector GELU and final-logit
+softcap, complete 128/64/512 runs measured 138.74/9.24 prefill-proxy/decode
+tok/s, against the current control's 42.34/7.27. Both variants used three full
+warmups and three measured requests. Candidate outputs are stable but differ
+from control after the 13-token prefix, and CPU/memory/NPU clocks vary. The
+[full-model evidence](../oNPU/docs/benchmark-gemma2-host-verification-v1.json)
+does not qualify comparable quality or an RKLLM win; published reference rates
+remain higher at 213.90/10.37 tok/s.
+
+The [trained fixed-prefix follow-up](../oNPU/docs/benchmark-gemma2-host-quality-v1.json)
+finds that the free-generation divergence occurs after EOS. Its 128 natural-text
+targets pass the local host-regression limit with sampled perplexity ratio
+0.96620 versus the existing INT8 path, but argmax agreement is 90.625% and
+distributions differ substantially. Broader quality and RKLLM parity remain
+unqualified. The separate profile attributes only 31.9% of native prefill time
+to NPU matmuls, versus 89.7% of decode. CPU GELU, quantization, attention and
+conversion therefore remain important prefill targets; register tuning has a
+different practical benefit in decode.
+
+The opt-in SDK-derived INT8 prefill layout now includes its matching input
+packing and output conversion. A complete projection comparison found only
+one of the original three shapes faster: M=64, N=3072, K=2048 improved 6.9%.
+The other two were near parity, and six expanded widths were correct but
+slower in every paired block. All 126 numerical outputs matched the independent
+reference bit for bit. These results include packing, transfers, conversion
+and native dispatch, which earlier NPU-call-only timings excluded. The
+[pipeline evidence](extra/rockchip/int8_sdk_prefill.md) explains why the
+register gains alone do not establish faster model inference. The option
+remains off by default; no model timing row changes from this experiment.
+The v2 four-row CPU conversion repeat preserves 140 bitwise outputs across ten
+cases. The 64/3072/2048 case improves 9.7% against its current control, but wider
+dispatch and splitting a 128-row projection into two SDK calls remain slower.
+The [repeat and diagnostic profiles](extra/rockchip/int8_sdk_prefill_v2_results.json)
+support retaining the narrow experimental policy and returning to full-model
+CPU bottlenecks.
+
+Prepared CPU AltUp projections now unpack and tile their FP16 weights once,
+retaining FP32 activations and accumulation. A four-row/eight-column CPU tile
+shares weight loads, and four workers split output columns. A separate vector
+GELU-tanh kernel accelerates large prefill activations; measured slower decode
+and small side-input shapes retain their original path. These optional paths
+are selected by `--cpu-static-gemm` and `--cpu-gelu`.
+
+The newer `--cpu-softcap` option vectorizes the final CPU logit transform while
+preserving the generic FP32 results and greedy ties. A separately qualified
+decode buffer allocation now also covers total N=1536, K=4096 on three cores.
+
+| Model | Prefill proxy tok/s | Decode tok/s |
+|---|---:|---:|
+| Gemma4 E2B | 146.53 | 9.58 |
+| Gemma3n 2B | 117.27 | 8.57 |
+
+Both rows use three full warmups and three measured 128-input/64-output
+requests at context 512; all twelve sequences match their recorded prior
+candidates. Gemma3n's prefill proxy exceeds the published 113.83 tok/s reference
+by about 3.0%; its decode remains below 9.91 tok/s. Gemma4 still trails in both
+phases. Comparable quality and matched clock/workload qualification remain
+open. [The v5 evidence](../oNPU/docs/benchmark-gemma-decode-verification-v5.json)
+includes the signed-integer native replay check, CPU regressions and fresh replies
+from both restored normal workers. Compared with v4, Gemma4 decode rose 5.9%
+while its prefill proxy fell 0.28%; Gemma3n decode rose 3.8% and prefill rose
+0.61%. Historical comparisons do not isolate individual changes or clock drift.
+The [preceding v4 evidence](../oNPU/docs/benchmark-gemma-host-kernels-verification-v4.json)
+contains the learned-weight checks and the 8.7% narrow CBUF primitive gain.
+Other tested CBUF shapes showed no consistent benefit and retain their recipes.
+
+Gemma's shared-KV forward method now consumes its CPU attention hooks, including
+unit score scale, 512-channel heads and correct sliding masks. Profiling then
+exposed a larger decode cost: precompiled block calls made unused original CPU
+weights contiguous, unpacking whole Q8 matrices on every token. Pure unused
+arguments are now pruned with simultaneous parameter renaming; effects, custom
+gradients and device inference are preserved. A token-changing early prototype
+was rejected, and same-shaped-slot and placement regressions cover its cause.
+
+| Model | Previous prefill proxy tok/s | New | Previous decode tok/s | New |
+|---|---:|---:|---:|---:|
+| Gemma4 E2B | 19.72 | 89.59 | 0.35 | 9.03 |
+| Gemma3n 2B | 11.16 | 18.47 | 0.33 | 6.20 |
+
+Each new row uses three full warmups and three measured 128-input/64-output
+requests at context 512; all twelve sequences match the recorded prior
+candidates. Both phases still trail the published RKLLM rates, and comparable
+quality remains unqualified. The
+[model and rejection evidence](../oNPU/docs/benchmark-gemma-pruned-verification-v3.json),
+[attention kernels](extra/rockchip/gemma_cpu_attention.md) and
+[argument fix](extra/rockchip/unused_function_inputs.md) record their scope.
+The remaining Gemma3n prefill profile is dominated by six CPU AltUp projections;
+Gemma4's generic GELU path is its largest remaining CPU prefill cost.
+
+The CPU recurrent scan now processes 16 independent value lanes per key loop
+when the value dimension permits it, retaining each lane's arithmetic order.
+An isolated paired comparison measured 2.735× speedup for a 128-token fixture
+and 1.369× for single-token decode, with bitwise output/state equivalence.
+The [scan evidence](extra/rockchip/cpu_gdn_unroll.md) separates these primitive
+results from whole-model timings and records the small fallback regression.
+
+The subsequent complete Qwen3.5 0.8B/2B/4B candidates record 145.12/114.04/47.80
+prefill proxy tok/s and 21.02/11.13/5.29 decode tok/s. Each uses three full
+warmups and three measured 128-input/64-output requests at context 512; all 18
+sequences match their recorded prior candidates. These configurations also use
+mapped CPU loading and current attention hooks, so differences from historical
+runs do not isolate the scan change. All three remain below the recorded RKLLM
+rates, with comparable quality unqualified. The
+[full-model evidence](../oNPU/docs/benchmark-cpu-gdn-models-v1-verification.json)
+records source cohorts, memory, terminal process cleanup and fresh replies from
+both restored normal workers.
+
+A measured Qwen3.5-4B CPU/NPU profile explains why matrix instructions alone
+cannot solve prefill. INT8 NPU submissions account for **437.01 of 3,942.81 ms
+(11.08%)** of native prefill call time. CPU scan and generic attention/reduction
+work dominate. Decode has a different balance: NPU INT8 calls account for
+76.27% of profiled native time. This diagnostic uses one native prefill after
+three warmups, 128 input tokens and eight generated tokens at context 512. It
+does not replace the full 64-token benchmark.
+
+The CPU-attention installer excluded both output-gated and head-gated blocks.
+The shared attention kernel can compute the same attention while each gate stays
+in its original position afterward; prepared QKV remains excluded for gates. A
+window covering the entire allocated context is also equivalent to the full
+causal mask. Smaller windows, sinks, softcaps and unsupported geometries retain
+their fallbacks. These are operator/feature rules, not model-name dispatch.
+
+| Model | Previous prefill proxy tok/s | New | Previous decode tok/s | New |
+|---|---:|---:|---:|---:|
+| Qwen3.5-4B | 32.20 | 41.74 | 4.84 | 5.23 |
+| Spark-X2.5-1.7B | 53.17 | 159.37 | 9.10 | 13.10 |
+
+Each row uses three full warmups and three measured 128-input/64-output requests
+at context 512. Sequences are stable within the new candidate but differ from
+the previous path. Output quality remains unqualified, and both rows still lose
+to the recorded RKLLM rates. CPU equivalence checks include cache history,
+gate combinations, both softmax modes, the full-context window boundary and an
+independent float64 reference at 256 channels. The
+[gated-attention evidence](../oNPU/docs/benchmark-gated-attention-verification-v1.json)
+preserves the profile, raw timing/source cohorts, failed attempts and fresh
+GPU/NPU serving checks. No clock-policy change was used.
+
 The newer optional cross-request prefix cache passed CPU checks and a fixed-case
 [matched-seed trained GPU diagnostic](../oNPU/docs/speculative-prefix-reuse-matched-v4.json).
 Across six repetitions, all 42 state buffers and common probe logits matched
@@ -481,6 +797,54 @@ runtime. See [EAGLE-4 support](docs/eagle4-support.md).
   must include draft computation, target verification, rollback, accepted-token
   counts and all cache/host costs; repeated eight-token diagnostic requests do
   not establish acceleration or general output quality.
+
+Expert residual dequantization also needs a stable floating-point contract.
+An intermediate trace reproduced a synthetic decode failure bit for bit: the
+CPU recipe fused one multiply-add while the NPU readback path rounded both
+products separately. A 2.38e-7 projection difference later crossed an INT8
+vocabulary quantization boundary. Explicit FMA dequantization now passes the
+unchanged model tests. The trained residual candidate still fails its local
+logit gate and reaches 165.93/33.28 prefill-proxy/decode tok/s versus RKLLM's
+182.54/31.60. Correct registers and a passing operator are therefore separate
+from a qualified model win. [Residual model evidence](../oNPU/docs/benchmark-npu-experts-activation-verification-v5.json).
+
+Adding a third product for weight residuals passes six synthetic model modes
+and reduces error in the tested isolated projections to about 0.007–0.025%.
+The trained DeepSeekOCR run still has 0.055134 relative-logit RMS against its
+CPU-expert control, above the unchanged 0.01 gate, and measures 161.79/27.10
+prefill-proxy/decode tok/s. Therefore the remaining discrepancy cannot be
+explained or qualified solely from those projection probes. Indexed-device
+counting and the warmup memory limit also required explicit audit records.
+[Three-product run and limitations](../oNPU/docs/benchmark-npu-experts-weight-verification-v1.json).
+
+An intermediate trace now identifies a concrete amplification boundary. The
+next attention input differs by only 0.0105%, but dynamic INT8 quantization flips
+131 of 163,840 prefill codes. Independent CPU reconstruction predicts all
+491,520 changed QKV integer sums exactly, and FP32 dequantization matches. The
+attention output difference grows to 0.2751%; a later quantizer grows it further.
+The same decode boundary changes one input code and all 3,840 integer deltas
+are independently verified. This is quantization sensitivity, with no incorrect
+NPU products at that boundary. The existing model logit gate remains failed.
+[Bitwise-verified boundary trace and integer proof](../oNPU/docs/benchmark-npu-boundary-firstdiff-v2-verification.json).
+
+An exact CPU alternative keeps the N16 Half weight pack and sequential FP32
+feature order while reusing each weight across six prefill rows. It improves
+the trained prefill proxy from 106.49 to 112.88 tok/s with bitwise-identical
+teacher logits. Decode measures 25.84/25.21 tok/s, so the new option remains
+off by default and the preferred timing row is retained. Wider decode tiles
+lost their operator comparison and were removed. This supplies a measured
+prefill improvement without claiming a two-phase or RKLLM win.
+[Six-row trained results](../oNPU/docs/benchmark-deepseek-cpu-prefill-r6-verification-v1.json).
+
+The fast single-product expert candidate now measures 267.33/37.38
+prefill-proxy/decode tok/s and passes a separate local 512-target English PPL
+check: ratio 0.996349, empirical sequence-bootstrap upper estimate 1.011648,
+against 1.02. Its original raw-logit RMS gate still fails, while natural-text
+argmax agreement is 94.73% and mean TV is 0.046617. Speed, logit drift and
+task-oriented quality evidence must be reported separately. This sample uses a
+mixed-precision control and does not certify FP16, RKLLM or vision-task quality;
+no automatic promotion occurs.
+[Scoped natural-text evaluation](../oNPU/docs/benchmark-deepseek-natural-quality-verification-v1.json).
 
 The engineering target is lower time to first token and lower time per accepted
 generated token at acceptable quality and memory use. `Ops.WMMA`, direct NPU

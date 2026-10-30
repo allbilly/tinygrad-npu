@@ -1,0 +1,301 @@
+{
+  "complete": true,
+  "goal_complete": false,
+  "model_speed_qualified": false,
+  "RKLLM_quality_qualified": false,
+  "scope": "Prepared CPU kernels; four workers active throughout interleaved timing. Includes stable grouping/scatter/zero fill; excludes selector creation and packing. No model/API/RKLLM throughput claim.",
+  "prototype": {
+    "complete": true,
+    "quality_qualified": false,
+    "timing_scope": "Prepared CPU kernels; four workers active throughout interleaved timing. Includes stable grouping/scatter/zero fill; excludes selector creation and packing. No model/API/RKLLM throughput claim.",
+    "checks": [
+      {
+        "broadcast": true,
+        "rows": 1,
+        "routing": "random",
+        "all_bits_equal": true
+      },
+      {
+        "broadcast": true,
+        "rows": 1,
+        "routing": "same",
+        "all_bits_equal": true
+      },
+      {
+        "broadcast": true,
+        "rows": 17,
+        "routing": "random",
+        "all_bits_equal": true
+      },
+      {
+        "broadcast": true,
+        "rows": 17,
+        "routing": "same",
+        "all_bits_equal": true
+      },
+      {
+        "broadcast": true,
+        "rows": 128,
+        "routing": "random",
+        "all_bits_equal": true
+      },
+      {
+        "broadcast": true,
+        "rows": 128,
+        "routing": "same",
+        "all_bits_equal": true
+      },
+      {
+        "broadcast": false,
+        "rows": 1,
+        "routing": "random",
+        "all_bits_equal": true
+      },
+      {
+        "broadcast": false,
+        "rows": 1,
+        "routing": "same",
+        "all_bits_equal": true
+      },
+      {
+        "broadcast": false,
+        "rows": 17,
+        "routing": "random",
+        "all_bits_equal": true
+      },
+      {
+        "broadcast": false,
+        "rows": 17,
+        "routing": "same",
+        "all_bits_equal": true
+      },
+      {
+        "broadcast": false,
+        "rows": 128,
+        "routing": "random",
+        "all_bits_equal": true
+      },
+      {
+        "broadcast": false,
+        "rows": 128,
+        "routing": "same",
+        "all_bits_equal": true
+      }
+    ],
+    "records": [
+      {
+        "broadcast": true,
+        "shape": [
+          64,
+          896,
+          1280
+        ],
+        "rows": 128,
+        "median_ms": {
+          "current": 25.954363999999998,
+          "r4n16_full": 26.964393,
+          "r8n8": 24.309822,
+          "r8n8_full": 23.853223
+        },
+        "paired_blocks": [
+          {
+            "current": 25.852427,
+            "r4n16_full": 26.831541,
+            "r8n8": 24.203948,
+            "r8n8_full": 23.867952
+          },
+          {
+            "r8n8_full": 23.854535,
+            "r8n8": 24.306322,
+            "r4n16_full": 26.902998,
+            "current": 25.893552
+          },
+          {
+            "current": 25.896761,
+            "r4n16_full": 26.909997,
+            "r8n8": 24.276281,
+            "r8n8_full": 23.868536
+          },
+          {
+            "r8n8_full": 23.688288,
+            "r8n8": 24.329946,
+            "r4n16_full": 26.959289,
+            "current": 25.937302
+          },
+          {
+            "current": 25.971426,
+            "r4n16_full": 26.969497,
+            "r8n8": 24.291155,
+            "r8n8_full": 23.851911
+          },
+          {
+            "r8n8_full": 23.718913,
+            "r8n8": 24.324113,
+            "r4n16_full": 26.987872,
+            "current": 25.981051
+          },
+          {
+            "current": 25.988051,
+            "r4n16_full": 26.989914,
+            "r8n8": 24.313322,
+            "r8n8_full": 23.827703
+          },
+          {
+            "r8n8_full": 23.869119,
+            "r8n8": 24.355904,
+            "r4n16_full": 27.038621,
+            "current": 26.005842
+          }
+        ],
+        "paired_speedups": {
+          "current": 1.0,
+          "r4n16_full": 0.9625859420099598,
+          "r8n8": 1.0679253456848665,
+          "r8n8_full": 1.0891898676181844
+        }
+      },
+      {
+        "broadcast": false,
+        "shape": [
+          64,
+          1280,
+          896
+        ],
+        "rows": 128,
+        "median_ms": {
+          "current": 26.229694000000002,
+          "r4n16_full": 27.09535,
+          "r8n8": 24.8406485,
+          "r8n8_full": 24.1698235
+        },
+        "paired_blocks": [
+          {
+            "current": 26.153132,
+            "r4n16_full": 26.990496,
+            "r8n8": 24.789607,
+            "r8n8_full": 24.088158
+          },
+          {
+            "r8n8_full": 24.129282,
+            "r8n8": 24.806232,
+            "r4n16_full": 27.045329,
+            "current": 26.179673
+          },
+          {
+            "current": 26.204757,
+            "r4n16_full": 27.070704,
+            "r8n8": 24.831899,
+            "r8n8_full": 24.16049
+          },
+          {
+            "r8n8_full": 24.186156,
+            "r8n8": 24.833649,
+            "r4n16_full": 27.100454,
+            "current": 26.22984
+          },
+          {
+            "current": 26.229548,
+            "r4n16_full": 27.090246,
+            "r8n8": 24.847648,
+            "r8n8_full": 24.134532
+          },
+          {
+            "r8n8_full": 24.179157,
+            "r8n8": 24.868065,
+            "r4n16_full": 27.125537,
+            "current": 26.273006
+          },
+          {
+            "current": 26.27184,
+            "r4n16_full": 27.11912,
+            "r8n8": 24.868356,
+            "r8n8_full": 24.191699
+          },
+          {
+            "r8n8_full": 24.229031,
+            "r8n8": 24.898982,
+            "r4n16_full": 27.153245,
+            "current": 26.279131
+          }
+        ],
+        "paired_speedups": {
+          "current": 1.0,
+          "r4n16_full": 0.9681200732502704,
+          "r8n8": 1.0555224293184915,
+          "r8n8_full": 1.0853504547573083
+        }
+      }
+    ],
+    "sources": {
+      "3546907822c2b25f4e29cee7dc735e79d7a9ac3da26ffc57a1dd63aac9fedf01": "/home/orangepi/vlm-bench/baseline-20261021/main-task-20261023/staged/expert-tile-v2/3546907822c2b25f4e29cee7dc735e79d7a9ac3da26ffc57a1dd63aac9fedf01.c",
+      "a682d2bb16858c1c55cb4170733c7541284cbeb82df84034bd44452102b82a49": "/home/orangepi/vlm-bench/baseline-20261021/main-task-20261023/staged/expert-tile-v2/a682d2bb16858c1c55cb4170733c7541284cbeb82df84034bd44452102b82a49.c",
+      "400e55d7d1347a13fec3c094750384ced904b29c6c80eed34d01c9ef546b66ea": "/home/orangepi/vlm-bench/baseline-20261021/main-task-20261023/staged/expert-tile-v2/400e55d7d1347a13fec3c094750384ced904b29c6c80eed34d01c9ef546b66ea.c",
+      "a001360db4c82e2676cae1726b019598d3ea2443598e6c66004562e7f2d1f090": "/home/orangepi/vlm-bench/baseline-20261021/main-task-20261023/staged/expert-tile-v2/a001360db4c82e2676cae1726b019598d3ea2443598e6c66004562e7f2d1f090.c",
+      "0f99c962adea6cde704bac55f27c7cdb070797af03fe476ea88fd6a856a0b85d": "/home/orangepi/vlm-bench/baseline-20261021/main-task-20261023/staged/expert-tile-v2/0f99c962adea6cde704bac55f27c7cdb070797af03fe476ea88fd6a856a0b85d.c",
+      "106c67ee651757f738088197da8b64ac33cfe31b7e600923fb0db6a15291dd0d": "/home/orangepi/vlm-bench/baseline-20261021/main-task-20261023/staged/expert-tile-v2/106c67ee651757f738088197da8b64ac33cfe31b7e600923fb0db6a15291dd0d.c",
+      "6f10a5a39d4d09f1f31edf5569c838fe3b1fe9c7bd7c6d79c4ecec40610cff4b": "/home/orangepi/vlm-bench/baseline-20261021/main-task-20261023/staged/expert-tile-v2/6f10a5a39d4d09f1f31edf5569c838fe3b1fe9c7bd7c6d79c4ecec40610cff4b.c",
+      "37677222540d658b9aeff3307f97bbf6f9244e43124bff245037f3cc09127300": "/home/orangepi/vlm-bench/baseline-20261021/main-task-20261023/staged/expert-tile-v2/37677222540d658b9aeff3307f97bbf6f9244e43124bff245037f3cc09127300.c"
+    },
+    "initial_clocks": {
+      "/sys/class/devfreq/fdab0000.npu/cur_freq": "1000000000",
+      "/sys/class/devfreq/fb000000.gpu/cur_freq": "300000000",
+      "/sys/class/devfreq/dmc/cur_freq": "528000000",
+      "/sys/devices/system/cpu/cpufreq/policy6/scaling_cur_freq": "408000",
+      "/sys/devices/system/cpu/cpufreq/policy4/scaling_cur_freq": "2256000",
+      "/sys/devices/system/cpu/cpufreq/policy0/scaling_cur_freq": "1800000"
+    },
+    "final_clocks": {
+      "/sys/class/devfreq/fdab0000.npu/cur_freq": "1000000000",
+      "/sys/class/devfreq/fb000000.gpu/cur_freq": "300000000",
+      "/sys/class/devfreq/dmc/cur_freq": "1068000000",
+      "/sys/devices/system/cpu/cpufreq/policy6/scaling_cur_freq": "408000",
+      "/sys/devices/system/cpu/cpufreq/policy4/scaling_cur_freq": "2256000",
+      "/sys/devices/system/cpu/cpufreq/policy0/scaling_cur_freq": "1800000"
+    },
+    "runner_sha256": "55b21d757208328659409ce72c06f3208e55d4b2d7ed0bb473f96a9911a4b81b"
+  },
+  "owner": {
+    "session": 85126,
+    "exit_code": 0,
+    "path": "/home/orangepi/vlm-bench/baseline-20261021/main-task-20261023/run-expert-tile-v2.py",
+    "sha256": "8f58ee667364bc2f5b14fd8f45a31ae34e9bb9161a0fd25cc27c7ed939511a47"
+  },
+  "fresh_serving": {
+    "session": 32492,
+    "exit_code": 0,
+    "path": "/home/orangepi/vlm-bench/baseline-20261021/main-task-20261023/expert-tile-v2-check-fresh.json",
+    "sha256": "202bc9a24cf90ae77c80a6667dde83f81276a307321096a52ea9aeb03449e89c"
+  },
+  "receipt": {
+    "path": "/home/orangepi/vlm-bench/baseline-20261021/main-task-20261023/expert-tile-v2-check.json",
+    "sha256": "d0efc634523e8269160f38e4244eacbf8e2c3acc97868ec97d6e35b2ef2e7aaf"
+  },
+  "source_generator": {
+    "path": "/home/orangepi/vlm-bench/baseline-20261021/main-task-20261023/staged/expert-tile-v2/tile_source.py",
+    "sha256": "35c3eabdc6d8cb293050198f913d6c86cf04cf6209c13e6691c84c4b52f78f0b"
+  },
+  "production_baseline": {
+    "path": "/home/orangepi/tinygrad/tinygrad/llm/kernels/rockchip_experts.py",
+    "sha256": "97a70a3ebf16336894de933956f687a9426544da675e06d60cad90c2d3fb85e2"
+  },
+  "experiment_runner": {
+    "path": "/home/orangepi/vlm-bench/baseline-20261021/main-task-20261023/measure-expert-tile-v2.py",
+    "sha256": "55b21d757208328659409ce72c06f3208e55d4b2d7ed0bb473f96a9911a4b81b"
+  },
+  "candidate": "r8n8_full",
+  "prototype_only": true,
+  "initial_preflight_attempt": {
+    "executed_kernels": false,
+    "result": "failed available-memory preflight before imports/compilation; restarted under GPU-only unload lease without relaxing reserve"
+  },
+  "source_texts": {
+    "3546907822c2b25f4e29cee7dc735e79d7a9ac3da26ffc57a1dd63aac9fedf01": "#include <stddef.h>\n typedef float M4 __attribute__((vector_size(16),aligned(1)));\n typedef __fp16 H4 __attribute__((vector_size(8),aligned(1)));\n typedef int (*parallel_fn)(void(*)(void**,int,int),void**,int);\n typedef struct {float *out;const float *input;const __fp16 *weight;const int *offsets,*indices;int done[4];} ExpertWork;\n static void part(ExpertWork *w,int group,int groups) {\n  float *out=w->out;const float *input=w->input;const __fp16 *weight=w->weight;const int *indices=w->indices;\n  for(int expert=0;expert<64;expert++) {\n   if(w->offsets[expert]==w->offsets[expert+1])continue;\n   for(int block=group;block<56;block+=groups) {\n    const __fp16 *base=weight+((size_t)expert*56+block)*20480;\n    for(int first=w->offsets[expert];first<w->offsets[expert+1];first+=4) {\n     int count=w->offsets[expert+1]-first;if(count>4)count=4;\n     const float *x0=input+((size_t)indices[first+0]/6)*1280;\nconst float *x1=count>1?input+((size_t)indices[first+1]/6)*1280:(const float*)0;\nconst float *x2=count>2?input+((size_t)indices[first+2]/6)*1280:(const float*)0;\nconst float *x3=count>3?input+((size_t)indices[first+3]/6)*1280:(const float*)0;\n     M4 a00={0};\nM4 a01={0};\nM4 a02={0};\nM4 a03={0};\nM4 a10={0};\nM4 a11={0};\nM4 a12={0};\nM4 a13={0};\nM4 a20={0};\nM4 a21={0};\nM4 a22={0};\nM4 a23={0};\nM4 a30={0};\nM4 a31={0};\nM4 a32={0};\nM4 a33={0};\n     for(int k=0;k<1280;k++) {\n      M4 w0=__builtin_convertvector(*(const H4*)(base+(size_t)k*16+0),M4);\nM4 w1=__builtin_convertvector(*(const H4*)(base+(size_t)k*16+4),M4);\nM4 w2=__builtin_convertvector(*(const H4*)(base+(size_t)k*16+8),M4);\nM4 w3=__builtin_convertvector(*(const H4*)(base+(size_t)k*16+12),M4);\n      {float p=x0[k];a00=a00+(M4){p,p,p,p}*w0;a01=a01+(M4){p,p,p,p}*w1;a02=a02+(M4){p,p,p,p}*w2;a03=a03+(M4){p,p,p,p}*w3;}\nif(count>1){float p=x1[k];a10=a10+(M4){p,p,p,p}*w0;a11=a11+(M4){p,p,p,p}*w1;a12=a12+(M4){p,p,p,p}*w2;a13=a13+(M4){p,p,p,p}*w3;}\nif(count>2){float p=x2[k];a20=a20+(M4){p,p,p,p}*w0;a21=a21+(M4){p,p,p,p}*w1;a22=a22+(M4){p,p,p,p}*w2;a23=a23+(M4){p,p,p,p}*w3;}\nif(count>3){float p=x3[k];a30=a30+(M4){p,p,p,p}*w0;a31=a31+(M4){p,p,p,p}*w1;a32=a32+(M4){p,p,p,p}*w2;a33=a33+(M4){p,p,p,p}*w3;}\n     }\n     {float *dest=out+(size_t)indices[first+0]*896+block*16;*(M4*)(dest+0)=a00;*(M4*)(dest+4)=a01;*(M4*)(dest+8)=a02;*(M4*)(dest+12)=a03;}\nif(count>1){float *dest=out+(size_t)indices[first+1]*896+block*16;*(M4*)(dest+0)=a10;*(M4*)(dest+4)=a11;*(M4*)(dest+8)=a12;*(M4*)(dest+12)=a13;}\nif(count>2){float *dest=out+(size_t)indices[first+2]*896+block*16;*(M4*)(dest+0)=a20;*(M4*)(dest+4)=a21;*(M4*)(dest+8)=a22;*(M4*)(dest+12)=a23;}\nif(count>3){float *dest=out+(size_t)indices[first+3]*896+block*16;*(M4*)(dest+0)=a30;*(M4*)(dest+4)=a31;*(M4*)(dest+8)=a32;*(M4*)(dest+12)=a33;}\n    }\n   }\n  }\n }\n static void worker(void **args,int unused,int group) {\n  (void)unused;if(group<0||group>=4)return;ExpertWork *w=args[0];part(w,group,4);w->done[group]=1;\n }\n void rockchip_cpu_expert(float *out,const float *input,const int *selected,const __fp16 *weight,const int *row_count) {\n  const int rows=*row_count;const unsigned long callback=547786985680ULL;\n  if(rows<1||rows>128)__builtin_trap();\n  for(unsigned long j=0;j<688128UL;j++)out[j]=0;\n  int counts[64]={0},offsets[65],cursor[64],indices[768];\n  for(int i=0;i<rows*6;i++) {int e=selected[i];\n   if((unsigned)e>=64U){for(int j=0;j<688128;j++)out[j]=__builtin_nanf(\"\");return;}counts[e]++;}\n  offsets[0]=0;for(int e=0;e<64;e++){offsets[e+1]=offsets[e]+counts[e];cursor[e]=offsets[e];}\n  for(int i=0;i<rows*6;i++)indices[cursor[selected[i]]++]=i;\n  ExpertWork work={out,input,weight,offsets,indices,{0,0,0,0}};\n  if(!callback){part(&work,0,1);return;}\n  void *args[4]={&work,0,0,0};\n  if(((parallel_fn)callback)(worker,args,0))__builtin_trap();\n  for(int i=0;i<4;i++)if(!work.done[i])__builtin_trap();\n }",
+    "a682d2bb16858c1c55cb4170733c7541284cbeb82df84034bd44452102b82a49": "#include <stddef.h>\n typedef float M4 __attribute__((vector_size(16),aligned(1)));\n typedef __fp16 H4 __attribute__((vector_size(8),aligned(1)));\n typedef int (*parallel_fn)(void(*)(void**,int,int),void**,int);\n typedef struct {float *out;const float *input;const __fp16 *weight;const int *offsets,*indices;int done[4];} ExpertWork;\n static void part(ExpertWork *w,int group,int groups) {\n  float *out=w->out;const float *input=w->input;const __fp16 *weight=w->weight;const int *indices=w->indices;\n  for(int expert=0;expert<64;expert++) {\n   if(w->offsets[expert]==w->offsets[expert+1])continue;\n   for(int block=group;block<56;block+=groups) {\n    const __fp16 *base=weight+((size_t)expert*56+block*16/16)*20480+(block*16%16);\n    for(int first=w->offsets[expert];first<w->offsets[expert+1];first+=4) {\n     int count=w->offsets[expert+1]-first;if(count>4)count=4;\n     if(count==4){const float *x0=input+((size_t)indices[first+0]/6)*1280;\nconst float *x1=input+((size_t)indices[first+1]/6)*1280;\nconst float *x2=input+((size_t)indices[first+2]/6)*1280;\nconst float *x3=input+((size_t)indices[first+3]/6)*1280;\nM4 a00={0};\nM4 a01={0};\nM4 a02={0};\nM4 a03={0};\nM4 a10={0};\nM4 a11={0};\nM4 a12={0};\nM4 a13={0};\nM4 a20={0};\nM4 a21={0};\nM4 a22={0};\nM4 a23={0};\nM4 a30={0};\nM4 a31={0};\nM4 a32={0};\nM4 a33={0};\nfor(int k=0;k<1280;k++){M4 w0=__builtin_convertvector(*(const H4*)(base+(size_t)k*16+0),M4);\nM4 w1=__builtin_convertvector(*(const H4*)(base+(size_t)k*16+4),M4);\nM4 w2=__builtin_convertvector(*(const H4*)(base+(size_t)k*16+8),M4);\nM4 w3=__builtin_convertvector(*(const H4*)(base+(size_t)k*16+12),M4);{float p=x0[k];a00=a00+(M4){p,p,p,p}*w0;a01=a01+(M4){p,p,p,p}*w1;a02=a02+(M4){p,p,p,p}*w2;a03=a03+(M4){p,p,p,p}*w3;}\n{float p=x1[k];a10=a10+(M4){p,p,p,p}*w0;a11=a11+(M4){p,p,p,p}*w1;a12=a12+(M4){p,p,p,p}*w2;a13=a13+(M4){p,p,p,p}*w3;}\n{float p=x2[k];a20=a20+(M4){p,p,p,p}*w0;a21=a21+(M4){p,p,p,p}*w1;a22=a22+(M4){p,p,p,p}*w2;a23=a23+(M4){p,p,p,p}*w3;}\n{float p=x3[k];a30=a30+(M4){p,p,p,p}*w0;a31=a31+(M4){p,p,p,p}*w1;a32=a32+(M4){p,p,p,p}*w2;a33=a33+(M4){p,p,p,p}*w3;}}\n{float *dest=out+(size_t)indices[first+0]*896+block*16;*(M4*)(dest+0)=a00;*(M4*)(dest+4)=a01;*(M4*)(dest+8)=a02;*(M4*)(dest+12)=a03;}\n{float *dest=out+(size_t)indices[first+1]*896+block*16;*(M4*)(dest+0)=a10;*(M4*)(dest+4)=a11;*(M4*)(dest+8)=a12;*(M4*)(dest+12)=a13;}\n{float *dest=out+(size_t)indices[first+2]*896+block*16;*(M4*)(dest+0)=a20;*(M4*)(dest+4)=a21;*(M4*)(dest+8)=a22;*(M4*)(dest+12)=a23;}\n{float *dest=out+(size_t)indices[first+3]*896+block*16;*(M4*)(dest+0)=a30;*(M4*)(dest+4)=a31;*(M4*)(dest+8)=a32;*(M4*)(dest+12)=a33;}}else{const float *x0=input+((size_t)indices[first+0]/6)*1280;\nconst float *x1=count>1?input+((size_t)indices[first+1]/6)*1280:(const float*)0;\nconst float *x2=count>2?input+((size_t)indices[first+2]/6)*1280:(const float*)0;\nconst float *x3=count>3?input+((size_t)indices[first+3]/6)*1280:(const float*)0;\nM4 a00={0};\nM4 a01={0};\nM4 a02={0};\nM4 a03={0};\nM4 a10={0};\nM4 a11={0};\nM4 a12={0};\nM4 a13={0};\nM4 a20={0};\nM4 a21={0};\nM4 a22={0};\nM4 a23={0};\nM4 a30={0};\nM4 a31={0};\nM4 a32={0};\nM4 a33={0};\nfor(int k=0;k<1280;k++){M4 w0=__builtin_convertvector(*(const H4*)(base+(size_t)k*16+0),M4);\nM4 w1=__builtin_convertvector(*(const H4*)(base+(size_t)k*16+4),M4);\nM4 w2=__builtin_convertvector(*(const H4*)(base+(size_t)k*16+8),M4);\nM4 w3=__builtin_convertvector(*(const H4*)(base+(size_t)k*16+12),M4);{float p=x0[k];a00=a00+(M4){p,p,p,p}*w0;a01=a01+(M4){p,p,p,p}*w1;a02=a02+(M4){p,p,p,p}*w2;a03=a03+(M4){p,p,p,p}*w3;}\nif(count>1){float p=x1[k];a10=a10+(M4){p,p,p,p}*w0;a11=a11+(M4){p,p,p,p}*w1;a12=a12+(M4){p,p,p,p}*w2;a13=a13+(M4){p,p,p,p}*w3;}\nif(count>2){float p=x2[k];a20=a20+(M4){p,p,p,p}*w0;a21=a21+(M4){p,p,p,p}*w1;a22=a22+(M4){p,p,p,p}*w2;a23=a23+(M4){p,p,p,p}*w3;}\nif(count>3){float p=x3[k];a30=a30+(M4){p,p,p,p}*w0;a31=a31+(M4){p,p,p,p}*w1;a32=a32+(M4){p,p,p,p}*w2;a33=a33+(M4){p,p,p,p}*w3;}}\n{float *dest=out+(size_t)indices[first+0]*896+block*16;*(M4*)(dest+0)=a00;*(M4*)(dest+4)=a01;*(M4*)(dest+8)=a02;*(M4*)(dest+12)=a03;}\nif(count>1){float *dest=out+(size_t)indices[first+1]*896+block*16;*(M4*)(dest+0)=a10;*(M4*)(dest+4)=a11;*(M4*)(dest+8)=a12;*(M4*)(dest+12)=a13;}\nif(count>2){float *dest=out+(size_t)indices[first+2]*896+block*16;*(M4*)(dest+0)=a20;*(M4*)(dest+4)=a21;*(M4*)(dest+8)=a22;*(M4*)(dest+12)=a23;}\nif(count>3){float *dest=out+(size_t)indices[first+3]*896+block*16;*(M4*)(dest+0)=a30;*(M4*)(dest+4)=a31;*(M4*)(dest+8)=a32;*(M4*)(dest+12)=a33;}}\n    }\n   }\n  }\n }\n static void worker(void **args,int unused,int group) {\n  (void)unused;if(group<0||group>=4)return;ExpertWork *w=args[0];part(w,group,4);w->done[group]=1;\n }\n void rockchip_cpu_expert(float *out,const float *input,const int *selected,const __fp16 *weight,const int *row_count) {\n  const int rows=*row_count;const unsigned long callback=547786985680ULL;\n  if(rows<1||rows>128)__builtin_trap();\n  for(unsigned long j=0;j<688128UL;j++)out[j]=0;\n  int counts[64]={0},offsets[65],cursor[64],indices[768];\n  for(int i=0;i<rows*6;i++) {int e=selected[i];\n   if((unsigned)e>=64U){for(int j=0;j<688128;j++)out[j]=__builtin_nanf(\"\");return;}counts[e]++;}\n  offsets[0]=0;for(int e=0;e<64;e++){offsets[e+1]=offsets[e]+counts[e];cursor[e]=offsets[e];}\n  for(int i=0;i<rows*6;i++)indices[cursor[selected[i]]++]=i;\n  ExpertWork work={out,input,weight,offsets,indices,{0,0,0,0}};\n  if(!callback){part(&work,0,1);return;}\n  void *args[4]={&work,0,0,0};\n  if(((parallel_fn)callback)(worker,args,0))__builtin_trap();\n  for(int i=0;i<4;i++)if(!work.done[i])__builtin_trap();\n }",
+    "400e55d7d1347a13fec3c094750384ced904b29c6c80eed34d01c9ef546b66ea": "#include <stddef.h>\n typedef float M4 __attribute__((vector_size(16),aligned(1)));\n typedef __fp16 H4 __attribute__((vector_size(8),aligned(1)));\n typedef int (*parallel_fn)(void(*)(void**,int,int),void**,int);\n typedef struct {float *out;const float *input;const __fp16 *weight;const int *offsets,*indices;int done[4];} ExpertWork;\n static void part(ExpertWork *w,int group,int groups) {\n  float *out=w->out;const float *input=w->input;const __fp16 *weight=w->weight;const int *indices=w->indices;\n  for(int expert=0;expert<64;expert++) {\n   if(w->offsets[expert]==w->offsets[expert+1])continue;\n   for(int block=group;block<112;block+=groups) {\n    const __fp16 *base=weight+((size_t)expert*56+block*8/16)*20480+(block*8%16);\n    for(int first=w->offsets[expert];first<w->offsets[expert+1];first+=8) {\n     int count=w->offsets[expert+1]-first;if(count>8)count=8;\n     const float *x0=input+((size_t)indices[first+0]/6)*1280;\nconst float *x1=count>1?input+((size_t)indices[first+1]/6)*1280:(const float*)0;\nconst float *x2=count>2?input+((size_t)indices[first+2]/6)*1280:(const float*)0;\nconst float *x3=count>3?input+((size_t)indices[first+3]/6)*1280:(const float*)0;\nconst float *x4=count>4?input+((size_t)indices[first+4]/6)*1280:(const float*)0;\nconst float *x5=count>5?input+((size_t)indices[first+5]/6)*1280:(const float*)0;\nconst float *x6=count>6?input+((size_t)indices[first+6]/6)*1280:(const float*)0;\nconst float *x7=count>7?input+((size_t)indices[first+7]/6)*1280:(const float*)0;\nM4 a00={0};\nM4 a01={0};\nM4 a10={0};\nM4 a11={0};\nM4 a20={0};\nM4 a21={0};\nM4 a30={0};\nM4 a31={0};\nM4 a40={0};\nM4 a41={0};\nM4 a50={0};\nM4 a51={0};\nM4 a60={0};\nM4 a61={0};\nM4 a70={0};\nM4 a71={0};\nfor(int k=0;k<1280;k++){M4 w0=__builtin_convertvector(*(const H4*)(base+(size_t)k*16+0),M4);\nM4 w1=__builtin_convertvector(*(const H4*)(base+(size_t)k*16+4),M4);{float p=x0[k];a00=a00+(M4){p,p,p,p}*w0;a01=a01+(M4){p,p,p,p}*w1;}\nif(count>1){float p=x1[k];a10=a10+(M4){p,p,p,p}*w0;a11=a11+(M4){p,p,p,p}*w1;}\nif(count>2){float p=x2[k];a20=a20+(M4){p,p,p,p}*w0;a21=a21+(M4){p,p,p,p}*w1;}\nif(count>3){float p=x3[k];a30=a30+(M4){p,p,p,p}*w0;a31=a31+(M4){p,p,p,p}*w1;}\nif(count>4){float p=x4[k];a40=a40+(M4){p,p,p,p}*w0;a41=a41+(M4){p,p,p,p}*w1;}\nif(count>5){float p=x5[k];a50=a50+(M4){p,p,p,p}*w0;a51=a51+(M4){p,p,p,p}*w1;}\nif(count>6){float p=x6[k];a60=a60+(M4){p,p,p,p}*w0;a61=a61+(M4){p,p,p,p}*w1;}\nif(count>7){float p=x7[k];a70=a70+(M4){p,p,p,p}*w0;a71=a71+(M4){p,p,p,p}*w1;}}\n{float *dest=out+(size_t)indices[first+0]*896+block*8;*(M4*)(dest+0)=a00;*(M4*)(dest+4)=a01;}\nif(count>1){float *dest=out+(size_t)indices[first+1]*896+block*8;*(M4*)(dest+0)=a10;*(M4*)(dest+4)=a11;}\nif(count>2){float *dest=out+(size_t)indices[first+2]*896+block*8;*(M4*)(dest+0)=a20;*(M4*)(dest+4)=a21;}\nif(count>3){float *dest=out+(size_t)indices[first+3]*896+block*8;*(M4*)(dest+0)=a30;*(M4*)(dest+4)=a31;}\nif(count>4){float *dest=out+(size_t)indices[first+4]*896+block*8;*(M4*)(dest+0)=a40;*(M4*)(dest+4)=a41;}\nif(count>5){float *dest=out+(size_t)indices[first+5]*896+block*8;*(M4*)(dest+0)=a50;*(M4*)(dest+4)=a51;}\nif(count>6){float *dest=out+(size_t)indices[first+6]*896+block*8;*(M4*)(dest+0)=a60;*(M4*)(dest+4)=a61;}\nif(count>7){float *dest=out+(size_t)indices[first+7]*896+block*8;*(M4*)(dest+0)=a70;*(M4*)(dest+4)=a71;}\n    }\n   }\n  }\n }\n static void worker(void **args,int unused,int group) {\n  (void)unused;if(group<0||group>=4)return;ExpertWork *w=args[0];part(w,group,4);w->done[group]=1;\n }\n void rockchip_cpu_expert(float *out,const float *input,const int *selected,const __fp16 *weight,const int *row_count) {\n  const int rows=*row_count;const unsigned long callback=547786985680ULL;\n  if(rows<1||rows>128)__builtin_trap();\n  for(unsigned long j=0;j<688128UL;j++)out[j]=0;\n  int counts[64]={0},offsets[65],cursor[64],indices[768];\n  for(int i=0;i<rows*6;i++) {int e=selected[i];\n   if((unsigned)e>=64U){for(int j=0;j<688128;j++)out[j]=__builtin_nanf(\"\");return;}counts[e]++;}\n  offsets[0]=0;for(int e=0;e<64;e++){offsets[e+1]=offsets[e]+counts[e];cursor[e]=offsets[e];}\n  for(int i=0;i<rows*6;i++)indices[cursor[selected[i]]++]=i;\n  ExpertWork work={out,input,weight,offsets,indices,{0,0,0,0}};\n  if(!callback){part(&work,0,1);return;}\n  void *args[4]={&work,0,0,0};\n  if(((parallel_fn)callback)(worker,args,0))__builtin_trap();\n  for(int i=0;i<4;i++)if(!work.done[i])__builtin_trap();\n }",
+    "a001360db4c82e2676cae1726b019598d3ea2443598e6c66004562e7f2d1f090": "#include <stddef.h>\n typedef float M4 __attribute__((vector_size(16),aligned(1)));\n typedef __fp16 H4 __attribute__((vector_size(8),aligned(1)));\n typedef int (*parallel_fn)(void(*)(void**,int,int),void**,int);\n typedef struct {float *out;const float *input;const __fp16 *weight;const int *offsets,*indices;int done[4];} ExpertWork;\n static void part(ExpertWork *w,int group,int groups) {\n  float *out=w->out;const float *input=w->input;const __fp16 *weight=w->weight;const int *indices=w->indices;\n  for(int expert=0;expert<64;expert++) {\n   if(w->offsets[expert]==w->offsets[expert+1])continue;\n   for(int block=group;block<112;block+=groups) {\n    const __fp16 *base=weight+((size_t)expert*56+block*8/16)*20480+(block*8%16);\n    for(int first=w->offsets[expert];first<w->offsets[expert+1];first+=8) {\n     int count=w->offsets[expert+1]-first;if(count>8)count=8;\n     if(count==8){const float *x0=input+((size_t)indices[first+0]/6)*1280;\nconst float *x1=input+((size_t)indices[first+1]/6)*1280;\nconst float *x2=input+((size_t)indices[first+2]/6)*1280;\nconst float *x3=input+((size_t)indices[first+3]/6)*1280;\nconst float *x4=input+((size_t)indices[first+4]/6)*1280;\nconst float *x5=input+((size_t)indices[first+5]/6)*1280;\nconst float *x6=input+((size_t)indices[first+6]/6)*1280;\nconst float *x7=input+((size_t)indices[first+7]/6)*1280;\nM4 a00={0};\nM4 a01={0};\nM4 a10={0};\nM4 a11={0};\nM4 a20={0};\nM4 a21={0};\nM4 a30={0};\nM4 a31={0};\nM4 a40={0};\nM4 a41={0};\nM4 a50={0};\nM4 a51={0};\nM4 a60={0};\nM4 a61={0};\nM4 a70={0};\nM4 a71={0};\nfor(int k=0;k<1280;k++){M4 w0=__builtin_convertvector(*(const H4*)(base+(size_t)k*16+0),M4);\nM4 w1=__builtin_convertvector(*(const H4*)(base+(size_t)k*16+4),M4);{float p=x0[k];a00=a00+(M4){p,p,p,p}*w0;a01=a01+(M4){p,p,p,p}*w1;}\n{float p=x1[k];a10=a10+(M4){p,p,p,p}*w0;a11=a11+(M4){p,p,p,p}*w1;}\n{float p=x2[k];a20=a20+(M4){p,p,p,p}*w0;a21=a21+(M4){p,p,p,p}*w1;}\n{float p=x3[k];a30=a30+(M4){p,p,p,p}*w0;a31=a31+(M4){p,p,p,p}*w1;}\n{float p=x4[k];a40=a40+(M4){p,p,p,p}*w0;a41=a41+(M4){p,p,p,p}*w1;}\n{float p=x5[k];a50=a50+(M4){p,p,p,p}*w0;a51=a51+(M4){p,p,p,p}*w1;}\n{float p=x6[k];a60=a60+(M4){p,p,p,p}*w0;a61=a61+(M4){p,p,p,p}*w1;}\n{float p=x7[k];a70=a70+(M4){p,p,p,p}*w0;a71=a71+(M4){p,p,p,p}*w1;}}\n{float *dest=out+(size_t)indices[first+0]*896+block*8;*(M4*)(dest+0)=a00;*(M4*)(dest+4)=a01;}\n{float *dest=out+(size_t)indices[first+1]*896+block*8;*(M4*)(dest+0)=a10;*(M4*)(dest+4)=a11;}\n{float *dest=out+(size_t)indices[first+2]*896+block*8;*(M4*)(dest+0)=a20;*(M4*)(dest+4)=a21;}\n{float *dest=out+(size_t)indices[first+3]*896+block*8;*(M4*)(dest+0)=a30;*(M4*)(dest+4)=a31;}\n{float *dest=out+(size_t)indices[first+4]*896+block*8;*(M4*)(dest+0)=a40;*(M4*)(dest+4)=a41;}\n{float *dest=out+(size_t)indices[first+5]*896+block*8;*(M4*)(dest+0)=a50;*(M4*)(dest+4)=a51;}\n{float *dest=out+(size_t)indices[first+6]*896+block*8;*(M4*)(dest+0)=a60;*(M4*)(dest+4)=a61;}\n{float *dest=out+(size_t)indices[first+7]*896+block*8;*(M4*)(dest+0)=a70;*(M4*)(dest+4)=a71;}}else{const float *x0=input+((size_t)indices[first+0]/6)*1280;\nconst float *x1=count>1?input+((size_t)indices[first+1]/6)*1280:(const float*)0;\nconst float *x2=count>2?input+((size_t)indices[first+2]/6)*1280:(const float*)0;\nconst float *x3=count>3?input+((size_t)indices[first+3]/6)*1280:(const float*)0;\nconst float *x4=count>4?input+((size_t)indices[first+4]/6)*1280:(const float*)0;\nconst float *x5=count>5?input+((size_t)indices[first+5]/6)*1280:(const float*)0;\nconst float *x6=count>6?input+((size_t)indices[first+6]/6)*1280:(const float*)0;\nconst float *x7=count>7?input+((size_t)indices[first+7]/6)*1280:(const float*)0;\nM4 a00={0};\nM4 a01={0};\nM4 a10={0};\nM4 a11={0};\nM4 a20={0};\nM4 a21={0};\nM4 a30={0};\nM4 a31={0};\nM4 a40={0};\nM4 a41={0};\nM4 a50={0};\nM4 a51={0};\nM4 a60={0};\nM4 a61={0};\nM4 a70={0};\nM4 a71={0};\nfor(int k=0;k<1280;k++){M4 w0=__builtin_convertvector(*(const H4*)(base+(size_t)k*16+0),M4);\nM4 w1=__builtin_convertvector(*(const H4*)(base+(size_t)k*16+4),M4);{float p=x0[k];a00=a00+(M4){p,p,p,p}*w0;a01=a01+(M4){p,p,p,p}*w1;}\nif(count>1){float p=x1[k];a10=a10+(M4){p,p,p,p}*w0;a11=a11+(M4){p,p,p,p}*w1;}\nif(count>2){float p=x2[k];a20=a20+(M4){p,p,p,p}*w0;a21=a21+(M4){p,p,p,p}*w1;}\nif(count>3){float p=x3[k];a30=a30+(M4){p,p,p,p}*w0;a31=a31+(M4){p,p,p,p}*w1;}\nif(count>4){float p=x4[k];a40=a40+(M4){p,p,p,p}*w0;a41=a41+(M4){p,p,p,p}*w1;}\nif(count>5){float p=x5[k];a50=a50+(M4){p,p,p,p}*w0;a51=a51+(M4){p,p,p,p}*w1;}\nif(count>6){float p=x6[k];a60=a60+(M4){p,p,p,p}*w0;a61=a61+(M4){p,p,p,p}*w1;}\nif(count>7){float p=x7[k];a70=a70+(M4){p,p,p,p}*w0;a71=a71+(M4){p,p,p,p}*w1;}}\n{float *dest=out+(size_t)indices[first+0]*896+block*8;*(M4*)(dest+0)=a00;*(M4*)(dest+4)=a01;}\nif(count>1){float *dest=out+(size_t)indices[first+1]*896+block*8;*(M4*)(dest+0)=a10;*(M4*)(dest+4)=a11;}\nif(count>2){float *dest=out+(size_t)indices[first+2]*896+block*8;*(M4*)(dest+0)=a20;*(M4*)(dest+4)=a21;}\nif(count>3){float *dest=out+(size_t)indices[first+3]*896+block*8;*(M4*)(dest+0)=a30;*(M4*)(dest+4)=a31;}\nif(count>4){float *dest=out+(size_t)indices[first+4]*896+block*8;*(M4*)(dest+0)=a40;*(M4*)(dest+4)=a41;}\nif(count>5){float *dest=out+(size_t)indices[first+5]*896+block*8;*(M4*)(dest+0)=a50;*(M4*)(dest+4)=a51;}\nif(count>6){float *dest=out+(size_t)indices[first+6]*896+block*8;*(M4*)(dest+0)=a60;*(M4*)(dest+4)=a61;}\nif(count>7){float *dest=out+(size_t)indices[first+7]*896+block*8;*(M4*)(dest+0)=a70;*(M4*)(dest+4)=a71;}}\n    }\n   }\n  }\n }\n static void worker(void **args,int unused,int group) {\n  (void)unused;if(group<0||group>=4)return;ExpertWork *w=args[0];part(w,group,4);w->done[group]=1;\n }\n void rockchip_cpu_expert(float *out,const float *input,const int *selected,const __fp16 *weight,const int *row_count) {\n  const int rows=*row_count;const unsigned long callback=547786985680ULL;\n  if(rows<1||rows>128)__builtin_trap();\n  for(unsigned long j=0;j<688128UL;j++)out[j]=0;\n  int counts[64]={0},offsets[65],cursor[64],indices[768];\n  for(int i=0;i<rows*6;i++) {int e=selected[i];\n   if((unsigned)e>=64U){for(int j=0;j<688128;j++)out[j]=__builtin_nanf(\"\");return;}counts[e]++;}\n  offsets[0]=0;for(int e=0;e<64;e++){offsets[e+1]=offsets[e]+counts[e];cursor[e]=offsets[e];}\n  for(int i=0;i<rows*6;i++)indices[cursor[selected[i]]++]=i;\n  ExpertWork work={out,input,weight,offsets,indices,{0,0,0,0}};\n  if(!callback){part(&work,0,1);return;}\n  void *args[4]={&work,0,0,0};\n  if(((parallel_fn)callback)(worker,args,0))__builtin_trap();\n  for(int i=0;i<4;i++)if(!work.done[i])__builtin_trap();\n }",
+    "0f99c962adea6cde704bac55f27c7cdb070797af03fe476ea88fd6a856a0b85d": "#include <stddef.h>\n typedef float M4 __attribute__((vector_size(16),aligned(1)));\n typedef __fp16 H4 __attribute__((vector_size(8),aligned(1)));\n typedef int (*parallel_fn)(void(*)(void**,int,int),void**,int);\n typedef struct {float *out;const float *input;const __fp16 *weight;const int *offsets,*indices;int done[4];} ExpertWork;\n static void part(ExpertWork *w,int group,int groups) {\n  float *out=w->out;const float *input=w->input;const __fp16 *weight=w->weight;const int *indices=w->indices;\n  for(int expert=0;expert<64;expert++) {\n   if(w->offsets[expert]==w->offsets[expert+1])continue;\n   for(int block=group;block<80;block+=groups) {\n    const __fp16 *base=weight+((size_t)expert*80+block)*14336;\n    for(int first=w->offsets[expert];first<w->offsets[expert+1];first+=4) {\n     int count=w->offsets[expert+1]-first;if(count>4)count=4;\n     const float *x0=input+((size_t)indices[first+0])*896;\nconst float *x1=count>1?input+((size_t)indices[first+1])*896:(const float*)0;\nconst float *x2=count>2?input+((size_t)indices[first+2])*896:(const float*)0;\nconst float *x3=count>3?input+((size_t)indices[first+3])*896:(const float*)0;\n     M4 a00={0};\nM4 a01={0};\nM4 a02={0};\nM4 a03={0};\nM4 a10={0};\nM4 a11={0};\nM4 a12={0};\nM4 a13={0};\nM4 a20={0};\nM4 a21={0};\nM4 a22={0};\nM4 a23={0};\nM4 a30={0};\nM4 a31={0};\nM4 a32={0};\nM4 a33={0};\n     for(int k=0;k<896;k++) {\n      M4 w0=__builtin_convertvector(*(const H4*)(base+(size_t)k*16+0),M4);\nM4 w1=__builtin_convertvector(*(const H4*)(base+(size_t)k*16+4),M4);\nM4 w2=__builtin_convertvector(*(const H4*)(base+(size_t)k*16+8),M4);\nM4 w3=__builtin_convertvector(*(const H4*)(base+(size_t)k*16+12),M4);\n      {float p=x0[k];a00=a00+(M4){p,p,p,p}*w0;a01=a01+(M4){p,p,p,p}*w1;a02=a02+(M4){p,p,p,p}*w2;a03=a03+(M4){p,p,p,p}*w3;}\nif(count>1){float p=x1[k];a10=a10+(M4){p,p,p,p}*w0;a11=a11+(M4){p,p,p,p}*w1;a12=a12+(M4){p,p,p,p}*w2;a13=a13+(M4){p,p,p,p}*w3;}\nif(count>2){float p=x2[k];a20=a20+(M4){p,p,p,p}*w0;a21=a21+(M4){p,p,p,p}*w1;a22=a22+(M4){p,p,p,p}*w2;a23=a23+(M4){p,p,p,p}*w3;}\nif(count>3){float p=x3[k];a30=a30+(M4){p,p,p,p}*w0;a31=a31+(M4){p,p,p,p}*w1;a32=a32+(M4){p,p,p,p}*w2;a33=a33+(M4){p,p,p,p}*w3;}\n     }\n     {float *dest=out+(size_t)indices[first+0]*1280+block*16;*(M4*)(dest+0)=a00;*(M4*)(dest+4)=a01;*(M4*)(dest+8)=a02;*(M4*)(dest+12)=a03;}\nif(count>1){float *dest=out+(size_t)indices[first+1]*1280+block*16;*(M4*)(dest+0)=a10;*(M4*)(dest+4)=a11;*(M4*)(dest+8)=a12;*(M4*)(dest+12)=a13;}\nif(count>2){float *dest=out+(size_t)indices[first+2]*1280+block*16;*(M4*)(dest+0)=a20;*(M4*)(dest+4)=a21;*(M4*)(dest+8)=a22;*(M4*)(dest+12)=a23;}\nif(count>3){float *dest=out+(size_t)indices[first+3]*1280+block*16;*(M4*)(dest+0)=a30;*(M4*)(dest+4)=a31;*(M4*)(dest+8)=a32;*(M4*)(dest+12)=a33;}\n    }\n   }\n  }\n }\n static void worker(void **args,int unused,int group) {\n  (void)unused;if(group<0||group>=4)return;ExpertWork *w=args[0];part(w,group,4);w->done[group]=1;\n }\n void rockchip_cpu_expert(float *out,const float *input,const int *selected,const __fp16 *weight,const int *row_count) {\n  const int rows=*row_count;const unsigned long callback=547786985680ULL;\n  if(rows<1||rows>128)__builtin_trap();\n  for(unsigned long j=0;j<983040UL;j++)out[j]=0;\n  int counts[64]={0},offsets[65],cursor[64],indices[768];\n  for(int i=0;i<rows*6;i++) {int e=selected[i];\n   if((unsigned)e>=64U){for(int j=0;j<983040;j++)out[j]=__builtin_nanf(\"\");return;}counts[e]++;}\n  offsets[0]=0;for(int e=0;e<64;e++){offsets[e+1]=offsets[e]+counts[e];cursor[e]=offsets[e];}\n  for(int i=0;i<rows*6;i++)indices[cursor[selected[i]]++]=i;\n  ExpertWork work={out,input,weight,offsets,indices,{0,0,0,0}};\n  if(!callback){part(&work,0,1);return;}\n  void *args[4]={&work,0,0,0};\n  if(((parallel_fn)callback)(worker,args,0))__builtin_trap();\n  for(int i=0;i<4;i++)if(!work.done[i])__builtin_trap();\n }",
+    "106c67ee651757f738088197da8b64ac33cfe31b7e600923fb0db6a15291dd0d": "#include <stddef.h>\n typedef float M4 __attribute__((vector_size(16),aligned(1)));\n typedef __fp16 H4 __attribute__((vector_size(8),aligned(1)));\n typedef int (*parallel_fn)(void(*)(void**,int,int),void**,int);\n typedef struct {float *out;const float *input;const __fp16 *weight;const int *offsets,*indices;int done[4];} ExpertWork;\n static void part(ExpertWork *w,int group,int groups) {\n  float *out=w->out;const float *input=w->input;const __fp16 *weight=w->weight;const int *indices=w->indices;\n  for(int expert=0;expert<64;expert++) {\n   if(w->offsets[expert]==w->offsets[expert+1])continue;\n   for(int block=group;block<80;block+=groups) {\n    const __fp16 *base=weight+((size_t)expert*80+block*16/16)*14336+(block*16%16);\n    for(int first=w->offsets[expert];first<w->offsets[expert+1];first+=4) {\n     int count=w->offsets[expert+1]-first;if(count>4)count=4;\n     if(count==4){const float *x0=input+((size_t)indices[first+0])*896;\nconst float *x1=input+((size_t)indices[first+1])*896;\nconst float *x2=input+((size_t)indices[first+2])*896;\nconst float *x3=input+((size_t)indices[first+3])*896;\nM4 a00={0};\nM4 a01={0};\nM4 a02={0};\nM4 a03={0};\nM4 a10={0};\nM4 a11={0};\nM4 a12={0};\nM4 a13={0};\nM4 a20={0};\nM4 a21={0};\nM4 a22={0};\nM4 a23={0};\nM4 a30={0};\nM4 a31={0};\nM4 a32={0};\nM4 a33={0};\nfor(int k=0;k<896;k++){M4 w0=__builtin_convertvector(*(const H4*)(base+(size_t)k*16+0),M4);\nM4 w1=__builtin_convertvector(*(const H4*)(base+(size_t)k*16+4),M4);\nM4 w2=__builtin_convertvector(*(const H4*)(base+(size_t)k*16+8),M4);\nM4 w3=__builtin_convertvector(*(const H4*)(base+(size_t)k*16+12),M4);{float p=x0[k];a00=a00+(M4){p,p,p,p}*w0;a01=a01+(M4){p,p,p,p}*w1;a02=a02+(M4){p,p,p,p}*w2;a03=a03+(M4){p,p,p,p}*w3;}\n{float p=x1[k];a10=a10+(M4){p,p,p,p}*w0;a11=a11+(M4){p,p,p,p}*w1;a12=a12+(M4){p,p,p,p}*w2;a13=a13+(M4){p,p,p,p}*w3;}\n{float p=x2[k];a20=a20+(M4){p,p,p,p}*w0;a21=a21+(M4){p,p,p,p}*w1;a22=a22+(M4){p,p,p,p}*w2;a23=a23+(M4){p,p,p,p}*w3;}\n{float p=x3[k];a30=a30+(M4){p,p,p,p}*w0;a31=a31+(M4){p,p,p,p}*w1;a32=a32+(M4){p,p,p,p}*w2;a33=a33+(M4){p,p,p,p}*w3;}}\n{float *dest=out+(size_t)indices[first+0]*1280+block*16;*(M4*)(dest+0)=a00;*(M4*)(dest+4)=a01;*(M4*)(dest+8)=a02;*(M4*)(dest+12)=a03;}\n{float *dest=out+(size_t)indices[first+1]*1280+block*16;*(M4*)(dest+0)=a10;*(M4*)(dest+4)=a11;*(M4*)(dest+8)=a12;*(M4*)(dest+12)=a13;}\n{float *dest=out+(size_t)indices[first+2]*1280+block*16;*(M4*)(dest+0)=a20;*(M4*)(dest+4)=a21;*(M4*)(dest+8)=a22;*(M4*)(dest+12)=a23;}\n{float *dest=out+(size_t)indices[first+3]*1280+block*16;*(M4*)(dest+0)=a30;*(M4*)(dest+4)=a31;*(M4*)(dest+8)=a32;*(M4*)(dest+12)=a33;}}else{const float *x0=input+((size_t)indices[first+0])*896;\nconst float *x1=count>1?input+((size_t)indices[first+1])*896:(const float*)0;\nconst float *x2=count>2?input+((size_t)indices[first+2])*896:(const float*)0;\nconst float *x3=count>3?input+((size_t)indices[first+3])*896:(const float*)0;\nM4 a00={0};\nM4 a01={0};\nM4 a02={0};\nM4 a03={0};\nM4 a10={0};\nM4 a11={0};\nM4 a12={0};\nM4 a13={0};\nM4 a20={0};\nM4 a21={0};\nM4 a22={0};\nM4 a23={0};\nM4 a30={0};\nM4 a31={0};\nM4 a32={0};\nM4 a33={0};\nfor(int k=0;k<896;k++){M4 w0=__builtin_convertvector(*(const H4*)(base+(size_t)k*16+0),M4);\nM4 w1=__builtin_convertvector(*(const H4*)(base+(size_t)k*16+4),M4);\nM4 w2=__builtin_convertvector(*(const H4*)(base+(size_t)k*16+8),M4);\nM4 w3=__builtin_convertvector(*(const H4*)(base+(size_t)k*16+12),M4);{float p=x0[k];a00=a00+(M4){p,p,p,p}*w0;a01=a01+(M4){p,p,p,p}*w1;a02=a02+(M4){p,p,p,p}*w2;a03=a03+(M4){p,p,p,p}*w3;}\nif(count>1){float p=x1[k];a10=a10+(M4){p,p,p,p}*w0;a11=a11+(M4){p,p,p,p}*w1;a12=a12+(M4){p,p,p,p}*w2;a13=a13+(M4){p,p,p,p}*w3;}\nif(count>2){float p=x2[k];a20=a20+(M4){p,p,p,p}*w0;a21=a21+(M4){p,p,p,p}*w1;a22=a22+(M4){p,p,p,p}*w2;a23=a23+(M4){p,p,p,p}*w3;}\nif(count>3){float p=x3[k];a30=a30+(M4){p,p,p,p}*w0;a31=a31+(M4){p,p,p,p}*w1;a32=a32+(M4){p,p,p,p}*w2;a33=a33+(M4){p,p,p,p}*w3;}}\n{float *dest=out+(size_t)indices[first+0]*1280+block*16;*(M4*)(dest+0)=a00;*(M4*)(dest+4)=a01;*(M4*)(dest+8)=a02;*(M4*)(dest+12)=a03;}\nif(count>1){float *dest=out+(size_t)indices[first+1]*1280+block*16;*(M4*)(dest+0)=a10;*(M4*)(dest+4)=a11;*(M4*)(dest+8)=a12;*(M4*)(dest+12)=a13;}\nif(count>2){float *dest=out+(size_t)indices[first+2]*1280+block*16;*(M4*)(dest+0)=a20;*(M4*)(dest+4)=a21;*(M4*)(dest+8)=a22;*(M4*)(dest+12)=a23;}\nif(count>3){float *dest=out+(size_t)indices[first+3]*1280+block*16;*(M4*)(dest+0)=a30;*(M4*)(dest+4)=a31;*(M4*)(dest+8)=a32;*(M4*)(dest+12)=a33;}}\n    }\n   }\n  }\n }\n static void worker(void **args,int unused,int group) {\n  (void)unused;if(group<0||group>=4)return;ExpertWork *w=args[0];part(w,group,4);w->done[group]=1;\n }\n void rockchip_cpu_expert(float *out,const float *input,const int *selected,const __fp16 *weight,const int *row_count) {\n  const int rows=*row_count;const unsigned long callback=547786985680ULL;\n  if(rows<1||rows>128)__builtin_trap();\n  for(unsigned long j=0;j<983040UL;j++)out[j]=0;\n  int counts[64]={0},offsets[65],cursor[64],indices[768];\n  for(int i=0;i<rows*6;i++) {int e=selected[i];\n   if((unsigned)e>=64U){for(int j=0;j<983040;j++)out[j]=__builtin_nanf(\"\");return;}counts[e]++;}\n  offsets[0]=0;for(int e=0;e<64;e++){offsets[e+1]=offsets[e]+counts[e];cursor[e]=offsets[e];}\n  for(int i=0;i<rows*6;i++)indices[cursor[selected[i]]++]=i;\n  ExpertWork work={out,input,weight,offsets,indices,{0,0,0,0}};\n  if(!callback){part(&work,0,1);return;}\n  void *args[4]={&work,0,0,0};\n  if(((parallel_fn)callback)(worker,args,0))__builtin_trap();\n  for(int i=0;i<4;i++)if(!work.done[i])__builtin_trap();\n }",
+    "6f10a5a39d4d09f1f31edf5569c838fe3b1fe9c7bd7c6d79c4ecec40610cff4b": "#include <stddef.h>\n typedef float M4 __attribute__((vector_size(16),aligned(1)));\n typedef __fp16 H4 __attribute__((vector_size(8),aligned(1)));\n typedef int (*parallel_fn)(void(*)(void**,int,int),void**,int);\n typedef struct {float *out;const float *input;const __fp16 *weight;const int *offsets,*indices;int done[4];} ExpertWork;\n static void part(ExpertWork *w,int group,int groups) {\n  float *out=w->out;const float *input=w->input;const __fp16 *weight=w->weight;const int *indices=w->indices;\n  for(int expert=0;expert<64;expert++) {\n   if(w->offsets[expert]==w->offsets[expert+1])continue;\n   for(int block=group;block<160;block+=groups) {\n    const __fp16 *base=weight+((size_t)expert*80+block*8/16)*14336+(block*8%16);\n    for(int first=w->offsets[expert];first<w->offsets[expert+1];first+=8) {\n     int count=w->offsets[expert+1]-first;if(count>8)count=8;\n     const float *x0=input+((size_t)indices[first+0])*896;\nconst float *x1=count>1?input+((size_t)indices[first+1])*896:(const float*)0;\nconst float *x2=count>2?input+((size_t)indices[first+2])*896:(const float*)0;\nconst float *x3=count>3?input+((size_t)indices[first+3])*896:(const float*)0;\nconst float *x4=count>4?input+((size_t)indices[first+4])*896:(const float*)0;\nconst float *x5=count>5?input+((size_t)indices[first+5])*896:(const float*)0;\nconst float *x6=count>6?input+((size_t)indices[first+6])*896:(const float*)0;\nconst float *x7=count>7?input+((size_t)indices[first+7])*896:(const float*)0;\nM4 a00={0};\nM4 a01={0};\nM4 a10={0};\nM4 a11={0};\nM4 a20={0};\nM4 a21={0};\nM4 a30={0};\nM4 a31={0};\nM4 a40={0};\nM4 a41={0};\nM4 a50={0};\nM4 a51={0};\nM4 a60={0};\nM4 a61={0};\nM4 a70={0};\nM4 a71={0};\nfor(int k=0;k<896;k++){M4 w0=__builtin_convertvector(*(const H4*)(base+(size_t)k*16+0),M4);\nM4 w1=__builtin_convertvector(*(const H4*)(base+(size_t)k*16+4),M4);{float p=x0[k];a00=a00+(M4){p,p,p,p}*w0;a01=a01+(M4){p,p,p,p}*w1;}\nif(count>1){float p=x1[k];a10=a10+(M4){p,p,p,p}*w0;a11=a11+(M4){p,p,p,p}*w1;}\nif(count>2){float p=x2[k];a20=a20+(M4){p,p,p,p}*w0;a21=a21+(M4){p,p,p,p}*w1;}\nif(count>3){float p=x3[k];a30=a30+(M4){p,p,p,p}*w0;a31=a31+(M4){p,p,p,p}*w1;}\nif(count>4){float p=x4[k];a40=a40+(M4){p,p,p,p}*w0;a41=a41+(M4){p,p,p,p}*w1;}\nif(count>5){float p=x5[k];a50=a50+(M4){p,p,p,p}*w0;a51=a51+(M4){p,p,p,p}*w1;}\nif(count>6){float p=x6[k];a60=a60+(M4){p,p,p,p}*w0;a61=a61+(M4){p,p,p,p}*w1;}\nif(count>7){float p=x7[k];a70=a70+(M4){p,p,p,p}*w0;a71=a71+(M4){p,p,p,p}*w1;}}\n{float *dest=out+(size_t)indices[first+0]*1280+block*8;*(M4*)(dest+0)=a00;*(M4*)(dest+4)=a01;}\nif(count>1){float *dest=out+(size_t)indices[first+1]*1280+block*8;*(M4*)(dest+0)=a10;*(M4*)(dest+4)=a11;}\nif(count>2){float *dest=out+(size_t)indices[first+2]*1280+block*8;*(M4*)(dest+0)=a20;*(M4*)(dest+4)=a21;}\nif(count>3){float *dest=out+(size_t)indices[first+3]*1280+block*8;*(M4*)(dest+0)=a30;*(M4*)(dest+4)=a31;}\nif(count>4){float *dest=out+(size_t)indices[first+4]*1280+block*8;*(M4*)(dest+0)=a40;*(M4*)(dest+4)=a41;}\nif(count>5){float *dest=out+(size_t)indices[first+5]*1280+block*8;*(M4*)(dest+0)=a50;*(M4*)(dest+4)=a51;}\nif(count>6){float *dest=out+(size_t)indices[first+6]*1280+block*8;*(M4*)(dest+0)=a60;*(M4*)(dest+4)=a61;}\nif(count>7){float *dest=out+(size_t)indices[first+7]*1280+block*8;*(M4*)(dest+0)=a70;*(M4*)(dest+4)=a71;}\n    }\n   }\n  }\n }\n static void worker(void **args,int unused,int group) {\n  (void)unused;if(group<0||group>=4)return;ExpertWork *w=args[0];part(w,group,4);w->done[group]=1;\n }\n void rockchip_cpu_expert(float *out,const float *input,const int *selected,const __fp16 *weight,const int *row_count) {\n  const int rows=*row_count;const unsigned long callback=547786985680ULL;\n  if(rows<1||rows>128)__builtin_trap();\n  for(unsigned long j=0;j<983040UL;j++)out[j]=0;\n  int counts[64]={0},offsets[65],cursor[64],indices[768];\n  for(int i=0;i<rows*6;i++) {int e=selected[i];\n   if((unsigned)e>=64U){for(int j=0;j<983040;j++)out[j]=__builtin_nanf(\"\");return;}counts[e]++;}\n  offsets[0]=0;for(int e=0;e<64;e++){offsets[e+1]=offsets[e]+counts[e];cursor[e]=offsets[e];}\n  for(int i=0;i<rows*6;i++)indices[cursor[selected[i]]++]=i;\n  ExpertWork work={out,input,weight,offsets,indices,{0,0,0,0}};\n  if(!callback){part(&work,0,1);return;}\n  void *args[4]={&work,0,0,0};\n  if(((parallel_fn)callback)(worker,args,0))__builtin_trap();\n  for(int i=0;i<4;i++)if(!work.done[i])__builtin_trap();\n }",
+    "37677222540d658b9aeff3307f97bbf6f9244e43124bff245037f3cc09127300": "#include <stddef.h>\n typedef float M4 __attribute__((vector_size(16),aligned(1)));\n typedef __fp16 H4 __attribute__((vector_size(8),aligned(1)));\n typedef int (*parallel_fn)(void(*)(void**,int,int),void**,int);\n typedef struct {float *out;const float *input;const __fp16 *weight;const int *offsets,*indices;int done[4];} ExpertWork;\n static void part(ExpertWork *w,int group,int groups) {\n  float *out=w->out;const float *input=w->input;const __fp16 *weight=w->weight;const int *indices=w->indices;\n  for(int expert=0;expert<64;expert++) {\n   if(w->offsets[expert]==w->offsets[expert+1])continue;\n   for(int block=group;block<160;block+=groups) {\n    const __fp16 *base=weight+((size_t)expert*80+block*8/16)*14336+(block*8%16);\n    for(int first=w->offsets[expert];first<w->offsets[expert+1];first+=8) {\n     int count=w->offsets[expert+1]-first;if(count>8)count=8;\n     if(count==8){const float *x0=input+((size_t)indices[first+0])*896;\nconst float *x1=input+((size_t)indices[first+1])*896;\nconst float *x2=input+((size_t)indices[first+2])*896;\nconst float *x3=input+((size_t)indices[first+3])*896;\nconst float *x4=input+((size_t)indices[first+4])*896;\nconst float *x5=input+((size_t)indices[first+5])*896;\nconst float *x6=input+((size_t)indices[first+6])*896;\nconst float *x7=input+((size_t)indices[first+7])*896;\nM4 a00={0};\nM4 a01={0};\nM4 a10={0};\nM4 a11={0};\nM4 a20={0};\nM4 a21={0};\nM4 a30={0};\nM4 a31={0};\nM4 a40={0};\nM4 a41={0};\nM4 a50={0};\nM4 a51={0};\nM4 a60={0};\nM4 a61={0};\nM4 a70={0};\nM4 a71={0};\nfor(int k=0;k<896;k++){M4 w0=__builtin_convertvector(*(const H4*)(base+(size_t)k*16+0),M4);\nM4 w1=__builtin_convertvector(*(const H4*)(base+(size_t)k*16+4),M4);{float p=x0[k];a00=a00+(M4){p,p,p,p}*w0;a01=a01+(M4){p,p,p,p}*w1;}\n{float p=x1[k];a10=a10+(M4){p,p,p,p}*w0;a11=a11+(M4){p,p,p,p}*w1;}\n{float p=x2[k];a20=a20+(M4){p,p,p,p}*w0;a21=a21+(M4){p,p,p,p}*w1;}\n{float p=x3[k];a30=a30+(M4){p,p,p,p}*w0;a31=a31+(M4){p,p,p,p}*w1;}\n{float p=x4[k];a40=a40+(M4){p,p,p,p}*w0;a41=a41+(M4){p,p,p,p}*w1;}\n{float p=x5[k];a50=a50+(M4){p,p,p,p}*w0;a51=a51+(M4){p,p,p,p}*w1;}\n{float p=x6[k];a60=a60+(M4){p,p,p,p}*w0;a61=a61+(M4){p,p,p,p}*w1;}\n{float p=x7[k];a70=a70+(M4){p,p,p,p}*w0;a71=a71+(M4){p,p,p,p}*w1;}}\n{float *dest=out+(size_t)indices[first+0]*1280+block*8;*(M4*)(dest+0)=a00;*(M4*)(dest+4)=a01;}\n{float *dest=out+(size_t)indices[first+1]*1280+block*8;*(M4*)(dest+0)=a10;*(M4*)(dest+4)=a11;}\n{float *dest=out+(size_t)indices[first+2]*1280+block*8;*(M4*)(dest+0)=a20;*(M4*)(dest+4)=a21;}\n{float *dest=out+(size_t)indices[first+3]*1280+block*8;*(M4*)(dest+0)=a30;*(M4*)(dest+4)=a31;}\n{float *dest=out+(size_t)indices[first+4]*1280+block*8;*(M4*)(dest+0)=a40;*(M4*)(dest+4)=a41;}\n{float *dest=out+(size_t)indices[first+5]*1280+block*8;*(M4*)(dest+0)=a50;*(M4*)(dest+4)=a51;}\n{float *dest=out+(size_t)indices[first+6]*1280+block*8;*(M4*)(dest+0)=a60;*(M4*)(dest+4)=a61;}\n{float *dest=out+(size_t)indices[first+7]*1280+block*8;*(M4*)(dest+0)=a70;*(M4*)(dest+4)=a71;}}else{const float *x0=input+((size_t)indices[first+0])*896;\nconst float *x1=count>1?input+((size_t)indices[first+1])*896:(const float*)0;\nconst float *x2=count>2?input+((size_t)indices[first+2])*896:(const float*)0;\nconst float *x3=count>3?input+((size_t)indices[first+3])*896:(const float*)0;\nconst float *x4=count>4?input+((size_t)indices[first+4])*896:(const float*)0;\nconst float *x5=count>5?input+((size_t)indices[first+5])*896:(const float*)0;\nconst float *x6=count>6?input+((size_t)indices[first+6])*896:(const float*)0;\nconst float *x7=count>7?input+((size_t)indices[first+7])*896:(const float*)0;\nM4 a00={0};\nM4 a01={0};\nM4 a10={0};\nM4 a11={0};\nM4 a20={0};\nM4 a21={0};\nM4 a30={0};\nM4 a31={0};\nM4 a40={0};\nM4 a41={0};\nM4 a50={0};\nM4 a51={0};\nM4 a60={0};\nM4 a61={0};\nM4 a70={0};\nM4 a71={0};\nfor(int k=0;k<896;k++){M4 w0=__builtin_convertvector(*(const H4*)(base+(size_t)k*16+0),M4);\nM4 w1=__builtin_convertvector(*(const H4*)(base+(size_t)k*16+4),M4);{float p=x0[k];a00=a00+(M4){p,p,p,p}*w0;a01=a01+(M4){p,p,p,p}*w1;}\nif(count>1){float p=x1[k];a10=a10+(M4){p,p,p,p}*w0;a11=a11+(M4){p,p,p,p}*w1;}\nif(count>2){float p=x2[k];a20=a20+(M4){p,p,p,p}*w0;a21=a21+(M4){p,p,p,p}*w1;}\nif(count>3){float p=x3[k];a30=a30+(M4){p,p,p,p}*w0;a31=a31+(M4){p,p,p,p}*w1;}\nif(count>4){float p=x4[k];a40=a40+(M4){p,p,p,p}*w0;a41=a41+(M4){p,p,p,p}*w1;}\nif(count>5){float p=x5[k];a50=a50+(M4){p,p,p,p}*w0;a51=a51+(M4){p,p,p,p}*w1;}\nif(count>6){float p=x6[k];a60=a60+(M4){p,p,p,p}*w0;a61=a61+(M4){p,p,p,p}*w1;}\nif(count>7){float p=x7[k];a70=a70+(M4){p,p,p,p}*w0;a71=a71+(M4){p,p,p,p}*w1;}}\n{float *dest=out+(size_t)indices[first+0]*1280+block*8;*(M4*)(dest+0)=a00;*(M4*)(dest+4)=a01;}\nif(count>1){float *dest=out+(size_t)indices[first+1]*1280+block*8;*(M4*)(dest+0)=a10;*(M4*)(dest+4)=a11;}\nif(count>2){float *dest=out+(size_t)indices[first+2]*1280+block*8;*(M4*)(dest+0)=a20;*(M4*)(dest+4)=a21;}\nif(count>3){float *dest=out+(size_t)indices[first+3]*1280+block*8;*(M4*)(dest+0)=a30;*(M4*)(dest+4)=a31;}\nif(count>4){float *dest=out+(size_t)indices[first+4]*1280+block*8;*(M4*)(dest+0)=a40;*(M4*)(dest+4)=a41;}\nif(count>5){float *dest=out+(size_t)indices[first+5]*1280+block*8;*(M4*)(dest+0)=a50;*(M4*)(dest+4)=a51;}\nif(count>6){float *dest=out+(size_t)indices[first+6]*1280+block*8;*(M4*)(dest+0)=a60;*(M4*)(dest+4)=a61;}\nif(count>7){float *dest=out+(size_t)indices[first+7]*1280+block*8;*(M4*)(dest+0)=a70;*(M4*)(dest+4)=a71;}}\n    }\n   }\n  }\n }\n static void worker(void **args,int unused,int group) {\n  (void)unused;if(group<0||group>=4)return;ExpertWork *w=args[0];part(w,group,4);w->done[group]=1;\n }\n void rockchip_cpu_expert(float *out,const float *input,const int *selected,const __fp16 *weight,const int *row_count) {\n  const int rows=*row_count;const unsigned long callback=547786985680ULL;\n  if(rows<1||rows>128)__builtin_trap();\n  for(unsigned long j=0;j<983040UL;j++)out[j]=0;\n  int counts[64]={0},offsets[65],cursor[64],indices[768];\n  for(int i=0;i<rows*6;i++) {int e=selected[i];\n   if((unsigned)e>=64U){for(int j=0;j<983040;j++)out[j]=__builtin_nanf(\"\");return;}counts[e]++;}\n  offsets[0]=0;for(int e=0;e<64;e++){offsets[e+1]=offsets[e]+counts[e];cursor[e]=offsets[e];}\n  for(int i=0;i<rows*6;i++)indices[cursor[selected[i]]++]=i;\n  ExpertWork work={out,input,weight,offsets,indices,{0,0,0,0}};\n  if(!callback){part(&work,0,1);return;}\n  void *args[4]={&work,0,0,0};\n  if(((parallel_fn)callback)(worker,args,0))__builtin_trap();\n  for(int i=0;i<4;i++)if(!work.done[i])__builtin_trap();\n }"
+  }
+}
