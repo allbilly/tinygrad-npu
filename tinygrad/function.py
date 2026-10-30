@@ -86,6 +86,23 @@ class _function(Generic[ReturnType]):
         buf_strs = '\n  '.join(f"{i}: dtype={b.dtype}, size={b.max_numel()}, device={b.device}" for i,b in enumerate(implicit_buffers))
         raise RuntimeError(f"function {name} has {len(implicit_buffers)} implicit buffer(s), but allow_implicit=False\n  {buf_strs}")
 
+    # Precompiled calls otherwise materialize every captured object attribute,
+    # including pure lazy weights that the callee never reads. Preserve effectful
+    # arguments and the custom-gradient positional ABI. Device-less outputs keep
+    # their original arguments for placement inference.
+    if (self.precompile and self.grad_fxn is None
+        and any(v.device is not None for v in (uret.src if isinstance(ret,tuple) else (uret,)))):
+      nodes = uret.toposort()
+      used = {p.arg.slot for p in nodes if p.op is Ops.PARAM and p.arg.slot >= 0}
+      keep = [i for i,u in enumerate(call_uops) if i in used or
+              any(n.op in (Ops.AFTER,Ops.CALL,Ops.STORE) for n in u.toposort())]
+      slots = {old:new for new,old in enumerate(keep)}
+      # Slot renaming is simultaneous: fixed-point replacement could merge
+      # same-shaped inputs along a chain such as slot2 -> slot1 -> slot0.
+      uret = uret.substitute({p:p.replace(arg=replace(p.arg,slot=slots[p.arg.slot]))
+                             for p in nodes if p.op is Ops.PARAM and p.arg.slot >= 0},walk=True)
+      call_uops = [call_uops[i] for i in keep]
+
     outs = UOp.call_with_outputs(uret.src if isinstance(ret, tuple) else (uret,), *call_uops, grad_fxn=self.grad_fxn, name=name,
                                  precompile=self.precompile, precompile_backward=self.precompile_backward)
 
