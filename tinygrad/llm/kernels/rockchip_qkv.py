@@ -3,7 +3,7 @@ import functools
 from dataclasses import replace
 from tinygrad import Tensor, dtypes
 from tinygrad.helpers import ceildiv, round_up
-from tinygrad.llm.kernels.rockchip_cpu import _renderer
+from tinygrad.llm.kernels.rockchip_cpu import _renderer, ONPU_CPU_GQA_PREFILL
 from tinygrad.llm.kernels.rockchip_shared_pool import ONPU_PREFILL_CPU_TUNING, shared_program
 from tinygrad.llm.kernels.rockchip_padding import mark_zero_tail
 from tinygrad.uop.ops import KernelInfo, Ops, ProgramInfo, UOp
@@ -32,7 +32,7 @@ def _balanced_head_order(heads:int, kv_heads:int) -> tuple[int,...]:
 def _prepare(out:UOp, cache:UOp, projected:UOp|tuple[UOp,...], qnorm:UOp, knorm:UOp, freqs:UOp, start:UOp|None, rows:UOp|None,
              heads:int, kv_heads:int, dim:int, context:int, capacity:int, eps:float, static_start:int,
              raw_scales:tuple[UOp,...]=(), weight_scales:UOp|None=None, tile_rows:tuple[int,...]=(),
-             static_rows:int|None=None, normalize:bool=True, balance_heads:bool=False, bias:UOp|None=None) -> UOp:
+             static_rows:int|None=None, normalize:bool=True, balance_heads:bool=False, bias:UOp|None=None, token_major:bool=False) -> UOp:
   qtype,ktype = ('__fp16' if p.dtype is dtypes.half else 'float' for p in (qnorm,knorm))
   qload = '__builtin_convertvector(*(const half4*)(qn+c),float4)' if qtype=='__fp16' else '*(const float4*)(qn+c)'
   kload = '__builtin_convertvector(*(const half4*)(kn+c),float4)' if ktype=='__fp16' else '*(const float4*)(kn+c)'
@@ -99,6 +99,7 @@ def _prepare(out:UOp, cache:UOp, projected:UOp|tuple[UOp,...], qnorm:UOp, knorm:
       float inverse=1.0f/__builtin_sqrtf(sum*{1/dim:.17g}f+{eps:.17g}f);
       for(int c=0;c<{dim};c+=4) {{float4 v=*(const float4*)(normal+c),weight=h<{heads}?{qload}:{kload};
         *(float4*)(normal+c)=(v*(float4)inverse)*weight;}}''' if normalize else ''
+  query_offset=f'(r*{heads}+h)*{dim}' if token_major else f'(h*{capacity}+r)*{dim}'
   source = f'''typedef float float4 __attribute__((aligned(16),ext_vector_type(4)));
   typedef __fp16 half4 __attribute__((aligned(8),ext_vector_type(4)));
   {definitions}
@@ -119,7 +120,7 @@ def _prepare(out:UOp, cache:UOp, projected:UOp|tuple[UOp,...], qnorm:UOp, knorm:
                             int first,int active,int begin,int end) {{
     for(int work=begin;work<end;work++)for(int r=0;r<{capacity};r++) {{
       int h={head_index};
-      if(r>=active) {{if(h<{heads})for(int c=0;c<{dim};c+=4)*(float4*)(out+(h*{capacity}+r)*{dim}+c)=(float4)0;continue;}}
+      if(r>=active) {{if(h<{heads})for(int c=0;c<{dim};c+=4)*(float4*)(out+{query_offset}+c)=(float4)0;continue;}}
       float4 acc=(float4)0;float normal[{dim}] __attribute__((aligned(16)));
       for(int c=0;c<{dim};c+=4) {{float4 v=read_projected(src,r,h*{dim}+c);*(float4*)(normal+c)=v;{
         'acc=acc+v*v;' if normalize else ''}}}
@@ -128,7 +129,7 @@ def _prepare(out:UOp, cache:UOp, projected:UOp|tuple[UOp,...], qnorm:UOp, knorm:
         float4 a=*(float4*)(normal+c),b=*(float4*)(normal+c+{dim//2});
         float4 cosine=*(const float4*)(freq+(first+r)*{dim}+c),sine=*(const float4*)(freq+(first+r)*{dim}+c+{dim//2});
         float4 left=a*cosine-b*sine,right=b*cosine+a*sine;
-        if(h<{heads}) {{*(float4*)(out+(h*{capacity}+r)*{dim}+c)=left;*(float4*)(out+(h*{capacity}+r)*{dim}+c+{dim//2})=right;}}
+        if(h<{heads}) {{*(float4*)(out+{query_offset}+c)=left;*(float4*)(out+{query_offset}+c+{dim//2})=right;}}
         else {{int target=((h-{heads})*{context}+first+r)*{dim}+c;
           *(half4*)(cache+target)=__builtin_convertvector(left,half4);
           *(half4*)(cache+target+{dim//2})=__builtin_convertvector(right,half4);
@@ -204,6 +205,7 @@ def prepare_qkv_int8(raw:list[Tensor], sa:list[Tensor], sw:Tensor, sizes:list[in
   if bias is not None and (bias.device!='CPU' or bias.dtype not in (dtypes.half,dtypes.float) or bias.shape!=(columns,)):
     raise ValueError('INT8 QKV bias must be a matching CPU FP16/FP32 vector')
   bias_values=(bias.contiguous(),) if bias is not None else ()
+  token_major=bool(ONPU_CPU_GQA_PREFILL) and capacity>=16 and 2<=heads//kv_heads<=8
   position=(Tensor(start,device='CPU',dtype=dtypes.int).reshape(1),) if isinstance(start,UOp) else ()
   active=(Tensor(count,device='CPU',dtype=dtypes.int).reshape(1),) if isinstance(count,UOp) else ()
   n=len(raw)
@@ -212,7 +214,9 @@ def prepare_qkv_int8(raw:list[Tensor], sa:list[Tensor], sw:Tensor, sizes:list[in
     return _prepare(o,k,tuple(args[:n]),args[n*2+1],args[n*2+2],args[n*2+3],other[0] if position else None,
                     other[-1] if active else None,heads,kv_heads,dim,context,capacity,eps,start if isinstance(start,int) else 0,
                     tuple(args[n:n*2]),args[n*2],tuple(sizes),count if isinstance(count,int) else None,
-                    normalize=normalize,balance_heads=bool(ONPU_PREFILL_CPU_TUNING),bias=args[n*2+4] if bias_values else None)
-  result=Tensor.empty(1,heads,capacity,dim,device='CPU',dtype=dtypes.float).custom_kernel(
+                    normalize=normalize,balance_heads=bool(ONPU_PREFILL_CPU_TUNING),bias=args[n*2+4] if bias_values else None,
+                    token_major=token_major)
+  result=Tensor.empty(*((1,capacity,heads,dim) if token_major else (1,heads,capacity,dim)),device='CPU',dtype=dtypes.float).custom_kernel(
     cache,*raw,*sa,sw,qnorm.contiguous(),knorm.contiguous(),freqs.contiguous(),*bias_values,*position,*active,fxn=build)
-  return mark_zero_tail(result[0][:,:,:count],result[0],'qkv'),result[1]
+  full=result[0].transpose(1,2) if token_major else result[0]
+  return mark_zero_tail(full[:,:,:count],full,'qkv'),result[1]

@@ -132,12 +132,14 @@ def quantize(x:Tensor, padded:int, *, sdk_prefill:bool=False) -> tuple[Tensor,Te
 
 
 @functools.cache
-def _matmul(out:UOp, lhs:UOp, rhs:UOp, m:int, n:int, k:int, column_offset:int, cores:int, sdk_prefill:bool=False) -> UOp:
+def _matmul(out:UOp, lhs:UOp, rhs:UOp, m:int, n:int, k:int, column_offset:int, cores:int, sdk_prefill:bool=False,
+            payload_offset:int=0) -> UOp:
   sink = UOp.sink(out,lhs,rhs,arg=KernelInfo(f'rockchip_int8_{m}_{n}_{k}'+('_sdk' if sdk_prefill else '')))
   info = replace(ProgramInfo.from_sink(sink,Target('ROCKCHIP')),outs=(0,),ins=(1,2))
   return UOp(Ops.PROGRAM,arg=info,src=(sink,UOp(Ops.LINEAR,src=(out,lhs,rhs)),UOp(Ops.SOURCE,arg=f'INT8 {m}x{k}x{n}'),
-    UOp(Ops.BINARY,arg=struct.pack('<9I' if sdk_prefill else '<8I',m,n,k,cores,column_offset*k,round_up(m*4,64),0,1,
-                                 *((1,) if sdk_prefill else ())))))
+    UOp(Ops.BINARY,arg=struct.pack('<10I' if payload_offset else '<9I' if sdk_prefill else '<8I',
+                                 m,n,k,cores,column_offset*k,round_up(m*4,64),0,1,
+                                 *((int(sdk_prefill),payload_offset) if payload_offset else (1,) if sdk_prefill else ())))))
 
 
 @shared_program
@@ -242,7 +244,7 @@ def dequantize_tiles(raw:list[Tensor], sa:list[Tensor], sw:Tensor, counts:list[i
 
 
 def raw_int8_matmul(payload:Tensor, weight:Tensor, rows:int, columns:int, column_offset:int=0, *,
-                    sdk_prefill:bool=False, cpu_output:bool=True) -> Tensor:
+                    sdk_prefill:bool=False, cpu_output:bool=True, payload_offset:int|None=None) -> Tensor:
   k = weight.shape[1]*32
   n = round_up(columns,32)
   if (not isinstance(k,int) or weight.ndim!=4 or weight.shape[2:]!=(32,32) or weight.dtype is not dtypes.int8
@@ -251,12 +253,15 @@ def raw_int8_matmul(payload:Tensor, weight:Tensor, rows:int, columns:int, column
       or payload.dtype is not dtypes.uint8
       or not 1<=rows<=(128 if k<=2048 else 64) or columns<1 or column_offset<0 or column_offset%32
       or column_offset+n>weight.shape[0]*32 or n>(24576 if rows==1 else 12288)
-      or payload.numel()!=round_up(rows*4,64)+rows*k): raise ValueError('Unsupported raw INT8 operands')
+      or (payload_offset is None and payload.numel()!=round_up(rows*4,64)+rows*k)):
+    raise ValueError('Unsupported raw INT8 operands')
+  if payload_offset is not None and (type(payload_offset) is not int or payload_offset<0 or payload_offset>=2**32 or payload_offset%64
+      or payload_offset+round_up(rows*4,64)+rows*k>payload.numel()):raise ValueError('Invalid packed INT8 payload offset')
   if type(sdk_prefill) is not bool or sdk_prefill and not sdk_prefill_supported(rows,n,k):
     raise ValueError('Unsupported SDK INT8 matrix geometry')
   if type(cpu_output) is not bool:raise ValueError('CPU output selection must be a bool')
   result = Tensor.empty(rows*n,device=weight.device,dtype=dtypes.int32).custom_kernel(payload.to(weight.device),weight,
-    fxn=lambda o,a,b:_matmul(o,a,b,rows,n,k,column_offset,3,sdk_prefill))[0]
+    fxn=lambda o,a,b:_matmul(o,a,b,rows,n,k,column_offset,3,sdk_prefill,payload_offset or 0))[0]
   return result.to('CPU') if cpu_output else result
 
 

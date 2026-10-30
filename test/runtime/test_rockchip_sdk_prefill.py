@@ -81,6 +81,10 @@ class TestSDKPrefill(unittest.TestCase):
         self.assertEqual(values[0x201,0x1010],32)
         self.assertEqual(values[0x201,0x1020],(m<<16)|1)
         self.assertEqual(values[0x1001,0x4024],m*16)
+        if k==896:
+          self.assertEqual(values[0x201,0x107c],m*4)
+          self.assertEqual(values[0x801,0x3014],m-1)
+          self.assertEqual(values[0x1001,0x405c],m-1)
     for shape in ((64,6144,4096),(128,3072,2048),(64,2048,1024),(1,3072,1024)):
       self.assertFalse(sdk_prefill_supported(*shape))
       m,n,k=shape
@@ -88,6 +92,25 @@ class TestSDKPrefill(unittest.TestCase):
         RockchipMatmul(SimpleNamespace(programs=set()),SimpleNamespace(lib=struct.pack('<9I',m,n,k,3,0,round_up(m*4,64),0,1,1)))
     with self.assertRaises(ValueError):int8_sdk_body(64,640,1024,0,0,0,640)
 
+  def test_shared_payload_offset_is_bounded_aligned_and_locates_its_scale_header(self):
+    from tinygrad import Device,dtypes
+    from tinygrad.uop.ops import Ops
+    from tinygrad.runtime.ops_rockchip import RockchipMatmul
+    rows,columns,depth=17,192,512
+    size=round_up(rows*4,64)+rows*depth
+    payload=Tensor.empty(size+64,device='CPU',dtype=dtypes.uint8)
+    weight=Tensor.empty(columns//32,depth//32,32,32,device='ROCKCHIP',dtype=dtypes.int8)
+    for offset in (-64,1,True,2**32,128):
+      with self.assertRaises(ValueError):raw_int8_matmul(payload,weight,rows,columns,payload_offset=offset)
+    linear,_=raw_int8_matmul(payload,weight,rows,columns,payload_offset=64).linear_with_vars()
+    programs=[c.body for c in linear.src if c.op is Ops.CALL and c.body.op is Ops.PROGRAM and c.device=='ROCKCHIP']
+    self.assertEqual(len(programs),1)
+    plan=RockchipMatmul(SimpleNamespace(programs=set()),SimpleNamespace(lib=programs[0].src[3].arg))
+    self.assertEqual(plan.scale_offset,64)
+    self.assertEqual(plan.lhs_offset,64+round_up(rows*4,64))
+    with self.assertRaises(ValueError):
+      RockchipMatmul(SimpleNamespace(programs=set()),SimpleNamespace(lib=struct.pack('<10I',17,192,512,3,0,128,0,1,0,1)))
+    self.assertNotIn('ROCKCHIP',Device._opened_devices)
 
   @unittest.skipUnless(os.environ.get('ROCKCHIP_TEST')=='1','explicit exclusive NPU hardware test')
   def test_changed_inputs_match_independent_int32_through_native_replay(self):

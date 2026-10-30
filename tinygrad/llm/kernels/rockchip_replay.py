@@ -49,7 +49,8 @@ def _full_write(call:UOp, slot:int, nbytes:int) -> bool:
   param = params[0]
   # These internal packers fill output 0 completely, including tile/header padding.
   # The exact extent check above also excludes a larger reused scratch allocation.
-  if slot==0 and program.src[0].arg.function_name in ('rockchip_swiglu_pack','rockchip_quantize','rockchip_int8_ffn_pack'):
+  if slot==0 and (program.src[0].arg.function_name in ('rockchip_swiglu_pack','rockchip_quantize','rockchip_int8_ffn_pack')
+                 or program.src[0].arg.function_name=='rockchip_int8_swiglu_pack' and getenv('ONPU_FFN_PACKED_UPLOAD',0)):
     return True
   nodes = program.src[0].toposort()
   if any(u.op in (Ops.IF,Ops.BACKEDGE) for u in nodes): return False
@@ -266,6 +267,7 @@ class NativeReplay:
         buffers[slot] = event
       if call.body.op is Ops.STORE and 0 in buffers and 1 in buffers: copies.append((buffers[0],buffers[1]))
     aliases,uploads,downloads = {},set(),set()
+    redirected_ranges:dict[int,list[RockchipBuffer]] = {}
     def overlap(a,b): return a[0] is b[0] and a[1]<b[1]+b[2] and b[1]<a[1]+a[2]
     def scratch(event): return any(u.op is Ops.BUFFER and u.tag=='scratch' for u in event[5].toposort())
     def dead_after(key,index):
@@ -297,9 +299,9 @@ class NativeReplay:
       if any(writer[0]<e[0]<i and isinstance(e[6],RockchipBuffer) and e[6].meta is dst[6].meta
              and e[6].addr<dst[6].addr+dst[1][2] and dst[6].addr<e[6].addr+e[1][2] for e in events): continue
       aliases[(writer[0],key)] = dst[7]
+      redirected_ranges.setdefault(writer[0],[]).append(dst[6])
       uploads.add(i)
     if self.borrow_outputs:
-      redirected_writers = {index for index,_ in aliases}
       for dst,src in copies:
         i,key = dst[:2]
         raw = src[6]
@@ -310,10 +312,13 @@ class NativeReplay:
         if getattr(self,'borrow_batch',False):
           while consumer<len(self.calls) and self.calls[consumer].body.op is Ops.STORE: consumer += 1
         if consumer>=len(self.calls) or self.calls[consumer].device!='CPU' or self.calls[consumer].body.op is not Ops.PROGRAM: continue
-        # Keep every write on its original allocation, including redirected pack outputs.
+        # Redirected pack outputs may coexist with a borrowed input only when
+        # their NPU cache-line ranges are disjoint. The planner can share an arena.
         # A batch may contain other copies before the synchronous CPU reader, but
         # neither its host destination nor its NPU source may change in between.
-        if consumer in redirected_writers: continue
+        if consumer in redirected_ranges and (not getenv('ONPU_FFN_PACKED_UPLOAD',0) or any(
+            (buf.addr&~63)<((raw.addr+raw.size+63)&~63) and (raw.addr&~63)<((buf.addr+buf.size+63)&~63)
+            for buf in redirected_ranges[consumer])):continue
         following = [e for e in events if e[0]>i and overlap(e[1],key)]
         if any(e[0]<consumer for e in following): continue
         if any(i<e[0]<consumer and e[2] and isinstance(e[6],RockchipBuffer) and e[6].meta is raw.meta
@@ -423,8 +428,9 @@ class NativeReplay:
     self.plans.append((plan,plan.bufs))
     if plan.int8:
       scale_rows=plan.storage_rows if isinstance(plan,RockchipBucketedMatmul) else plan.groups*plan.m
-      self.statements.append(f'for(int r=0;r<{scale_rows};r++){{float s=((const float*){lhs.addr}ULL)[r];'
-        f'unsigned b=((const unsigned*){lhs.addr}ULL)[r];if(!(s>0.0f) || (b&0x7f800000)==0x7f800000)return {1000000+index};}}')
+      scale_address=lhs.addr+getattr(plan,'scale_offset',0)
+      self.statements.append(f'for(int r=0;r<{scale_rows};r++){{float s=((const float*){scale_address}ULL)[r];'
+        f'unsigned b=((const unsigned*){scale_address}ULL)[r];if(!(s>0.0f) || (b&0x7f800000)==0x7f800000)return {1000000+index};}}')
     else:
       self.statements.append(f'if(!all_finite_half((const unsigned short*){lhs.addr+plan.lhs_offset}ULL,{plan.groups*plan.m*plan.k}UL))'
         f'return {1000000+index};')

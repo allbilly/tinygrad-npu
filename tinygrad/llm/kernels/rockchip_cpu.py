@@ -13,6 +13,7 @@ ONPU_CPU_PREFILL_LAYOUT = ContextVar('ONPU_CPU_PREFILL_LAYOUT',0)
 ONPU_CPU_DECODE_POOL = ContextVar('ONPU_CPU_DECODE_POOL',0)
 ONPU_EXP2_FAST_PATH = ContextVar('ONPU_EXP2_FAST_PATH',0)
 ONPU_EXP2_SCALE_BITS = ContextVar('ONPU_EXP2_SCALE_BITS',1)
+ONPU_CPU_GQA_PREFILL = ContextVar('ONPU_CPU_GQA_PREFILL',0)
 
 
 @functools.cache
@@ -237,6 +238,38 @@ def _attention(out:UOp, query:UOp, cache:UOp, length:UOp|None, heads:int, kv_hea
              UOp(Ops.SOURCE,arg=source),UOp(Ops.BINARY,arg=renderer.compiler.compile_cached(source))))
 
 
+@functools.cache
+def _gqa_prefill(out:UOp, query:UOp, cache:UOp, length:UOp|None, rows:UOp|None, heads:int, kv_heads:int, dim:int, context:int,
+                 capacity:int, static_length:int|None, pool:int) -> UOp:
+  # Reuse decode's GQA reductions, retaining each query's accumulation order.
+  body=_decode_heads(heads,kv_heads,dim,context,True).removesuffix('return;')
+  body=body.replace('query+(',f'query+(row*{heads}+').replace('out+(',f'out+(row*{heads}+')
+  source=_fast_softmax_source()+f'''
+  extern void *memset(void*,int,unsigned long);
+  static void part(void **args,int length,int worker) {{
+    float *out=args[0];const float *query=args[1];const __fp16 *cache=args[2];
+    int active=*(const int*)args[3],begin=0,end={heads};
+    for(int row=worker;row<active;row+=4) {{int total=length-active+row+1;{body}}}
+  }}
+  void rockchip_cpu_gqa_prefill(float *out,const float *query,const __fp16 *cache{
+      ',const int *length' if length is not None else ''}{',const int *rows' if rows is not None else ''}) {{
+    int total={'*length' if length is not None else str(static_length)},active={'*rows' if rows is not None else str(capacity)};
+    if(active<1 || active>{capacity} || total<active || total>{context}) {{
+      for(int i=0;i<{capacity*heads*dim};i++)out[i]=__builtin_nanf("");return;
+    }}
+    if(active<{capacity})memset(out+active*{heads*dim},0,({capacity}-active)*{heads*dim*4}UL);
+    void *args[4]={{out,(void*)query,(void*)cache,&active}};
+    if(((int(*)(void(*)(void**,int,int),void**,int)){pool}ULL)(part,args,total))
+      for(int worker=0;worker<4;worker++)part(args,total,worker);
+  }}'''
+  inputs=(out,query,cache)+((length,) if length is not None else ())+((rows,) if rows is not None else ())
+  sink=UOp.sink(*inputs,arg=KernelInfo('rockchip_cpu_gqa_prefill'))
+  renderer=_renderer()
+  info=replace(ProgramInfo.from_sink(sink,renderer.target),outs=(0,),ins=tuple(range(1,len(inputs))))
+  return UOp(Ops.PROGRAM,arg=info,src=(sink,UOp(Ops.LINEAR,src=inputs),UOp(Ops.SOURCE,arg=source),
+                                     UOp(Ops.BINARY,arg=renderer.compiler.compile_cached(source))))
+
+
 def _cpu_attention(query:Tensor, cache:Tensor, length:int|UOp, decode_only:bool, pool:int|None=None, fast_softmax:bool=False,
                    score_scale:float|None=None, window:int=0, softcap:float=0.0) -> Tensor:
   if (query.device!='CPU' or cache.device!='CPU' or query.dtype is not dtypes.float or cache.dtype is not dtypes.half
@@ -257,9 +290,17 @@ def _cpu_attention(query:Tensor, cache:Tensor, length:int|UOp, decode_only:bool,
   if not 1<=max_rows<=4096: raise ValueError('Unsupported CPU attention query count')
   size = (Tensor(length,device='CPU',dtype=dtypes.int).reshape(1),) if isinstance(length,UOp) else ()
   rows = (Tensor(query.shape[2],device='CPU',dtype=dtypes.int).reshape(1),) if not isinstance(query.shape[2],int) and max_rows>1 else ()
-  token_major = bool(ONPU_CPU_PREFILL_LAYOUT) and not decode_only and max_rows>=16
+  gqa=(bool(ONPU_CPU_GQA_PREFILL) and not decode_only and max_rows>=16 and pool is not None and fast_softmax
+       and 2<=heads//kv_heads<=8 and dim%8==0 and score_scale is None and not window and not softcap)
+  token_major = (bool(ONPU_CPU_PREFILL_LAYOUT) or gqa) and not decode_only and max_rows>=16
   out = Tensor.empty(*((1,max_rows,heads,dim) if token_major else query.max_shape),device='CPU',dtype=dtypes.float)
-  result = out.custom_kernel(capacity_input(query).contiguous(),cache,*size,*rows,
+  source=capacity_input(query)
+  if gqa:
+    assert pool is not None
+    result=out.custom_kernel(source.transpose(1,2).contiguous(),cache,*size,*rows,
+      fxn=lambda o,q,k,*r:_gqa_prefill(o,q,k,r[0] if size else None,r[-1] if rows else None,heads,kv_heads,dim,context,max_rows,
+                                     length if isinstance(length,int) else None,pool))[0]
+  else:result = out.custom_kernel(source.contiguous(),cache,*size,*rows,
     fxn=lambda o,q,k,*r:_attention(o,q,k,r[0] if size else None,heads,kv_heads,dim,context,
                                   r[-1] if rows else None,max_rows,length if isinstance(length,int) else None,
                                   pool=pool,fast_softmax=fast_softmax,score_scale=score_scale,window=window,softcap=softcap,

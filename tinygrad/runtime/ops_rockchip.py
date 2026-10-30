@@ -147,6 +147,9 @@ class RockchipMatmul:
     self.itemsize = 1 if self.int8 else 2
     if self.int8 and (self.split_k or self.lhs_offset!=round_up(self.m*4,64)):
       raise ValueError('Invalid INT8 input scale header')
+    self.scale_offset=struct.unpack('<I',obj.lib[36:40])[0] if self.int8 and len(obj.lib)==40 else 0
+    if self.scale_offset%64:raise ValueError('Unaligned INT8 input scale header')
+    self.lhs_offset+=self.scale_offset
     self.parts:tuple[tuple[int,int],...]
     if self.split_k:
       if self.cores!=3 or self.k%96: raise ValueError('Invalid Rockchip K split')
@@ -214,7 +217,7 @@ class RockchipMatmul:
       if (out,lhs,rhs) != self.bufs: self.prepare(out,lhs,rhs)
       check = _finite_program()
       if self.int8:
-        scales = (ctypes.c_float*getattr(self,'storage_rows',self.groups*self.m)).from_address(lhs.addr)
+        scales = (ctypes.c_float*getattr(self,'storage_rows',self.groups*self.m)).from_address(lhs.addr+getattr(self,'scale_offset',0))
         if any(not 0<s<float('inf') for s in scales): raise ValueError('Rockchip INT8 requires finite positive activation scales')
       elif not check.fxn(ctypes.c_void_p(lhs.addr+self.lhs_offset),ctypes.c_ulong(self.groups*self.m*self.k)):
         raise ValueError('Rockchip matmul requires finite FP16 activations')

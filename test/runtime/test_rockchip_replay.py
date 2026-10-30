@@ -109,6 +109,20 @@ class TestRockchipReplayAliasAnalysis(unittest.TestCase):
         self.assertTrue(_full_write(calls[0],0,output.numel()*output.dtype.itemsize))
         self.assertFalse(_full_write(calls[0],0,output.numel()*output.dtype.itemsize+64))
 
+  def test_raw_swiglu_full_payload_borrow_requires_opt_in_and_exact_extent(self):
+    from unittest.mock import patch
+    from test.runtime.test_rockchip_gelu_ffn import fixture
+    from tinygrad.llm.kernels.rockchip_gelu_ffn import pack_swiglu_projection
+    raw,sa,sw,tiles,_=fixture(17,4864,128)
+    output,_=pack_swiglu_projection(raw,sa,sw,tiles,17,4864,(4096,768),1)
+    linear,_=output.linear_with_vars()
+    calls=[call.without_after for call in linear.src if call.without_after.body.op is Ops.PROGRAM
+           and call.without_after.body.src[0].arg.function_name=='rockchip_int8_swiglu_pack']
+    self.assertEqual(len(calls),1)
+    with patch('tinygrad.llm.kernels.rockchip_replay.getenv',return_value=0):self.assertFalse(_full_write(calls[0],0,output.numel()))
+    with patch('tinygrad.llm.kernels.rockchip_replay.getenv',return_value=1):
+      self.assertTrue(_full_write(calls[0],0,output.numel()))
+      self.assertFalse(_full_write(calls[0],0,output.numel()+64))
 
   def test_same_base_overlapping_future_view_keeps_copy(self):
     cpu,npu,source,result = self.node(),self.node('ROCKCHIP'),self.node(),self.node()
@@ -171,6 +185,20 @@ class TestRockchipReplayAliasAnalysis(unittest.TestCase):
         self.assertEqual(downloads,{0} if count is None else set())
         self.assertEqual(len(aliases),int(count is None))
 
+  def test_redirected_writer_borrows_input_only_for_disjoint_npu_ranges(self):
+    for enabled in (0,1):
+      for offset in (0,4,8,64):
+        with self.subTest(enabled=enabled,offset=offset):
+          cpu_input,cpu_output,npu_input,npu_output=self.node(),self.node(),self.node('ROCKCHIP'),self.node('ROCKCHIP')
+          node,(buf,raw,expr)=npu_output
+          npu_output=node,(buf,replace(raw,addr=npu_input[1][1].addr+offset,meta=npu_input[1][1].meta),expr)
+          calls=[self.call(UOp(Ops.STORE),cpu_input[0],npu_input[0]),
+                 self.call(self.program(),cpu_output[0],cpu_input[0]),self.call(UOp(Ops.STORE),npu_output[0],cpu_output[0])]
+          with patch('tinygrad.llm.kernels.rockchip_replay.getenv',return_value=enabled):
+            aliases,uploads,downloads=self.analyze(calls,cpu_input,cpu_output,npu_input,npu_output,borrow=True)
+          self.assertEqual(uploads,{2})
+          self.assertEqual(downloads,{0} if enabled and offset==64 else set())
+          self.assertEqual(len(aliases),2 if enabled and offset==64 else 1)
 
 
 class TestRockchipReplayFallback(unittest.TestCase):

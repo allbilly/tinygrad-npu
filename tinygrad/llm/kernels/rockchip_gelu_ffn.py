@@ -22,6 +22,7 @@ class ProjectionTile(NamedTuple):
   first_column:int
   columns:int
   scale_index:int
+  sdk:bool=False
 
 
 def payload_layout(rows:int, depths:tuple[int,...]) -> tuple[tuple[int,int,int,int],...]:
@@ -87,7 +88,9 @@ def _static_projection_loop(tiles:tuple[ProjectionTile,...], rows:int, hidden:in
         index,tile,start,count=next(fragment for fragment in active
           if fragment[1].first_column+fragment[2]<=base+begin<base+end<=fragment[1].first_column+fragment[2]+fragment[3])
         offset=start*tile.rows+base-tile.first_column-start
-        loads.append(f'''(__builtin_convertvector(*(const int4*)(raw[{index}]+({offset}+(row-{tile.first_row})*{count}+c)),float4)*
+        position=(f'{start*tile.rows}+(({base-tile.first_column-start}+c)/4*{tile.rows}+row-{tile.first_row})*4' if tile.sdk else
+                  f'{offset}+(row-{tile.first_row})*{count}+c')
+        loads.append(f'''(__builtin_convertvector(*(const int4*)(raw[{index}]+({position})),float4)*
           (float4)sa[{tile.scale_index}][row-{tile.first_row}])*(*(const float4*)(sw+{base}+c))''')
       loops.append(f'''for(int c={begin};c<{end};c+=4) {{
         float4 g={loads[0]},u={loads[1]};
@@ -126,7 +129,9 @@ def _batched_projection_loop(tiles:tuple[ProjectionTile,...], rows:int, hidden:i
           index,tile,start,count=next(f for f in active
             if f[1].first_column+f[2]<=base+begin<base+end<=f[1].first_column+f[2]+f[3])
           offset=start*tile.rows+base-tile.first_column-start
-          loads.append(f'''(__builtin_convertvector(*(const int4*)(raw[{index}]+({offset}+((row+{lane})-{tile.first_row})*{count}+c)),float4)*
+          position=(f'{start*tile.rows}+(({base-tile.first_column-start}+c)/4*{tile.rows}+row+{lane}-{tile.first_row})*4' if tile.sdk else
+                    f'{offset}+((row+{lane})-{tile.first_row})*{count}+c')
+          loads.append(f'''(__builtin_convertvector(*(const int4*)(raw[{index}]+({position})),float4)*
             (float4)sa[{tile.scale_index}][(row+{lane})-{tile.first_row}])*(*(const float4*)(sw+{base}+c))''')
         lanes.append(f'''{{float4 g={loads[0]},u={loads[1]};float4 exponent={_exponent(activation)};
           {_activation_value(activation)}*(float4*)(batch_values[{lane}]+c)=value;
@@ -181,8 +186,10 @@ def _program(out:UOp, raw:tuple[UOp,...], sa:tuple[UOp,...], sw:UOp, active:UOp,
     if len(parts)!=3:parts=[(0,tile.columns)]
     for start,count in parts:
       column=tile.first_column+start
+      position=(f'{start*tile.rows}+((column-{column})/4*{tile.rows}+row-{tile.first_row})*4+column%4' if tile.sdk else
+                f'{start*tile.rows}+(row-{tile.first_row})*{count}+column-{column}')
       project.append(f'''if(row>={tile.first_row} && row<{tile.first_row+tile.rows} && column>={column} && column<{column+count}) {{
-        int position={start*tile.rows}+(row-{tile.first_row})*{count}+column-{column};
+        int position={position};
         float4 value=__builtin_convertvector(*(const int4*)(raw[{index}]+position),float4);
         return (value*(float4)sa[{tile.scale_index}][row-{tile.first_row}])*(*(const float4*)(sw+column));
       }}''')
@@ -274,7 +281,7 @@ def _pack_projection(raw:list[Tensor], sa:list[Tensor], sw:Tensor, tiles:list[Pr
     raise ValueError('Unsupported fused GELU projection layout')
   coverage=[]
   for value,tile in zip(raw,tiles):
-    if (not 0<=tile.first_row<tile.first_row+tile.rows<=rows or tile.first_column%32 or tile.columns%32
+    if (type(tile.sdk) is not bool or not 0<=tile.first_row<tile.first_row+tile.rows<=rows or tile.first_column%32 or tile.columns%32
         or not 0<=tile.first_column<tile.first_column+tile.columns<=hidden*2 or not 0<=tile.scale_index<len(sa)
         or value.numel()!=tile.rows*tile.columns or sa[tile.scale_index].shape!=(tile.rows,)):
       raise ValueError('Invalid raw GELU projection tile')
@@ -351,17 +358,23 @@ class _RockchipInt8GatedFeedForward:
       part=dense[first:first+input_rows]
       rows=part.shape[0]
       assert isinstance(rows,int)
-      payload,scale=quantize(joint.scaled_input(part),k)
+      sdk=(self.activation=='silu' and (rows,joint.columns,k)==(128,9728,896) and bool(getenv('ONPU_INT8_SDK_PREFILL',0)))
+      payload,scale=quantize(joint.scaled_input(part),k,sdk_prefill=sdk)
       scale_index=len(sa)
       sa.append(scale)
       for column in range(0,joint.columns,24576 if rows==1 else 12288):
         count=min(24576 if rows==1 else 12288,joint.columns-column)
-        raw.append(raw_int8_matmul(payload,joint.packed[0],rows,count,column))
-        tiles.append(ProjectionTile(first,rows,column,count,scale_index))
+        raw.append(raw_int8_matmul(payload,joint.packed[0],rows,count,column,sdk_prefill=sdk))
+        tiles.append(ProjectionTile(first,rows,column,count,scale_index,sdk))
     parts=self.down.parts if isinstance(self.down,RockchipInt8SplitLinear) else [self.down]
     depths=tuple(part.depth for part in parts)
     pack={'silu':pack_swiglu_projection,'gelu':pack_erf_projection,'gelu_tanh':pack_gelu_projection}[self.activation]
     packed,scales=pack(raw,sa,joint.scales[0],tiles,capacity,self.down.depth,depths,math.prod(x.shape[:-1]),pool=self.pool)
+    shared_input=(capacity>=16 and getenv('ONPU_FFN_PACKED_UPLOAD',0) and len({layer.packed[0].device for layer in parts})==1)
+    if shared_input:
+      # All K groups share one fully written payload. Upload its allocation
+      # once, then retain the original per-group/per-row scale boundaries.
+      packed=packed.to(parts[0].packed[0].device)
     outputs=[]
     for index,(layer,(offset,padded,tile,_)) in enumerate(zip(parts,payload_layout(capacity,depths))):
       values=[]
@@ -370,8 +383,8 @@ class _RockchipInt8GatedFeedForward:
       for first in range(0,capacity,tile):
         rows=min(tile,capacity-first)
         begin=offset+first*padded+(first//tile)*round_up(tile*4,64)
-        payload=packed[begin:begin+round_up(rows*4,64)+rows*padded]
-        values.append(raw_int8_matmul(payload,layer.packed[0],rows,layer.columns))
+        payload=packed if shared_input else packed[begin:begin+round_up(rows*4,64)+rows*padded]
+        values.append(raw_int8_matmul(payload,layer.packed[0],rows,layer.columns,payload_offset=begin if shared_input else None))
         activation_scales.append(scales[index*capacity+first:index*capacity+first+rows])
         counts.append(rows)
       outputs.append(dequantize_tiles(values,activation_scales,layer.scales[0],counts,layer.columns))
