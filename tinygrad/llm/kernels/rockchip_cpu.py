@@ -2,7 +2,7 @@
 import functools, math, platform
 from dataclasses import replace
 from tinygrad import Tensor, dtypes
-from tinygrad.helpers import ContextVar, Target
+from tinygrad.helpers import ContextVar, Target, getenv
 from tinygrad.renderer.cstyle import ClangRenderer
 from tinygrad.llm.kernels.rockchip_shared_pool import shared_program
 from tinygrad.llm.kernels.rockchip_padding import ONPU_ZERO_PAD_VIEWS, capacity_input, mark_zero_tail
@@ -10,10 +10,22 @@ from tinygrad.uop.ops import KernelInfo, Ops, ProgramInfo, UOp
 
 
 ONPU_CPU_PREFILL_LAYOUT = ContextVar('ONPU_CPU_PREFILL_LAYOUT',0)
+ONPU_CPU_PREFILL_WIDE_TILE = ContextVar('ONPU_CPU_PREFILL_WIDE_TILE',0)
 ONPU_CPU_DECODE_POOL = ContextVar('ONPU_CPU_DECODE_POOL',0)
 ONPU_EXP2_FAST_PATH = ContextVar('ONPU_EXP2_FAST_PATH',0)
 ONPU_EXP2_SCALE_BITS = ContextVar('ONPU_EXP2_SCALE_BITS',1)
 ONPU_CPU_GQA_PREFILL = ContextVar('ONPU_CPU_GQA_PREFILL',0)
+ONPU_NORM_QUANT = ContextVar('ONPU_NORM_QUANT',0)
+
+
+def head_gate(attention:Tensor, gate:Tensor) -> Tensor:
+  # A new boundary can change reduction fusion for an unevaluated CPU matmul.
+  # Materialized inputs and explicit kernel outputs already have FP32 rounding.
+  if (attention.device==gate.device=='CPU' and attention.dtype is gate.dtype is dtypes.float
+      and all(x.uop.base.op in (Ops.BUFFER,Ops.AFTER) for x in (attention,gate))):
+    denominator=(1+(gate*(-1/math.log(2))).exp2()).contiguous()
+    return attention/denominator.transpose(1,2).unsqueeze(-1)
+  return attention*gate.sigmoid().transpose(1,2).unsqueeze(-1)
 
 
 @functools.cache
@@ -195,7 +207,7 @@ def _attention(out:UOp, query:UOp, cache:UOp, length:UOp|None, heads:int, kv_hea
   }}
   static void attention_part(float *out,const float *query,const __fp16 *cache,int total,int active_rows,int begin,int end) {{
     {_decode_heads(heads,kv_heads,dim,context,fast_softmax,score_scale,window,softcap)
-     if decode_grouped and max_rows==1 and 1<heads//kv_heads<=8 else ''}
+     if decode_grouped and max_rows==1 and 1<heads//kv_heads<=int(getenv('ONPU_CPU_GROUP_MAX',16)) else ''}
     for(int head=begin;head<end;head++) {{
       const __fp16 *keys=cache+(head/{heads//kv_heads})*{context*dim};
       const __fp16 *values=keys+{kv_heads*context*dim};
@@ -304,7 +316,10 @@ def _cpu_attention(query:Tensor, cache:Tensor, length:int|UOp, decode_only:bool,
     fxn=lambda o,q,k,*r:_attention(o,q,k,r[0] if size else None,heads,kv_heads,dim,context,
                                   r[-1] if rows else None,max_rows,length if isinstance(length,int) else None,
                                   pool=pool,fast_softmax=fast_softmax,score_scale=score_scale,window=window,softcap=softcap,
-                                  query_rows=8 if token_major and max_rows>=64 and (heads,kv_heads,dim)==(32,4,64) else None,
+                                  query_rows=8 if (token_major and max_rows>=64 and (heads,kv_heads,dim)==(32,4,64) or
+                                    ONPU_CPU_PREFILL_WIDE_TILE and not decode_only and
+                                    (heads,kv_heads,dim,context,max_rows) in ((8,1,256,512,128),(8,1,512,512,128))
+                                    and score_scale==1.0 and not window and not softcap) else None,
                                   token_major=token_major,small_kv_pool=bool(ONPU_CPU_DECODE_POOL)))[0]
   full = result.transpose(1,2) if token_major else result
   logical = full.shrink(tuple((0,size) for size in query.shape))
@@ -442,7 +457,37 @@ def rms_norm(x:Tensor, weight:Tensor, eps:float) -> Tensor:
     x.pad_to(x.max_shape).contiguous(),weight.contiguous(),*active,
     fxn=lambda o,a,w,*n:_rms_norm(o,a,w,rows,width,eps,active=n[0] if n else None))[0]
   logical = out.shrink(tuple((0,s) for s in x.shape))
+  if ONPU_NORM_QUANT:
+    from tinygrad.llm.kernels.rockchip_norm_quant import register_norm
+    logical = register_norm(logical,x,weight,eps)
   return mark_zero_tail(logical,out,'rms_norm') if zero_tail else logical
+
+
+_EXP2_POLYNOMIAL = '''((((((0.00015359208919107914f*s+0.0013392627006396651f)*s+0.009618384763598442f)*s+
+      0.055503472685813904f)*s+0.24022644758224487f)*s+0.6931471824645996f)*s+1.0f)'''
+
+
+def _vector_exp2_batch4_source() -> str:
+  """Schedule four exact normal-range polynomials behind one shared guard."""
+  return '''static __attribute__((always_inline)) float4 rockchip_exp2_unchecked(float4 x) {
+    int4 q=__builtin_convertvector(x+(x<0?(float4)-.5f:(float4).5f),int4);
+    float4 s=x-__builtin_convertvector(q,float4);
+    float4 y='''+_EXP2_POLYNOMIAL+''';
+    return __builtin_bit_cast(float4,__builtin_bit_cast(int4,y)+q*(int4)0x800000);
+  }
+  static __attribute__((always_inline)) void rockchip_exp2_batch4(float4 x0,float4 x1,float4 x2,float4 x3,
+      float4 *y0,float4 *y1,float4 *y2,float4 *y3) {
+    int4 m0=__builtin_bit_cast(int4,x0)&(int4)0x7fffffff,m1=__builtin_bit_cast(int4,x1)&(int4)0x7fffffff;
+    int4 m2=__builtin_bit_cast(int4,x2)&(int4)0x7fffffff,m3=__builtin_bit_cast(int4,x3)&(int4)0x7fffffff;
+    int4 a=m0>m1?m0:m1,b=m2>m3?m2:m3;int4 mag=a>b?a:b;
+    if(__builtin_expect(__builtin_reduce_max(mag)<0x42fa0000,1)) {
+      *y0=rockchip_exp2_unchecked(x0);*y1=rockchip_exp2_unchecked(x1);
+      *y2=rockchip_exp2_unchecked(x2);*y3=rockchip_exp2_unchecked(x3);
+    } else {
+      *y0=rockchip_exp2_vector(x0);*y1=rockchip_exp2_vector(x1);
+      *y2=rockchip_exp2_vector(x2);*y3=rockchip_exp2_vector(x3);
+    }
+  }'''
 
 
 def _vector_exp2_source() -> str:
@@ -450,8 +495,7 @@ def _vector_exp2_source() -> str:
   declarations = '''typedef float float4 __attribute__((aligned(16),ext_vector_type(4)));
   typedef int int4 __attribute__((aligned(16),ext_vector_type(4)));
   typedef __fp16 half4 __attribute__((aligned(8),ext_vector_type(4)));'''
-  polynomial = '''((((((0.00015359208919107914f*s+0.0013392627006396651f)*s+0.009618384763598442f)*s+
-      0.055503472685813904f)*s+0.24022644758224487f)*s+0.6931471824645996f)*s+1.0f)'''
+  polynomial = _EXP2_POLYNOMIAL
   reduced = '''int4 q=__builtin_convertvector(safe+(safe<0?(float4)-.5f:(float4).5f),int4),q1=q>>1;
     float4 s=safe-__builtin_convertvector(q,float4);
     float4 y='''+polynomial+'''*__builtin_bit_cast(float4,(q1+127)<<23)*__builtin_bit_cast(float4,(q-q1+127)<<23);'''

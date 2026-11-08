@@ -45,20 +45,31 @@ def main(model_override=None,gpu_kernels_override=None):
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument('--checkpoint',type=Path,required=True)
   parser.add_argument('--defer-weight-realization',action='store_true',help='Materialize CPU weights only when their consumers run')
+  parser.add_argument('--trim-preparation-cache',action='store_true',help='Release unused CPU preparation buffers before warmup')
   parser.add_argument('--file-backed-cpu-weights',action='store_true',help='Borrow packed file mappings for deferred CPU weight decoding')
   parser.add_argument('--input',type=Path,required=True)
   parser.add_argument('--device',choices=['CPU','CL'],default='CPU')
   parser.add_argument('--prefill',choices=['off','auto','on'],default='on')
   parser.add_argument('--decode',choices=['off','auto','on'],default='on')
   parser.add_argument('--tile-columns',type=int,default=4096)
+  parser.add_argument('--decode-tile-columns',type=int,default=None,
+                      help='Optional separate column tile for the decode phase (m=1).')
   parser.add_argument('--fuse-projections',action='store_true')
   parser.add_argument('--share-projection-weights',action='store_true',help='Opt into shared packed INT8 combined projections')
   parser.add_argument('--cpu-attention',action='store_true')
+  parser.add_argument('--cpu-head-gate',action='store_true',help='Reuse the small broadcast sigmoid denominator on CPU')
   parser.add_argument('--npu-prefill-attention',action='store_true',help='Experimental prepared FP16 causal NPU attention with CPU fallback')
   parser.add_argument('--cpu-recurrent-scan',action='store_true',help='Experimentally batch GatedDeltaNet/RWKV7 prefill through FP32 CPU scans')
+  parser.add_argument('--cpu-rwkv-weights',action='store_true',help='Prepare RWKV7 CPU coefficients and optimized scan')
+  parser.add_argument('--cpu-q8-embedding',action='store_true',help='Read CPU Q8_0 embedding rows without vocabulary masking')
+  parser.add_argument('--cpu-q8-side-embedding',action='store_true',help='Read checked segmented per-layer Q8_0 rows directly on CPU')
+  parser.add_argument('--fused-recurrent-projections',action='store_true',help='Combine compatible GDN QKV, gate, beta and alpha projections')
   parser.add_argument('--native-replay',action='store_true')
+  parser.add_argument('--scalar-decode-loop',action='store_true',help='Use the bounded native greedy text generation loop')
+  parser.add_argument('--scalar-decode-batch',type=int,choices=(1,2,4,8,16,32),default=4)
   parser.add_argument('--fused-ffn',action='store_true')
   parser.add_argument('--fused-gelu-ffn',action='store_true',help='Fuse bounded raw INT8 GELU FFNs during prefill')
+  parser.add_argument('--fused-gelu-sdk-prefill',action='store_true',help='Preserve qualified K1536 SDK tiles in raw tanh-GELU prefill')
   parser.add_argument('--fused-erf-gelu-ffn',action='store_true',help='Fuse raw INT8 erf GELU and per-K input packing')
   parser.add_argument('--fused-erf-gelu-decode',action='store_true',help='Opt into raw erf GELU packing for one-token decode')
   parser.add_argument('--fused-swiglu-ffn',action='store_true',help='Fuse raw INT8 SwiGLU and split-K input packing during prefill')
@@ -71,6 +82,8 @@ def main(model_override=None,gpu_kernels_override=None):
   parser.add_argument('--cpu-mla-weights',action='store_true',help='Prepare contiguous FP16 CPU MLA tables before JIT tracing')
   parser.add_argument('--cpu-mla-attention',action='store_true',help='Vectorize CPU MLA attention dots while retaining generic softmax')
   parser.add_argument('--cpu-mla-projections',action='store_true',help='Use prepared FP16 tables for batched FP32 CPU MLA projections')
+  parser.add_argument('--cpu-mla-pack-once',action='store_true',help='Pack CPU MLA tables without retaining redundant contiguous copies')
+  parser.add_argument('--cpu-mla-decode-pool',action='store_true',help='Use active CPU workers for one-row MLA projections')
   parser.add_argument('--cpu-experts',action='store_true',help='Group routed CPU expert dots with packed FP16 weights')
   parser.add_argument('--cpu-expert-prefill-rows',type=int,choices=(4,6),default=4,help='Rows per multi-token CPU expert tile')
   parser.add_argument('--npu-experts',action='store_true',help='Experimental compact INT8 MoE experts for CPU/NPU inference')
@@ -86,6 +99,9 @@ def main(model_override=None,gpu_kernels_override=None):
                       help='Experimental grouped MLA precision; int8_residual uses three scaled INT8 products')
   parser.add_argument('--npu-mla-projections',choices=['both','query','value'],default='both',
                       help='Select MLA projections for NPU placement; other projections keep their CPU dot')
+  parser.add_argument('--cpu-exact-rows',action='store_true',help='Partition reviewed independent CPU prefill rows')
+  parser.add_argument('--cpu-sparse-lookup',action='store_true',help='Preserve reviewed sparse lookup layout with direct scatter')
+  parser.add_argument('--fused-gelu-decode',action='store_true',help='Enable the raw tanh-GELU producer during decode')
   parser.add_argument('--cpu-gelu',action='store_true',help='Vectorize CPU GELU-tanh gated activations')
   parser.add_argument('--cpu-erf-gelu',action='store_true',help='Opt into vector erf-GELU gating for CPU prefill')
   parser.add_argument('--cpu-softcap',action='store_true',help='Vectorize the final CPU logit soft cap')
@@ -110,6 +126,7 @@ def main(model_override=None,gpu_kernels_override=None):
   parser.add_argument('--stock-reference',type=Path)
   parser.add_argument('--report',type=Path,required=True)
   args = parser.parse_args()
+  if args.trim_preparation_cache and args.device!='CPU':parser.error('CPU preparation trimming requires the CPU device')
   if args.npu_prefill_attention and (args.device!='CPU' or not args.cpu_attention or args.prefill=='off'):
     raise ValueError('NPU prefill attention requires CPU attention hooks and active NPU prefill')
   if args.cpu_erf_gelu and args.device!='CPU':raise ValueError('CPU erf GELU requires device CPU')
@@ -127,8 +144,19 @@ def main(model_override=None,gpu_kernels_override=None):
   if (args.npu_mla_prefill or args.npu_mla_decode) and args.device!='CPU':parser.error('Grouped MLA projections require CPU/NPU inference')
   if args.npu_experts and args.device!='CPU':parser.error('NPU experts require CPU/NPU inference')
   if args.cpu_gelu and args.device!='CPU':parser.error('CPU GELU requires CPU inference')
+  if args.cpu_head_gate and args.device!='CPU':parser.error('CPU head gating requires CPU inference')
   if args.cpu_softcap and args.device!='CPU':parser.error('CPU soft cap requires CPU inference')
   if args.fused_gelu_ffn and (args.device!='CPU' or args.precision!='int8'):parser.error('Fused GELU FFN requires CPU INT8 inference')
+  if args.fused_gelu_sdk_prefill and (not args.fused_gelu_ffn or args.precision!='int8' or args.prefill=='off'):
+    parser.error('SDK GELU prefill requires fused GELU FFN and active INT8 prefill')
+  if args.fused_gelu_sdk_prefill and args.fused_gelu_decode:
+    parser.error('SDK GELU prefill requires the baseline decode path')
+  if args.fused_gelu_decode and (not args.fused_gelu_ffn or args.decode=='off'):
+    parser.error('Fused GELU decode requires fused GELU FFN and active decode')
+  if (args.cpu_exact_rows or args.cpu_sparse_lookup) and (args.device!='CPU' or not args.native_replay):
+    parser.error('Exact CPU preparation requires CPU inference and native replay')
+  if args.cpu_exact_rows and not (args.cpu_pool and args.cpu_prefill_pool):
+    parser.error('Exact CPU rows require CPU prefill workers')
   if args.file_backed_cpu_weights and (args.device!='CPU' or not args.defer_weight_realization):
     parser.error('File-backed CPU weights require CPU inference and deferred weight realization')
   if args.share_projection_weights and (args.device!='CPU' or args.precision!='int8' or not args.fuse_projections
@@ -141,6 +169,9 @@ def main(model_override=None,gpu_kernels_override=None):
     parser.error('GPU Q8 body requires GPU-only inference without projection fusion')
   if args.gpu_recurrent_scan and args.device!='CL':parser.error('GPU recurrent scan requires CL')
   if args.cpu_recurrent_scan and args.device!='CPU':parser.error('CPU recurrent scan requires CPU')
+  if args.scalar_decode_loop and (args.device!='CPU' or not args.native_replay or args.decode!='on'):
+    parser.error('Scalar decode loop requires CPU, native replay and NPU decode on')
+  if args.cpu_q8_embedding and args.device!='CPU':parser.error('CPU Q8 embedding requires CPU')
   if args.gpu_no_weight_packing and args.device!='CL':parser.error('GPU weight packing option requires CL')
   if args.precision=='int8' and args.prefill=='off' and args.decode=='off':parser.error('INT8 requires an active NPU phase')
   if args.input_scales and (args.device!='CPU' or args.precision!='int8'):parser.error('Input scaling requires CPU/NPU INT8')
@@ -153,7 +184,7 @@ def main(model_override=None,gpu_kernels_override=None):
   os.environ['DEV'] = args.device
   from tinygrad import Device, Tensor
   from tinygrad.helpers import GlobalCounters
-  from tinygrad.llm.model import Transformer
+  from tinygrad.llm.model import Transformer, ONPU_CPU_TOKEN_INPUTS, ONPU_STATIC_PREFILL, _static_prefill_supported
   from tinygrad.llm.kernels.rockchip import configure
   from tinygrad.llm.kernels import rockchip_cpu, rockchip_replay, rockchip_qkv  # noqa: F401 -- load measured sources before hashing
 
@@ -179,14 +210,20 @@ def main(model_override=None,gpu_kernels_override=None):
             'fused_qkv_without_norm':args.fused_qkv_without_norm,
             'fused_swiglu_ffn':args.fused_swiglu_ffn,
             'fused_swiglu_decode':args.fused_swiglu_decode,
+            'fused_recurrent_projections':args.fused_recurrent_projections,
+            'cpu_q8_embedding':args.cpu_q8_embedding,
             'fused_erf_gelu_ffn':args.fused_erf_gelu_ffn,
             'fused_erf_gelu_decode':args.fused_erf_gelu_decode,
             'swiglu_prefill_rows':int(os.environ.get('ONPU_SWIGLU_PREFILL_ROWS','1')),
             'cpu_static_gemm':args.cpu_static_gemm,
-            'cpu_erf_gelu':args.cpu_erf_gelu,
+            'cpu_exact_rows':args.cpu_exact_rows,'cpu_sparse_lookup':args.cpu_sparse_lookup,
+            'fused_gelu_decode':args.fused_gelu_decode,
+            'cpu_erf_gelu':args.cpu_erf_gelu,'cpu_head_gate':args.cpu_head_gate,
             'cpu_mla_weights':args.cpu_mla_weights,
             'cpu_mla_attention':args.cpu_mla_attention,
             'cpu_mla_projections':args.cpu_mla_projections,
+            'cpu_mla_pack_once':args.cpu_mla_pack_once,
+            'cpu_mla_decode_pool':args.cpu_mla_decode_pool,
             'cpu_experts':args.cpu_experts,
             'cpu_expert_prefill_rows':args.cpu_expert_prefill_rows,
             'npu_experts':args.npu_experts,
@@ -246,11 +283,19 @@ def main(model_override=None,gpu_kernels_override=None):
                 warmup_tokens=args.warmup_tokens,model_reused=model_override is not None)
   report['load_seconds'] = time.perf_counter()-begin
   report['gguf_loading'] = model.gguf_loading
-  jits = {'prefill':model.greedy_prefill_jit,'decode':model.greedy_rollout_jit}
+  scalar_jit=None
+  if args.scalar_decode_loop:
+    from tinygrad.llm.kernels.rockchip_decode import prepare_scalar_decode
+    scalar_jit=prepare_scalar_decode(model)
+  static_prefill=bool(ONPU_STATIC_PREFILL and ONPU_CPU_TOKEN_INPUTS) and args.device=='CPU' and _static_prefill_supported(model) \
+    and len(prompt)>=chunk_size and chunk_size>1
+  jits = {'prefill':model.greedy_uncached_jit if static_prefill else model.greedy_prefill_jit,
+          'decode':scalar_jit if scalar_jit is not None else model.greedy_rollout_jit}
   begin = time.perf_counter()
   report['placement'] = (configure(model,prefill=args.prefill,decode=args.decode,
                                  prefill_rows=min(chunk_size,256),
-                                 tile_columns=args.tile_columns,fuse_projections=args.fuse_projections,
+                                 tile_columns=args.tile_columns,decode_tile_columns=args.decode_tile_columns,
+                                 fuse_projections=args.fuse_projections,
                                  cpu_attention=args.cpu_attention,native_replay=args.native_replay,
                                  npu_prefill_attention=args.npu_prefill_attention,
                                  fused_ffn=args.fused_ffn,split_down=args.split_down,fused_qkv=args.fused_qkv,cpu_norm=args.cpu_norm,
@@ -258,15 +303,21 @@ def main(model_override=None,gpu_kernels_override=None):
                                  precision=args.precision,cpu_pool=args.cpu_pool,cpu_prefill_pool=args.cpu_prefill_pool,
                                  cpu_fast_softmax=args.cpu_fast_softmax,
                                   cache_cleaning=args.cache_cleaning,wake_helper=args.wake_helper,input_scales=input_scales,
-                                  share_projection_weights=args.share_projection_weights,cpu_recurrent_scan=args.cpu_recurrent_scan,
+                                  share_projection_weights=args.share_projection_weights,cpu_recurrent_scan=args.cpu_recurrent_scan,cpu_rwkv_weights=args.cpu_rwkv_weights,
                                   cpu_static_gemm=args.cpu_static_gemm,cpu_gelu=args.cpu_gelu,cpu_softcap=args.cpu_softcap,
-                                  cpu_erf_gelu=args.cpu_erf_gelu,
-                                  fused_gelu_ffn=args.fused_gelu_ffn,cpu_mla_weights=args.cpu_mla_weights,
+                                  cpu_erf_gelu=args.cpu_erf_gelu,cpu_head_gate=args.cpu_head_gate,
+                                  fused_gelu_ffn=args.fused_gelu_ffn,fused_gelu_decode=args.fused_gelu_decode,
+                                  fused_gelu_sdk_prefill=args.fused_gelu_sdk_prefill,
+                                  cpu_exact_rows=args.cpu_exact_rows,cpu_sparse_lookup=args.cpu_sparse_lookup,
+                                  cpu_mla_weights=args.cpu_mla_weights,
                                   fused_swiglu_ffn=args.fused_swiglu_ffn,
+                                  fused_recurrent_projections=args.fused_recurrent_projections,
                                   fused_swiglu_decode=args.fused_swiglu_decode,
                                   fused_erf_gelu_ffn=args.fused_erf_gelu_ffn,fused_erf_gelu_decode=args.fused_erf_gelu_decode,
                                   cpu_mla_attention=args.cpu_mla_attention,
                                   cpu_mla_projections=args.cpu_mla_projections,
+                                  cpu_mla_pack_once=args.cpu_mla_pack_once,
+                                  cpu_mla_decode_pool=args.cpu_mla_decode_pool,
                                   cpu_experts=args.cpu_experts,npu_experts=args.npu_experts,
                                   cpu_expert_prefill_rows=args.cpu_expert_prefill_rows,
                                   npu_expert_cpu_layers=args.npu_expert_cpu_layers,
@@ -276,9 +327,32 @@ def main(model_override=None,gpu_kernels_override=None):
                                   npu_mla_prefill=args.npu_mla_prefill,npu_mla_decode=args.npu_mla_decode,
                                   npu_mla_precision=args.npu_mla_precision,npu_mla_projections=args.npu_mla_projections)
                          if args.prefill!='off' or args.decode!='off' or args.npu_mla_prefill or args.npu_mla_decode
-                           or args.cpu_experts or args.npu_experts or args.cpu_mla_projections or args.cpu_erf_gelu else None)
+                           or args.cpu_experts or args.npu_experts or args.cpu_mla_projections or args.cpu_erf_gelu or args.cpu_head_gate else None)
+  if args.cpu_head_gate and not report['placement'].get('cpu_head_gate_blocks',0):
+    raise ValueError('Requested CPU head gating did not activate for this model')
   if args.npu_experts and not report['placement'].get('npu_expert_blocks',0):
     raise ValueError('Requested NPU experts did not activate for this model')
+  if args.cpu_q8_embedding:
+    from tinygrad.llm.kernels.rockchip_embedding import configure as configure_embedding
+    report['cpu_q8_embedding']=configure_embedding(model,args.checkpoint)
+    if not report['cpu_q8_embedding']:raise ValueError('Requested packed CPU Q8 embedding is unsupported')
+  if args.cpu_q8_side_embedding:
+    if args.device!='CPU':raise ValueError('Packed side embedding requires CPU inference')
+    from tinygrad.llm.kernels.rockchip_embedding import configure_segmented
+    report['cpu_q8_side_embedding']=configure_segmented(model,args.checkpoint)
+    if not report['cpu_q8_side_embedding']:raise ValueError('Requested packed CPU side embedding is unsupported')
+  scalar_decoder=None
+  if scalar_jit is not None:
+    from tinygrad.llm.kernels.rockchip_decode import ScalarDecoder, install_text_generation
+    from tinygrad.llm.kernels.rockchip_shared_pool import model_shared_host_pool
+    from tinygrad.llm.kernels.rockchip_pool import attention_pool
+    from tinygrad.llm.kernels.rockchip_idle import idle_helper
+    shared=model_shared_host_pool(model)
+    pool=shared.pool if shared is not None else attention_pool() if report['placement'].get('cpu_pool') else None
+    scalar_decoder=ScalarDecoder(model,scalar_jit,pool=pool,helper=idle_helper() if args.wake_helper else None)
+    install_text_generation(model,scalar_decoder,batch_size=args.scalar_decode_batch,limit=lambda:args.tokens)
+  if args.fused_gelu_sdk_prefill and not report['placement'].get('fused_gelu_sdk_prefill_blocks',0):
+    raise ValueError('Requested SDK GELU prefill did not activate for this model')
   if args.fused_swiglu_decode and not report['placement'].get('fused_swiglu_decode_blocks',0):
     raise ValueError('Requested raw SwiGLU decode did not activate for this model')
   if args.fused_erf_gelu_ffn and not report['placement'].get('fused_erf_gelu_ffn_blocks',0):
@@ -300,6 +374,9 @@ def main(model_override=None,gpu_kernels_override=None):
   else:
     report['cpu_mla_attention_blocks'] = report['placement'].get('cpu_mla_attention_blocks',0) if report['placement'] else 0
   report['cpu_mla_causal_work'] = bool(report['cpu_mla_attention_blocks'] and int(os.environ.get('ONPU_MLA_CAUSAL_WORK','1')))
+  if args.trim_preparation_cache:
+    from tinygrad.llm.kernels.rockchip import trim_cpu_preparation_cache
+    report['placement']['cpu_preparation_cache_trim_bytes']=trim_cpu_preparation_cache()
   report['prepare_seconds'] = time.perf_counter()-begin
   if report['placement'] and report['placement'].get('npu_prefill_attention_blocks',0):
     report['precision'] += '; causal attention uses FP16 Q/K/V and probabilities, FP32 accumulation and CPU FP32 softmax'
@@ -319,8 +396,8 @@ def main(model_override=None,gpu_kernels_override=None):
   try:
     for index in range(args.warmups+args.runs):
       model._cached_tokens = []
-      for block in model.blk:
-        if hasattr(block,'cache_kv'): block.cache_kv.assign(Tensor.zeros_like(block.cache_kv)).realize()
+      # Uncached input overwrites the visible prefix; untouched KV is masked.
+      # Avoid warming CPU/DDR clocks by clearing the whole cache before timing.
       Tensor.manual_seed(0)
       Device[args.device].synchronize()
       run_prompt = prompt[:args.warmup_tokens] if index<args.warmups and args.warmup_tokens else prompt
@@ -345,6 +422,11 @@ def main(model_override=None,gpu_kernels_override=None):
                  clocks_after=clocks(),matches_stock=ids==expected if expected is not None and run_prompt==prompt else None)
       row.update(allocated_bytes=GlobalCounters.mem_used,peak_rss_bytes=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss*1024)
       report['trials'].append(row)
+      if args.cpu_q8_embedding:report['cpu_q8_embedding']=model.token_embd.metadata()
+      if args.cpu_q8_side_embedding:report['cpu_q8_side_embedding']=model.per_layer_token_embd.metadata()
+      if scalar_decoder is not None:
+        report['scalar_decode_loop']={'batch':args.scalar_decode_batch,
+          'tokens':scalar_decoder.loop.tokens if scalar_decoder.loop is not None else 0}
       report['captured_calls'] = {phase:dict(Counter(f'{call.body.op.name}:{call.device}' for call in jit.captured.linear.src))
                                   for phase,jit in jits.items() if jit.captured is not None}
       report['native_execution'] = {phase:{'runs':getattr(jit.captured,'native_runs',0),'reason':getattr(jit.captured,'reason',None),

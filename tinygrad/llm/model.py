@@ -9,6 +9,8 @@ from tinygrad.uop.ops import resolve
 from tinygrad.helpers import ContextVar, unwrap, round_up
 
 ONPU_CPU_TOKEN_INPUTS = ContextVar('ONPU_CPU_TOKEN_INPUTS', 0)
+ONPU_STATIC_PREFILL = ContextVar('ONPU_STATIC_PREFILL', 0)
+ONPU_SHORTCONV_STATIC_PREFILL = ContextVar('ONPU_SHORTCONV_STATIC_PREFILL', 0)
 
 
 def _cpu_token_buffer(tokens:list[int], context:int) -> Tensor:
@@ -66,6 +68,17 @@ def gated_activation(gate:Tensor, up:Tensor, *, alpha:float=1.0, limit:float|Non
   if activation in ('gelu','gelu_tanh'):return gate.gelu(approximate='none' if activation=='gelu' else 'tanh') * (up+up_bias)
   if activation!='silu':raise ValueError(f'Unsupported gated activation: {activation}')
   # TODO: remove the need for this contiguous
+  # Decode shapes go through the generic elementwise lowering, which emits a
+  # scalar-per-lane sigmoid (E_3424_4: three NaN/Inf predicate chains repeated
+  # for each of four lanes, polynomial expanded four times) at 4.65 ms/token.
+  # For a batch-one CPU float tensor the tree already has a float4 kernel.
+  if getenv('ONPU_VECTOR_SIGMOID',0) and alpha==1.0 and up_bias==0.0:
+    from tinygrad import dtypes
+    if (gate.device=='CPU' and gate.dtype is dtypes.float and gate.ndim==3 and gate.shape[0]==1
+        and up.device=='CPU' and up.shape==gate.shape):
+      from tinygrad.llm.kernels.rockchip_sigmoid import sigmoid_pair_vector
+      try: return sigmoid_pair_vector(gate,up)
+      except ValueError: pass
   return gate * (gate * alpha).sigmoid().contiguous() * (up + up_bias)
 
 def apply_rope(x:Tensor, freqs_cis:Tensor) -> Tensor:
@@ -299,6 +312,11 @@ class TransformerBlock(FFNBlock):
     if config.qk_norm: self.attn_q_norm, self.attn_k_norm = nn.RMSNorm(config.qk_norm, config.norm_eps), nn.RMSNorm(config.qk_norm, config.norm_eps)
     if config.attn_sinks: self.attn_sinks = {"weight": Tensor.zeros(config.n_heads)}
 
+  def _apply_head_gate(self, attention:Tensor, x:Tensor) -> Tensor:
+    gate=self.attn_gate(x)
+    if (kernel:=getattr(self,'cpu_head_gate',None)) is not None:return kernel(attention,gate)
+    return attention*gate.sigmoid().transpose(1,2).unsqueeze(-1)
+
   def _attention(self, x:Tensor, start_pos:int|UOp) -> Tensor:
     if not self.config.attn_logit_softcap and not self.config.attn_head_gate and not self.config.attn_output_gate and \
        (prepared:=getattr(self,'prepared_qkv',None)) is not None and prepared.enabled(x):
@@ -328,7 +346,7 @@ class TransformerBlock(FFNBlock):
     if (not self.config.attn_logit_softcap or self.attention_logit_softcap==self.config.attn_logit_softcap) and B==1 and \
        (attention:=(self.decode_attention if resolve(T==1) else self.prefill_attention)) is not None:
       attn = attention(q,assigned_kv,start_pos+T)
-      if self.config.attn_head_gate:attn = attn*self.attn_gate(x).sigmoid().transpose(1,2).unsqueeze(-1)
+      if self.config.attn_head_gate:attn = self._apply_head_gate(attn,x)
       attn = attn.transpose(1,2).reshape(B,T,-1)
       return self.attn_output(attn if not self.config.attn_output_gate else (attn * gate.sigmoid()))
     # on RDNA3/4, hybrid models use custom flash attention kernels on the KV cache
@@ -371,7 +389,7 @@ class TransformerBlock(FFNBlock):
       if mask is not None:scores=scores+mask
       attn = scores.softmax(-1)@v
     else:attn = q.scaled_dot_product_attention(k, v, attn_mask=mask, enable_gqa=True)     # (B,H,T,Hd)
-    if self.config.attn_head_gate:attn = attn*self.attn_gate(x).sigmoid().transpose(1,2).unsqueeze(-1)
+    if self.config.attn_head_gate:attn = self._apply_head_gate(attn,x)
     attn = attn.transpose(1, 2).reshape(B, T, -1)                                    # back to (B,T,D)
     return self.attn_output(attn if not self.config.attn_output_gate else (attn * gate.sigmoid()))
 
@@ -435,7 +453,7 @@ class MLATransformerBlock(FFNBlock):
     q_nope, q_rope = q[..., :q_nope_head_dim], q[..., q_nope_head_dim:]
     if not self.config.ssm or not self.config.ssm.kda: q_rope = apply_rope(q_rope, self.freqs_cis[start_pos:start_pos+T])
     projections=getattr(self,'npu_mla_projections',None) or getattr(self,'cpu_mla_projections',None)
-    q = (projections.query(q_nope) if projections is not None else q_nope @ self.attn_k_b["weight"].transpose(-1, -2)).cat(q_rope, dim=-1)
+    q_nope = projections.query(q_nope) if projections is not None else q_nope @ self.attn_k_b["weight"].transpose(-1, -2)
 
     kv_a = self.attn_kv_a_mqa(x)
     c_kv = self.attn_kv_a_norm(kv_a[..., :self.config.kv_lora_rank])
@@ -448,11 +466,13 @@ class MLATransformerBlock(FFNBlock):
     v = k[..., :self.config.kv_lora_rank]
 
     mla = getattr(self,'cpu_mla_attention',None)
-    if mla is not None:attn = mla.query_key(q,cache,start_pos)
+    if mla is not None:
+      if getenv('ONPU_MLA_LEGACY_Q',0): attn = mla.query_key(q_nope.cat(q_rope,dim=-1),cache,start_pos)
+      else: attn = mla.query_key(q_nope,cache,start_pos,rope=q_rope)
     else:
-      attn = q @ k.transpose(-1, -2) * (1.0 / self.config.head_dim ** 0.5)
+      attn = q_nope.cat(q_rope, dim=-1) @ k.transpose(-1, -2) * (1.0 / self.config.head_dim ** 0.5)
       if (mask:=self._attn_mask(x, start_pos)) is not None: attn = attn + mask
-    attn = attn.softmax(-1)
+    attn = mla.softmax(attn,start_pos) if mla is not None else attn.softmax(-1)
     context = mla.weighted_value(attn,cache,start_pos) if mla is not None else attn @ v
     attn = (projections.value(context) if projections is not None else context @ self.attn_v_b["weight"].transpose(-1, -2)).transpose(
       1, 2).reshape(B, T, -1)
@@ -486,7 +506,8 @@ class ShortConvolution:
   def __call__(self, x:Tensor, start_pos:int|UOp) -> Tensor:
     b,c,value = self.in_proj(x).chunk(3,dim=-1)
     position = start_pos if isinstance(start_pos,UOp) else UOp.variable('start_pos',0,self.config.max_context-1).bind(start_pos)
-    state = Tensor(position,device=x.device).eq(0).where(0,self.cache_conv)
+    state = (Tensor.zeros_like(self.cache_conv) if ONPU_SHORTCONV_STATIC_PREFILL and type(start_pos) is int and start_pos==0
+             else Tensor(position,device=x.device).eq(0).where(0,self.cache_conv))
     rows,kernel = x.shape[1],self.config.conv_kernel
     window = state.cat(b*value,dim=1).contiguous()
     store = self.cache_conv.uop.store(window[:,rows:rows+kernel-1].uop)
@@ -501,6 +522,14 @@ class ShortConvBlock(FFNBlock):
     self.shortconv = ShortConvolution(config)
   def _init_state(self, x:Tensor):self.shortconv.init_state(x)
   def _attention(self, x:Tensor, start_pos:int|UOp) -> Tensor:return self.shortconv(x,start_pos)
+
+
+def _static_prefill_supported(model:Transformer) -> bool:
+  # Short convolution resets its finite history at position zero. Keep serial
+  # recurrent scans and other stateful block types on the dynamic path.
+  return not model.has_recurrent_block or bool(ONPU_SHORTCONV_STATIC_PREFILL) and bool(model.blk) \
+    and all(type(block) in (TransformerBlock,ShortConvBlock) for block in model.blk)
+
 
 class GatedDeltaNetBlock(FFNBlock):
   def __init__(self, config:TransformerConfig, ssm:SSMConfig):
@@ -535,10 +564,14 @@ class GatedDeltaNetBlock(FFNBlock):
 
     # input processing
     x = x.half()
-    out_gate = self.ssm_g_b(self.ssm_g_a(x)) if is_kda else self.attn_gate(x)
+    projections = None if is_kda else getattr(self,'recurrent_projections',None)
+    if projections is not None: conv_projection,out_gate,beta,alpha = projections(x)
+    else:
+      out_gate = self.ssm_g_b(self.ssm_g_a(x)) if is_kda else self.attn_gate(x)
+      beta = self.ssm_beta(x)
+      alpha = self.ssm_f_b(self.ssm_f_a(x)) if is_kda else self.ssm_alpha(x)
     out_gate = out_gate.reshape(B, T, self.num_v_heads, self.head_v_dim)
-    beta = self.ssm_beta(x).sigmoid().reshape(B, T, self.num_v_heads)
-    alpha = self.ssm_f_b(self.ssm_f_a(x)) if is_kda else self.ssm_alpha(x)
+    beta = beta.sigmoid().reshape(B, T, self.num_v_heads)
     g, a = (alpha.float() + self.ssm_dt["bias"]).reshape(B, T, self.num_v_heads, -1), self.ssm_a.reshape(self.num_v_heads, -1)
     # the decay: log_alpha = softplus(g) * A, or bounded by gate_lower_bound: sigmoid(g * -A) * lb
     log_alpha = g.softplus() * a if (lb:=unwrap(self.config.ssm).gate_lower_bound) is None else (g * -a).sigmoid() * lb
@@ -547,7 +580,7 @@ class GatedDeltaNetBlock(FFNBlock):
     conv_state = initial.where(0, self.conv_state)
     # assemble the conv window in a static-size buffer: [conv_state | qkv rows | zero-pad].
     # padded steps are exact no-ops: beta=0 (delta rule off), log_alpha=0 (decay 1 after exp)
-    conv_window = conv_state.cat(self.attn_qkv(x).cast(conv_state.dtype), dim=1)
+    conv_window = conv_state.cat((conv_projection if projections is not None else self.attn_qkv(x)).cast(conv_state.dtype), dim=1)
     conv_window = conv_window.pad_to((B, self.ssm_conv_kernel-1 + T_pad, self.conv_channels)).contiguous()
     # the last conv_kernel-1 columns of the window become the next conv state
     conv_state_store = self.conv_state.uop.store(conv_window[:, T:T+self.ssm_conv_kernel-1].cast(self.conv_state.dtype).uop)
@@ -659,6 +692,7 @@ class Transformer:
     self.prefill_jit = TinyJit(self.forward)
     self.rollout_jit = TinyJit(self.forward)
     self.greedy_prefill_jit = TinyJit(self.greedy_forward)
+    self.greedy_uncached_jit = TinyJit(lambda tokens: self.greedy_forward(tokens,0).realize())
     self.greedy_rollout_jit = TinyJit(self.greedy_forward)
     self.embeddings_prefill_jit = TinyJit(lambda x: self.logits_from_embeddings(x,0).realize())
     self.greedy_embeddings_prefill_jit = TinyJit(lambda x: self.greedy_from_embeddings(x,0).realize())
@@ -764,7 +798,7 @@ class Transformer:
     logits = self.logits_from_embeddings(x,start_pos)
     return (logits / temperature.maximum(1e-12) - (Tensor.rand_like(logits).maximum(1e-12).log().neg()).log()).argmax(-1, keepdim=True)
 
-  def __call__(self, tokens:Tensor, start_pos:int|UOp, temperature:Tensor) -> Tensor:
+  def __call__(self, tokens:Tensor, start_pos:int|UOp, temperature:Tensor|None) -> Tensor:
     # CPU embedding kernels accept realized views. Retaining the view also
     # retains its symbolic start/length, without an input-copy schedule per call.
     if not (ONPU_CPU_TOKEN_INPUTS and tokens.device=='CPU' and tokens.dtype is dtypes.int32 and tokens.uop.is_realized
@@ -772,6 +806,7 @@ class Transformer:
       tokens = tokens.contiguous()
     if self._greedy_generation:
       return (self.greedy_prefill_jit if resolve(tokens.shape[1] != 1) else self.greedy_rollout_jit)(tokens,start_pos)
+    if temperature is None:raise ValueError('Sampling requires a temperature tensor')
     return (self.prefill_jit if resolve(tokens.shape[1] != 1) else self.rollout_jit)(tokens,start_pos,temperature)
 
   @staticmethod
@@ -1012,10 +1047,10 @@ class Transformer:
     v_start_pos = UOp.variable("start_pos", 0, self.max_context-1)
     v_toks = UOp.variable("toks", 1, chunk_size)
     # TODO: use UOp.variable for temperature once float variables are supported
-    temp = Tensor([temperature])
+    temp = Tensor([temperature]) if temperature!=0 else None
     # assign all input tokens once, then slice from start_pos for the model call
-    t = (_cpu_token_buffer(tokens,self.max_context) if ONPU_CPU_TOKEN_INPUTS and Device.DEFAULT=='CPU'
-         and self.token_embd.weight.device=='CPU' else
+    cpu_token_inputs = ONPU_CPU_TOKEN_INPUTS and Device.DEFAULT=='CPU' and self.token_embd.weight.device=='CPU'
+    t = (_cpu_token_buffer(tokens,self.max_context) if cpu_token_inputs else
          Tensor(tokens + [0] * (self.max_context - len(tokens)), dtype="int32").reshape(1, self.max_context))
     # recompute start_pos from what's currently valid in the caches
     start_pos = self.get_start_pos(tokens)
@@ -1023,13 +1058,22 @@ class Transformer:
     out, prompt_len = None, len(tokens)
     while len(tokens) < self.max_context:
       n_toks = min(chunk_size, len(tokens) - start_pos)
-      sp, nt = v_start_pos.bind(start_pos), v_toks.bind(n_toks)
       previous = self._greedy_generation
       self._greedy_generation = temperature==0
       # A failed or interrupted call may already have advanced recurrent state.
       # Publish its completed prefix only after execution has succeeded.
       if self.has_recurrent_block:self._cached_tokens = []
-      try: out = self(t[:, sp:sp+nt] if start_pos < prompt_len or out is None else out, sp, temp).realize()
+      try:
+        if (ONPU_STATIC_PREFILL and cpu_token_inputs and _static_prefill_supported(self) and temperature==0
+            and start_pos==0 and n_toks==chunk_size and n_toks>1 and hasattr(self,'greedy_uncached_jit')):
+          # Full first chunks need neither a symbolic input extent nor a bound
+          # cache position. Keep the dynamic path for partial/cached requests.
+          out = self.greedy_uncached_jit(Tensor(t.uop.shrink(((0,1),(0,chunk_size))))).realize()
+        else:
+          sp, nt = v_start_pos.bind(start_pos), v_toks.bind(n_toks)
+          inp = (Tensor(t.uop.shrink(((0,1),(sp,sp+nt)))) if cpu_token_inputs else t[:, sp:sp+nt]) \
+            if start_pos < prompt_len or out is None else out
+          out = self(inp, sp, temp).realize()
       finally: self._greedy_generation = previous
       start_pos += n_toks
       self._cached_tokens = tokens[:start_pos]
