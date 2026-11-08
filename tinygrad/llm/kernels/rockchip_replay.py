@@ -1,6 +1,6 @@
 """Native replay of prepared CPU/Rockchip inference calls, with guarded fallback."""
 from __future__ import annotations
-import ctypes, functools, itertools, subprocess, time
+import ctypes, functools, itertools, json, os, subprocess, time
 from collections import Counter
 from dataclasses import replace
 from typing import Any, cast
@@ -536,6 +536,14 @@ class NativeReplay:
       for i,label in enumerate(self.labels):
         self.profile_ns[label] += stats[i+2]
         self.profile_counts[label] += 1
+      # Per-call samples, opt-in. The aggregate above sums each label's calls, so
+      # it can say a kernel averages X ms but not how its individual calls spread.
+      # For a tile whose cost may depend on position in the layer (a tail tile
+      # stalling behind a wide sibling) the distribution is the whole question.
+      if path := os.getenv('ONPU_REPLAY_CALLS_OUT'):
+        with open(path,'a') as output:
+          output.write(json.dumps({'calls':[[label,stats[i+2]]
+                                            for i,label in enumerate(self.labels)]})+'\n')
 
 
 class RockchipCapturedJit(CapturedJit):
