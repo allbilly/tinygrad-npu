@@ -3,13 +3,13 @@ from __future__ import annotations
 import ctypes, functools, itertools, json, os, subprocess, time
 from collections import Counter
 from dataclasses import replace
-from typing import Any, cast
+from typing import Any, Callable, cast
 from tinygrad import Device
 from tinygrad.device import Buffer, BufferStorage, TinyELF
 from tinygrad.dtype import AddrSpace, dtypes
 from tinygrad.engine.jit import CapturedJit, _copy_input
 from tinygrad.engine.realize import _resolve, estimate_uop, get_runtime, get_call_arg_uops, get_call_outs_ins
-from tinygrad.helpers import DEBUG, PROFILE, GlobalCounters, getenv, unwrap
+from tinygrad.helpers import DEBUG, PROFILE, ContextVar, GlobalCounters, getenv, unwrap
 from tinygrad.renderer import Estimates
 from tinygrad.renderer.cstyle import ClangRenderer
 from tinygrad.runtime.ops_cpu import CPUProgram
@@ -20,6 +20,13 @@ from tinygrad.uop.ops import Ops, UOp, sym_infer
 
 
 class UnsupportedReplay(Exception): pass
+
+
+# A shared pack arena can be far larger than the view an upload actually wrote.
+# Aliasing the clean to the recorded view is safe only with an exact match, and
+# the native-clean path can be disabled independently for diagnosis.
+ONPU_REPLAY_EXTRA_PACK_ALIAS = ContextVar('ONPU_REPLAY_EXTRA_PACK_ALIAS',1)
+ONPU_REPLAY_EXTRA_PACK_NATIVE_CLEAN = ContextVar('ONPU_REPLAY_EXTRA_PACK_NATIVE_CLEAN',1)
 
 
 def _copy_scalar_input(u:UOp) -> UOp:
@@ -49,8 +56,17 @@ def _full_write(call:UOp, slot:int, nbytes:int) -> bool:
   param = params[0]
   # These internal packers fill output 0 completely, including tile/header padding.
   # The exact extent check above also excludes a larger reused scratch allocation.
+  # `rockchip_int8_swiglu_pack` can write a partial tile into a shared arena, so
+  # trusting it to fill the whole view requires the pack alias to be enabled.
+  # `rockchip_quantize_sdk` writes the SDK block layout, which only fills the
+  # whole view under that same alias.
   if slot==0 and (program.src[0].arg.function_name in ('rockchip_swiglu_pack','rockchip_quantize','rockchip_int8_ffn_pack')
-                 or program.src[0].arg.function_name=='rockchip_int8_swiglu_pack' and getenv('ONPU_FFN_PACKED_UPLOAD',0)):
+                 or (program.src[0].arg.function_name in ('rockchip_int8_swiglu_pack','rockchip_quantize_sdk',
+                                                           'rockchip_int8_erf_gelu_pack','rockchip_int8_gelu_pack')
+                     and ONPU_REPLAY_EXTRA_PACK_ALIAS
+                     and (program.src[0].arg.function_name in ('rockchip_quantize_sdk','rockchip_int8_erf_gelu_pack',
+                                                              'rockchip_int8_gelu_pack')
+                          or getenv('ONPU_FFN_PACKED_UPLOAD',0)))):
     return True
   nodes = program.src[0].toposort()
   if any(u.op in (Ops.IF,Ops.BACKEDGE) for u in nodes): return False
@@ -224,6 +240,19 @@ class NativeReplay:
     base_flags = rk.RKNPU_MEM_CACHEABLE|rk.RKNPU_MEM_NON_CONTIGUOUS|rk.RKNPU_MEM_IOMMU_LIMIT_IOVA_ALIGNMENT
     offset = raw.dma-int(raw.meta.dma_addr)
     native_limit = 16777216 if getenv('ONPU_REPLAY_NATIVE_FROM_LARGE',0) else 4194304
+    # A pack buffer may live in a large shared arena while the upload only wrote a
+    # small view of it. Native-cleaning the whole view is only safe when an
+    # exactly recorded upload proves that view was fully written, so the alias is
+    # gated on an exact (meta, address, size) match rather than the arena size.
+    uploaded = getattr(self,'extra_pack_uploads',{}).get(index)
+    extra_pack = (bool(ONPU_REPLAY_EXTRA_PACK_ALIAS) and flag==rk.RKNPU_MEM_SYNC_TO_DEVICE
+                  and self.cleaner is not None
+                  and uploaded==(id(raw.meta),raw.addr,raw.size)
+                  and raw.meta.flags==base_flags
+                  and raw.meta.cpu_clean_version==raw.meta.version
+                  and 0<raw.size<=1048576<=raw.meta.size<=16777216
+                  and 0<=offset<=raw.meta.size-raw.size
+                  and (raw.addr|raw.size)&63==0 and (raw.addr-offset)&4095==0)
     # No CPU kernel may intervene between the producer and this read. Batched
     # copies also forget any overlapping CPU upload. The output was clean at
     # warm replay, and NativeReplay.valid retains that invariant.
@@ -237,10 +266,18 @@ class NativeReplay:
       self.invalidate_sites += 1
       return (f'if(((int(*)(void*,unsigned long)){self.invalidator}ULL)((void*){raw.addr}ULL,{raw.size}UL))'
               f'return {2000000+index};')
+    # The plain path keeps its 1 MB ceiling. The extra-pack alias handles larger
+    # arenas up to 16 MB when an exact upload record proves the written view.
     if (self.cleaner is not None and flag==rk.RKNPU_MEM_SYNC_TO_DEVICE
         and raw.meta.flags in (base_flags,base_flags|rk.RKNPU_MEM_KERNEL_MAPPING)
         and 0<raw.size<=raw.meta.size<=1048576 and 0<=offset<=raw.meta.size-raw.size
         and (raw.addr|raw.size)&63==0 and (raw.addr-offset)&4095==0):
+      self.clean_sites += 1
+      return f'((void(*)(void*,unsigned long)){self.cleaner}ULL)((void*){raw.addr}ULL,{raw.size}UL);'
+
+    if extra_pack and bool(ONPU_REPLAY_EXTRA_PACK_NATIVE_CLEAN):
+      # Proven pack view inside a larger arena: clean exactly the written span.
+      # Reached only when the plain branch above declined (arena beyond 1 MB).
       self.clean_sites += 1
       return f'((void(*)(void*,unsigned long)){self.cleaner}ULL)((void*){raw.addr}ULL,{raw.size}UL);'
     if flag==rk.RKNPU_MEM_SYNC_FROM_DEVICE: self.driver_from_sites += 1
@@ -547,8 +584,13 @@ class NativeReplay:
 
 
 class RockchipCapturedJit(CapturedJit):
-  def __init__(self, captured:CapturedJit, cleaner:int|None=None):
-    super().__init__(captured.ret,captured._linear,captured.expected_names,captured.expected_input_info)
+  def __init__(self, captured:CapturedJit, cleaner:int|None=None, *,
+               program_transform:Callable[[UOp],UOp]|None=None):
+    # The preparation-pool path rewrites the linear graph before capture (RWKV
+    # state, GDN pre-pool, exact-row preparation). Accept and apply it here so
+    # the caller does not have to special-case its absence.
+    linear = program_transform(captured._linear) if program_transform is not None else captured._linear
+    super().__init__(captured.ret,linear,captured.expected_names,captured.expected_input_info)
     self.native:NativeReplay|None = None
     self.warmed = False
     self.reason:str|None = None
