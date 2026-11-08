@@ -12,6 +12,12 @@ from tinygrad.uop.ops import KernelInfo, Ops, ProgramInfo, UOp
 ONPU_CPU_PREFILL_LAYOUT = ContextVar('ONPU_CPU_PREFILL_LAYOUT',0)
 ONPU_CPU_PREFILL_WIDE_TILE = ContextVar('ONPU_CPU_PREFILL_WIDE_TILE',0)
 ONPU_CPU_DECODE_POOL = ContextVar('ONPU_CPU_DECODE_POOL',0)
+# Split decode attention by head slice inside a KV group rather than by KV group.
+# The group split caps parallelism at kv_heads, leaving workers idle whenever
+# kv_heads < pool workers; a head slice keeps all workers busy and is bit-exact
+# because heads in a group are independent. Default on; kept switchable so the
+# two splits can be compared directly.
+ONPU_CPU_HEAD_SLICE = ContextVar('ONPU_CPU_HEAD_SLICE',1)
 ONPU_EXP2_FAST_PATH = ContextVar('ONPU_EXP2_FAST_PATH',0)
 ONPU_EXP2_SCALE_BITS = ContextVar('ONPU_EXP2_SCALE_BITS',1)
 ONPU_CPU_GQA_PREFILL = ContextVar('ONPU_CPU_GQA_PREFILL',0)
@@ -75,6 +81,66 @@ def _decode_heads(heads:int, kv_heads:int, dim:int, context:int, fast_softmax:bo
     const __fp16 *keys=cache+kv*{context*dim},*values=keys+{kv_heads*context*dim};
     const int first={f'total>{window}?total-{window}:0' if window else '0'};
     float p[{group}][{context}],maximum[{group}]={{{maxima}}};{queries}
+    for(int t=first;t<total;t++) {{const half4 *source=(const half4*)(keys+t*{dim});float4 {acc};
+      for(int c=0;c<{dim//4};c++) {{float4 key=__builtin_convertvector(source[c],float4);{dot}}}
+      {scores}
+    }}
+    {normalize}
+    for(int c=0;c<{dim//4};c+={tile}) {{float4 {pv_acc};
+      for(int t=first;t<total;t++) {{const half4 *value=(const half4*)(values+t*{dim});{values}{pv}}}
+      {stores}
+    }}
+  }}return;'''
+
+
+@functools.cache
+def _decode_head_slice(heads:int, kv_heads:int, dim:int, context:int, fast_softmax:bool=False,
+                       score_scale:float|None=None, window:int=0, softcap:float=0.0,
+                       per:int=0, hlo:str='lo', hhi:str='hi') -> str:
+  """GQA decode over a HEAD SUBSET inside one KV group, for one pool worker.
+
+  Why this exists: the KV-group split used by `pool_part` gives each worker
+  `kv_heads*group/4` heads. With kv_heads=2 that leaves two of four workers with
+  an empty range (integer division), so attention is capped at 2x no matter how
+  the rest is tuned. Query heads inside a group share the same keys and values
+  but compute independent scores and independent outputs, so slicing the heads
+  of a group across workers is bit-exact: no accumulation order changes.
+
+  The slice must not cross a group boundary. Callers must ensure
+  `per` divides `group`; then every `[hlo, hlo+per)` block lies inside the group
+  `hlo/group` and one key/value pointer serves the whole block.
+
+  `hlo` is emitted as a caller-supplied C expression (an integer local), never a
+  compound literal, so the generated code stays valid C.
+  """
+  if per <= 0: raise ValueError('head slice needs a positive per-worker head count')
+  group = heads//kv_heads
+  if group % per: raise ValueError('head slice must divide the KV group evenly')
+  tile = min(4,16//per)
+  if dim%(4*tile): tile = 1
+  # Absolute head index for lane i = base + i, where `base` walks hlo..hhi by per.
+  queries = '\n'.join(f'const float4 *q{i}=(const float4*)(query+(base+{i})*{dim});' for i in range(per))
+  acc = ','.join(f'a{i}={{0}}' for i in range(per))
+  dot = '\n'.join(f'a{i}=a{i}+q{i}[c]*key;' for i in range(per))
+  scale = float(1/math.sqrt(dim) if score_scale is None else score_scale).hex()+'f'
+  scores = '\n'.join(f'''p[{i}][t]=(((a{i}[0]+a{i}[1])+a{i}[2])+a{i}[3])*{scale};
+    {f'p[{i}][t]=rockchip_attention_softcap(p[{i}][t]);' if softcap else ''}
+    if(p[{i}][t]>maximum[{i}])maximum[{i}]=p[{i}][t];''' for i in range(per))
+  maxima = ','.join('-__builtin_inff()' for _ in range(per))
+  values = '\n'.join(f'float4 v{j}=__builtin_convertvector(value[c+{j}],float4);' for j in range(tile))
+  pv_acc = ','.join(f'a{i}{j}={{0}}' for i in range(per) for j in range(tile))
+  pv = '\n'.join(f'a{i}{j}=a{i}{j}+v{j}*(float4)p[{i}][t];' for i in range(per) for j in range(tile))
+  stores = '\n'.join(f'((float4*)(out+(base+{i})*{dim}))[c+{j}]=a{i}{j};' for i in range(per) for j in range(tile))
+  normalize = (f'for(int i=0;i<{per};i++)rockchip_softmax_vector(p[i]+first,total-first,maximum[i]);' if fast_softmax else f'''
+    for(int i=0;i<{per};i++) {{float sum=0;
+      for(int t=first;t<total;t++) {{p[i][t]=expf(p[i][t]-maximum[i]);sum+=p[i][t];}}
+      for(int t=first;t<total;t++)p[i][t]/=sum;
+    }}''')
+  return f'''for(int base={hlo};base<{hhi};base+={per}) {{
+    const int kv=base/{group};
+    const __fp16 *keys=cache+kv*{context*dim},*values=keys+{kv_heads*context*dim};
+    const int first={f'total>{window}?total-{window}:0' if window else '0'};
+    float p[{per}][{context}],maximum[{per}]={{{maxima}}};{queries}
     for(int t=first;t<total;t++) {{const half4 *source=(const half4*)(keys+t*{dim});float4 {acc};
       for(int c=0;c<{dim//4};c++) {{float4 key=__builtin_convertvector(source[c],float4);{dot}}}
       {scores}
@@ -166,7 +232,27 @@ def _attention(out:UOp, query:UOp, cache:UOp, length:UOp|None, heads:int, kv_hea
   worker = '''static void *attention_worker(void *opaque) {
     Work *w=(Work*)opaque;attention_part(w->out,w->query,w->cache,w->total,w->rows,w->begin,w->end);return (void*)0;
   }''' if parallel else ''
-  if pool is not None and max_rows==1 and (kv_heads>=4 or kv_heads>=2 and (context>=4096 or small_kv_pool)):
+  # Prefer a per-worker HEAD SLICE over a per-worker KV-group slice when the
+  # group split would idle workers. `kv_heads*g/4` yields an empty range
+  # whenever kv_heads < workers (ChatGLM: kv_heads=2, 4 workers -> 2 idle), so
+  # the group split can never exceed kv_heads-way parallelism. Heads inside a
+  # group are independent, so slicing them is bit-exact.
+  group_heads = heads//kv_heads
+  slice_per = heads//4
+  head_slice = (bool(ONPU_CPU_HEAD_SLICE) and heads % 4 == 0 and slice_per >= 1
+                and group_heads % slice_per == 0 and slice_per < group_heads)
+  if pool is not None and max_rows==1 and head_slice and (
+      kv_heads>=4 or kv_heads>=2 and (context>=4096 or small_kv_pool)):
+    declarations += f'''static void pool_head_part(void **args,int total,int worker) {{
+      float *out=args[0];const float *query=args[1];const __fp16 *cache=args[2];
+      const int lo=worker*{slice_per},hi=lo+{slice_per};
+      {_decode_head_slice(heads,kv_heads,dim,context,fast_softmax,score_scale,window,softcap,
+                          per=slice_per,hlo='lo',hhi='hi')}
+    }}'''
+    dispatch = f'''if(total>={1024 if kv_heads<4 and not small_kv_pool else 16}){{void *args[4]={{out,(void*)query,(void*)cache,0}};
+      if(!((int(*)(void(*)(void**,int,int),void**,int)){pool}ULL)(pool_head_part,args,total))return;
+    }}attention_part(out,query,cache,total,active_rows,0,{heads});'''
+  elif pool is not None and max_rows==1 and (kv_heads>=4 or kv_heads>=2 and (context>=4096 or small_kv_pool)):
     declarations += f'''static void pool_part(void **args,int total,int group) {{
       attention_part(args[0],args[1],args[2],total,1,({kv_heads}*group/4)*{heads//kv_heads},
                      ({kv_heads}*(group+1)/4)*{heads//kv_heads});
