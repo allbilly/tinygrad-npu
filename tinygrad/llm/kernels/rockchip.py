@@ -759,7 +759,8 @@ def configure(model, prefill:str='off', decode:str='off', tile_columns:int=4096,
   swiglu_ffn_blocks,swiglu_decode_blocks = 0,0
   if fused_swiglu_ffn or any(getattr(block,'fused_swiglu_ffn',None) is not None for block in getattr(model,'blk',[])):
     from tinygrad.llm.model import FFNBlock
-    from tinygrad.llm.kernels.rockchip_gelu_ffn import RockchipInt8SwiGLUFeedForward, supported_down_bias, wide_swiglu_supported
+    from tinygrad.llm.kernels.rockchip_gelu_ffn import (RockchipInt8SwiGLUFeedForward, supported_down_bias, wide_swiglu_supported,
+                                                         ONPU_WIDE_RAW_SWIGLU_DECODE)
     from tinygrad.llm.kernels.rockchip_int8 import RockchipInt8Linear
     for block in getattr(model,'blk',[]):
       if isinstance(getattr(block,'fused_swiglu_ffn',None),RockchipInt8SwiGLUFeedForward):delattr(block,'fused_swiglu_ffn')
@@ -771,7 +772,11 @@ def configure(model, prefill:str='off', decode:str='off', tile_columns:int=4096,
           and ((512<=down.depth<=12288 and len(swiglu_group.joint.packed)==1) or wide_swiglu_supported(swiglu_group.joint,down))
           and swiglu_group.joint.columns==down.depth*2 and (down.input_scale is None or ONPU_INT8_HADAMARD)
           and swiglu_group.joint.bias is None and supported_down_bias(down)):
-        raw_decode=(fused_swiglu_decode and not wide_swiglu_supported(swiglu_group.joint,down)
+        # The wide (24576+2816) geometry keeps the RAW decode route available by env opt-in, so the
+        # route can be A/B'd without changing the command line. Narrow geometries keep the CLI gate.
+        wide_decode=bool(ONPU_WIDE_RAW_SWIGLU_DECODE) and wide_swiglu_supported(swiglu_group.joint,down)
+        narrow_decode=fused_swiglu_decode and not wide_swiglu_supported(swiglu_group.joint,down)
+        raw_decode=((narrow_decode or wide_decode)
                     and all(layer.decode=='on' for layer in (*swiglu_group.layers,down)))
         setattr(block,'fused_swiglu_ffn',RockchipInt8SwiGLUFeedForward(swiglu_group,down,pool=pool if cpu_prefill_pool else None,
                                                                  decode=raw_decode,legacy_division=fused_ffn and down.depth<=4096))

@@ -22,6 +22,12 @@ ONPU_SWIGLU_C4_PREFETCH = ContextVar('ONPU_SWIGLU_C4_PREFETCH',0)
 ONPU_SWIGLU_BATCHED_PACK = ContextVar('ONPU_SWIGLU_BATCHED_PACK',0)
 ONPU_SWIGLU_K_SPLIT = ContextVar('ONPU_SWIGLU_K_SPLIT',0)
 ONPU_WIDE_RAW_SWIGLU = ContextVar('ONPU_WIDE_RAW_SWIGLU',0)
+# Opt the two-weight-tile (24576+2816) geometry into the raw pack at decode.
+# The decode path otherwise materializes gate/up FP32, copies it twice, then
+# re-quantizes it for ffn_down in four separate K groups. This route keeps the
+# raw INT32 dots and writes the down payload straight from the pack kernel.
+# Default off: the decode route is selected only when the caller asks for it.
+ONPU_WIDE_RAW_SWIGLU_DECODE = ContextVar('ONPU_WIDE_RAW_SWIGLU_DECODE',0)
 _batched_pack_traces = 0
 
 
@@ -55,11 +61,26 @@ def _row_batch_supported(activation:str, tiles:tuple[ProjectionTile,...]) -> boo
           or activation=='gelu_tanh' and tiles in _SDK_TANH_ROW_TILES)
 
 
-def payload_layout(rows:int, depths:tuple[int,...]) -> tuple[tuple[int,int,int,int],...]:
-  """(byte offset, padded depth, row tile, byte size) for each independent K group."""
+def payload_layout(rows:int, depths:tuple[int,...], grouped:int=0) -> tuple[tuple[int,int,int,int],...]:
+  """(byte offset, padded depth, row tile, byte size) for each independent K group.
+
+  `grouped>0` lays the leading `grouped` K groups out the way the grouped down
+  projection consumes them: one activation-scale header for every group, then the
+  group-major codes with no per-tile headers. That lets the decode pack write the
+  grouped payload in place instead of reassembling it with elementwise kernels.
+  """
   result=[]
   offset=0
-  for depth in depths:
+  if grouped:
+    if not 1<=grouped<=len(depths):raise ValueError('Unsupported grouped payload group count')
+    if any(padded_depth(depth)!=padded_depth(depths[0]) for depth in depths[:grouped]):
+      raise ValueError('Grouped payload requires one padded depth')
+    padded=padded_depth(depths[0])
+    header=round_up(grouped*rows*4,64)
+    offset=header+sum(rows*padded for _ in range(grouped))
+    for index,depth in enumerate(depths[:grouped]):
+      result.append((header+index*rows*padded,padded,1 if rows<=1 else 128,rows*padded+(header if index==0 else 0)))
+  for depth in depths[grouped:]:
     padded=padded_depth(depth)
     tile=128 if padded<=2048 else 64
     size=sum(round_up(min(tile,rows-first)*4,64)+min(tile,rows-first)*padded for first in range(0,rows,tile))
@@ -68,7 +89,8 @@ def payload_layout(rows:int, depths:tuple[int,...]) -> tuple[tuple[int,int,int,i
   return tuple(result)
 
 
-def grouped_down_payload(packed:Tensor, scales:Tensor, rows:int, depths:tuple[int,...], groups:int) -> tuple[Tensor,Tensor]:
+def grouped_down_payload(packed:Tensor, scales:Tensor, rows:int, depths:tuple[int,...], groups:int, *,
+                         packed_grouped:bool=False) -> tuple[Tensor,Tensor]:
   """Reuse the fused FFN pack as one group-major payload for the grouped down projection.
 
   The fused pack stores an activation-scale header per row tile inside each K group.
@@ -82,6 +104,14 @@ def grouped_down_payload(packed:Tensor, scales:Tensor, rows:int, depths:tuple[in
       or any(type(depth) is not int or depth<=0 or depth%32 for depth in depths[:groups])
       or any(padded_depth(depth)!=padded_depth(depths[0]) for depth in depths[:groups])):
     raise ValueError('Unsupported grouped down-projection payload layout')
+  if packed_grouped:
+    # The pack kernel already emitted one shared scale header plus group-major codes,
+    # so the payload is a prefix of the pack output and no elementwise kernels run.
+    layout=payload_layout(rows,depths,groups)
+    offset,padded,_,_=layout[groups-1]
+    end=offset+rows*padded
+    if packed.numel()<end:raise ValueError('Grouped down-projection payload is truncated')
+    return packed[:end],scales[:groups*rows]
   layout=payload_layout(rows,depths[:groups])
   offset,padded,_,size=layout[-1]
   if packed.numel()<offset+size:raise ValueError('Grouped down-projection payload is truncated')
@@ -256,7 +286,8 @@ def _row_batch_body(tiles:tuple[ProjectionTile,...], rows:int, hidden:int, first
 def _program(out:UOp, raw:tuple[UOp,...], sa:tuple[UOp,...], sw:UOp, active:UOp, scale_out:UOp,
              rows:int, hidden:int, depths:tuple[int,...], tiles:tuple[ProjectionTile,...], static_layout:bool=False,
              activation:str='gelu_tanh', pool:int|None=None, row_batch:int=1, channel_scratch:bool=False, prefetch:int=0,
-             batched_pack:bool=False, input_scale:UOp|None=None, hadamard:int=0) -> UOp:
+             batched_pack:bool=False, input_scale:UOp|None=None, hadamard:int=0,
+             grouped:int=0, group_pool:int|None=None) -> UOp:
   if row_batch not in (1,2,4):raise ValueError('Unsupported raw SwiGLU row batch')
   from tinygrad.llm.kernels.rockchip_hadamard import supported as hadamard_supported,rotate_ffn_source
   if hadamard not in (0,128):raise ValueError('Unsupported INT8 Hadamard block')
@@ -302,9 +333,11 @@ def _program(out:UOp, raw:tuple[UOp,...], sa:tuple[UOp,...], sw:UOp, active:UOp,
         float4 value=__builtin_convertvector(*(const int4*)(raw[{index}]+position),float4);
         return (value*(float4)sa[{tile.scale_index}][row-{tile.first_row}])*(*(const float4*)(sw+column));
       }}''')
-  layout=payload_layout(rows,depths)
+  if grouped and not 1<=grouped<=len(depths):raise ValueError('Unsupported grouped payload group count')
+  layout=payload_layout(rows,depths,grouped)
   loops=[]
   padding=[]
+  if grouped:padding.append(f'for(int i={grouped*rows*4};i<{round_up(grouped*rows*4,64)};i++)out[i]=0;')
   first_channel=0
   for group,(depth,(offset,padded,row_tile,_)) in enumerate(zip(depths,layout)):
     projection_loop=_static_projection_loop(tiles,rows,hidden,first_channel,depth,activation) if static_layout else f'''
@@ -318,17 +351,36 @@ def _program(out:UOp, raw:tuple[UOp,...], sa:tuple[UOp,...], sw:UOp, active:UOp,
     if input_scale is not None:
       marker=_activation_value(activation)
       projection_loop=projection_loop.replace(marker,marker+f'value=value/(*(const float4*)(ds+{first_channel}+c));')
-    for first in range(0,rows,row_tile):
-      count=min(row_tile,rows-first)
-      base=offset+first*padded+(first//row_tile)*round_up(row_tile*4,64)
-      padding.append(f'for(int i={count*4};i<{round_up(count*4,64)};i++)out[{base}+i]=0;')
+    if group>=grouped:
+      for first in range(0,rows,row_tile):
+        count=min(row_tile,rows-first)
+        base=offset+first*padded+(first//row_tile)*round_up(row_tile*4,64)
+        padding.append(f'for(int i={count*4};i<{round_up(count*4,64)};i++)out[{base}+i]=0;')
     batch_body=(_row_batch_body(tiles,rows,hidden,first_channel,depth,activation,row_batch,offset,padded,row_tile,group,
                                 channel_scratch,prefetch,batched_pack)
                 if row_batch>1 else '')
     if input_scale is not None:
       marker=_activation_value(activation)
       batch_body=batch_body.replace(marker,marker+f'value=value/(*(const float4*)(ds+{first_channel}+c));')
-    loops.append(f'''for(int row=begin;row<end;row++) {{
+    if group<grouped:
+      # Grouped payload: one shared scale header and group-major codes, so the down
+      # projection can consume the pack output without any reassembly kernels.
+      loops.append(f'''for(int row=begin;row<end;row++) {{
+        {batch_body}float values[{depth}] __attribute__((aligned(16)));float4 maximum={{0}};uint4 bad={{0}};
+        signed char *dest=(signed char*)(out+{offset}+row*{padded});
+        if(row>=active) {{((float*)out)[{group*rows}+row]=scales[{group*rows}+row]=1e-8f;
+          for(int c=0;c<{padded};c++)dest[c]=0;continue;}}
+        {projection_loop}
+        float largest=maximum[0];for(int j=1;j<4;j++)if(maximum[j]>largest)largest=maximum[j];
+        int invalid=__builtin_reduce_or(bad)!=0;float scale=largest/127.0f;if(scale<1e-8f)scale=1e-8f;
+        ((float*)out)[{group*rows}+row]=scales[{group*rows}+row]=invalid?__builtin_nanf(""):scale;
+        float inverse=1.0f/scale;int c=0;
+        for(;c<{depth};c+=4){{float4 value=invalid?(float4)0:*(const float4*)(values+c);
+          *(char4*)(dest+c)={quantizer}(value,inverse);}}
+        for(;c<{padded};c++)dest[c]=0;
+      }}''')
+    else:
+      loops.append(f'''for(int row=begin;row<end;row++) {{
       {batch_body}int first=row/{row_tile}*{row_tile},count={rows}-first<{row_tile}?{rows}-first:{row_tile};
       unsigned char *base=out+{offset}+first*{padded}+first/{row_tile}*{round_up(row_tile*4,64)};
       signed char *dest=(signed char*)(base+((count*4+63)/64)*64)+(row-first)*{padded};
@@ -368,13 +420,30 @@ def _program(out:UOp, raw:tuple[UOp,...], sa:tuple[UOp,...], sw:UOp, active:UOp,
     }}"""
     dispatch=f"""Work work={{out,raw,sa,sw,scales,*active}};void *args[4]={{&work,0,0,0}};
       if(((int(*)(void(*)(void**,int,int),void**,int)){pool}ULL)(pool_part,args,0))__builtin_trap();"""
+  # Decode has one active row, so the per-row split cannot use the workers. Split by
+  # independent K group instead: each group owns its own FP32 range reduction, so the
+  # scales and codes are bit-identical to the serial pass and no reduction crosses a
+  # worker. Requires exactly four groups to fill the four-worker pool.
+  if group_pool is not None and not parallel and len(loops)==4:
+    group_calls=' '.join(f'{"else " if index else ""}if(group=={index})part_g{index}(w->out,w->raw,w->sa,'
+                         f'w->sw,w->scales,w->active,0,{rows});' for index in range(4))
+    declarations+=f'''typedef struct {{unsigned char *out;const int *const *raw;const float *const *sa;
+      const float *sw;float *scales;int active;}} GroupWork;
+    static void pool_group_part(void **args,int unused,int group) {{
+      GroupWork *w=args[0];{group_calls}
+    }}'''
+    dispatch=f'''GroupWork group_work={{out,raw,sa,sw,scales,*active}};void *group_args[4]={{&group_work,0,0,0}};
+      if(!((int(*)(void(*)(void**,int,int),void**,int)){group_pool}ULL)(pool_group_part,group_args,0))return;{dispatch}'''
   source=_vector_exp2_source()+(_vector_exp2_batch4_source() if batched_pack else '')+_quantize_vector_source()+bounded_quant+f'''
   typedef unsigned uint4 __attribute__((aligned(16),ext_vector_type(4)));
   static __attribute__((always_inline)) float4 project(const int *const *raw,const float *const *sa,const float *sw,int row,int column) {{
     {''.join(project)}return (float4)__builtin_nanf("");
   }}
+  {' '.join(f'''static void part_g{index}(unsigned char *out,const int *const *raw,const float *const *sa,const float *sw,float *scales,int active,int begin,int end) {{
+    {loop}
+  }}''' for index,loop in enumerate(loops))}
   static void part(unsigned char *out,const int *const *raw,const float *const *sa,const float *sw,float *scales,int active,int begin,int end) {{
-    {''.join(loops)}
+    {' '.join(f'part_g{index}(out,raw,sa,sw,scales,active,begin,end);' for index in range(len(loops)))}
   }}
   {declarations}
   void {name}(unsigned char *out,{parameters}) {{
@@ -397,7 +466,7 @@ def _program(out:UOp, raw:tuple[UOp,...], sa:tuple[UOp,...], sw:UOp, active:UOp,
 
 def _pack_projection(raw:list[Tensor], sa:list[Tensor], sw:Tensor, tiles:list[ProjectionTile], rows:int,
                      hidden:int, depths:tuple[int,...], active_rows:int|UOp, activation:str, pool:AttentionPool|None=None,
-                     input_scale:Tensor|None=None) -> tuple[Tensor,Tensor]:
+                     input_scale:Tensor|None=None, grouped:int=0, decode_pool:bool=False) -> tuple[Tensor,Tensor]:
   _exponent(activation)
   if (not 1<=rows<=128 or not (512<=hidden<=12288 or hidden==13696) or hidden%32 or sum(depths)!=hidden
       or any(not 1<=depth<=4096 or depth%32 for depth in depths) or not raw or len(raw)!=len(tiles)
@@ -419,8 +488,16 @@ def _pack_projection(raw:list[Tensor], sa:list[Tensor], sw:Tensor, tiles:list[Pr
       raise ValueError('Raw GELU tiles must cover each row once')
   if isinstance(active_rows,int) and not 1<=active_rows<=rows or isinstance(active_rows,UOp) and not 1<=active_rows.vmin<=active_rows.vmax<=rows:
     raise ValueError('Invalid fused GELU active row count')
+  if grouped and (not 1<=grouped<=len(depths) or any(padded_depth(depth)!=padded_depth(depths[0]) for depth in depths[:grouped])):
+    raise ValueError('Unsupported grouped packed-output request')
+  if type(decode_pool) is not bool:raise ValueError('Decode pool selection must be a bool')
   address=pool.prefill_address if pool is not None and pool.active and rows>=16 else None
-  layout=payload_layout(rows,depths)
+  # Decode has one active row, so it cannot fill the pool by row; hand it the group split.
+  # Only the opted-in wide decode route passes decode_pool=True, so with every new flag off
+  # the dispatch below is exactly the pristine one (no pool address is baked into the kernel).
+  group_address=(pool.address if decode_pool and pool is not None and pool.active and rows<16 and len(depths)==4
+                 and getenv('ONPU_SWIGLU_GROUP_POOL',1) else None)
+  layout=payload_layout(rows,depths,grouped)
   count=Tensor(active_rows,device='CPU',dtype=dtypes.int).reshape(1).clone()
   row_batch=getenv('ONPU_SWIGLU_PREFILL_ROWS',1) if _row_batch_supported(activation,tuple(tiles)) and rows>=16 else 1
   if row_batch not in (1,2,4):raise ValueError('Unsupported raw SwiGLU row batch')
@@ -432,7 +509,7 @@ def _pack_projection(raw:list[Tensor], sa:list[Tensor], sw:Tensor, tiles:list[Pr
                                True if activation in ('silu','silu_div','gelu') else bool(getenv('ONPU_GELU_PACK_STATIC_LAYOUT',1)),
                                activation,address,row_batch,bool(ONPU_SWIGLU_CHANNEL_SCRATCH),ONPU_SWIGLU_C4_PREFETCH.value,
                                bool(ONPU_SWIGLU_BATCHED_PACK),args[-3] if input_scale is not None else None,
-                               ONPU_INT8_HADAMARD.value))
+                               ONPU_INT8_HADAMARD.value,grouped,group_address))
   return result[0],result[-1]
 
 
@@ -444,9 +521,9 @@ def pack_gelu_projection(raw:list[Tensor], sa:list[Tensor], sw:Tensor, tiles:lis
 
 def pack_swiglu_projection(raw:list[Tensor], sa:list[Tensor], sw:Tensor, tiles:list[ProjectionTile], rows:int,
                            hidden:int, depths:tuple[int,...], active_rows:int|UOp, *, pool:AttentionPool|None=None,
-                         input_scale:Tensor|None=None) -> tuple[Tensor,Tensor]:
+                         input_scale:Tensor|None=None, grouped:int=0, decode_pool:bool=False) -> tuple[Tensor,Tensor]:
   """Fuse raw SwiGLU with the down projection's independent K-group quantization."""
-  return _pack_projection(raw,sa,sw,tiles,rows,hidden,depths,active_rows,'silu',pool,input_scale)
+  return _pack_projection(raw,sa,sw,tiles,rows,hidden,depths,active_rows,'silu',pool,input_scale,grouped,decode_pool)
 
 
 def pack_legacy_swiglu_projection(raw:list[Tensor], sa:list[Tensor], sw:Tensor, tiles:list[ProjectionTile], rows:int,
@@ -507,7 +584,8 @@ class _RockchipInt8GatedFeedForward:
     return (isinstance(joint,RockchipInt8Linear) and x.device=='CPU' and x.dtype is dtypes.float and x.ndim==3 and x.shape[0]==1
       and ((self.activation in ('silu','silu_div','gelu','gelu_tanh') and self.decode_enabled and x.max_shape[1]==1)
            if decoding else 16<=x.max_shape[1]<=128)
-      and ((len(joint.packed)==len(joint.scales)==1 and 512<=self.down.depth<=12288) or wide and not decoding)
+      and ((len(joint.packed)==len(joint.scales)==1 and 512<=self.down.depth<=12288)
+           or wide and (not decoding or self.decode_enabled))
       and self.down.depth%32==0
       and joint.columns==self.down.depth*2 and 1<=self.down.columns<=12288
       and joint.bias is None and (self.down.bias is None or self.supports_down_bias and supported_down_bias(self.down))
@@ -543,6 +621,11 @@ class _RockchipInt8GatedFeedForward:
       payload,scale=quantize(joint.scaled_input(part),k,sdk_prefill=sdk)
       scale_index=len(sa)
       sa.append(scale)
+      # Both packed weight tiles consume this same activation payload. At decode it is tiny
+      # but uploaded once per matmul; share one device buffer so it is copied once. The
+      # upload is a byte copy, so sharing it cannot change any value.
+      if capacity==1 and len(joint.packed)>1 and all(p.device==joint.packed[0].device for p in joint.packed):
+        payload=payload.to(joint.packed[0].device)
       for wi,weight in enumerate(joint.packed):
         tile_columns=joint.columns if len(joint.packed)==1 else joint.tile_columns
         base=wi*tile_columns
@@ -556,20 +639,24 @@ class _RockchipInt8GatedFeedForward:
     pack={'silu':pack_swiglu_projection,'silu_div':pack_legacy_swiglu_projection,
           'gelu':pack_erf_projection,'gelu_tanh':pack_gelu_projection}[self.activation]
     weight_scales=joint.scales[0] if self.combined_scales is None else self.combined_scales
-    packed,scales=pack(raw,sa,weight_scales,tiles,capacity,self.down.depth,depths,math.prod(x.shape[:-1]),
-                       pool=self.pool,input_scale=self.down.input_scale)
-    layout=payload_layout(capacity,depths)
     grouped_down=self.down if isinstance(self.down,RockchipInt8SplitLinear) else None
-    grouped_payload:tuple[Tensor,Tensor]|None=None
     # Decode shares one activation row across equal-depth down groups; the grouped
     # PC chain replaces the three leading K=4096 submissions and the tail stays separate.
+    grouped_groups=0
     if (ONPU_GROUPED_DECODE_DOWN and capacity==1 and grouped_down is not None
         and grouped_down.grouped_weight is not None and grouped_down.grouped_scale is not None
         and grouped_down.grouped_count==3 and grouped_down.columns==4096 and len(parts)>=4
         and tuple(part.depth for part in parts[:3])==(4096,4096,4096)
         and grouped_down.grouped_weight.shape==(3,grouped_down.columns//32,128,32,32)
-        and grouped_down.grouped_scale.shape==(3,grouped_down.columns)):
-      grouped_payload=grouped_down_payload(packed,scales,capacity,depths,grouped_down.grouped_count)
+        and grouped_down.grouped_scale.shape==(3,grouped_down.columns)):grouped_groups=grouped_down.grouped_count
+    decode_pool=(bool(ONPU_WIDE_RAW_SWIGLU_DECODE) and self.decode_enabled and capacity==1)
+    packed,scales=pack(raw,sa,weight_scales,tiles,capacity,self.down.depth,depths,math.prod(x.shape[:-1]),
+                       pool=self.pool,input_scale=self.down.input_scale,grouped=grouped_groups,decode_pool=decode_pool)
+    layout=payload_layout(capacity,depths,grouped_groups)
+    grouped_payload:tuple[Tensor,Tensor]|None=None
+    if grouped_groups:
+      assert grouped_down is not None
+      grouped_payload=grouped_down_payload(packed,scales,capacity,depths,grouped_groups,packed_grouped=True)
     shared_input=((capacity>=16 or capacity==1 and self.activation=='gelu_tanh' and getenv('ONPU_TANH_SINGLE_UPLOAD',0))
                   and getenv('ONPU_FFN_PACKED_UPLOAD',0) and len({layer.packed[0].device for layer in parts})==1)
     if shared_input:
