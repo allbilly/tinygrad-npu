@@ -241,3 +241,25 @@ def test_decode_pool_policy_preserves_changed_input_bits_and_parks_on_exit(capac
   finally:
     getenv.cache_clear()
     pool.close()
+
+
+@pytest.mark.parametrize('capacity,width,rows,start',[(128,64,128,0),(128,64,17,128),(1,64,1,128),
+                                                    (1,64,1,0),(17,63,1,128),(7,16,5,0)])
+def test_specialized_ordered_scan_preserves_full_output_state_and_padding(capacity,width,rows,start):
+  heads=32 if capacity==128 and rows==128 else 4
+  inputs,initial=fixture(1,capacity,heads,width,seed=20261101)
+  rng=np.random.default_rng(20261102)
+  raw=Tensor(rng.normal(0,.3,(1,capacity,heads,width)).astype(np.float32),device='CPU').realize()
+  weight=Tensor(rng.uniform(.5,1.5,(heads,width)).astype(np.float16),device='CPU').float().realize()
+  weighted=raw*weight.reshape(1,1,heads,width)
+  norm=weighted.square().sum(-1,keepdim=True).sqrt().maximum(1e-12).realize()
+  unit=(weighted/norm).realize()
+  operands=[Tensor(x,device='CPU').realize() for x in inputs[:5]]
+  results=[]
+  for specialize in (False,True):
+    state=Tensor(initial.copy(),device='CPU').realize()
+    result=rwkv_scan(*operands,unit,state,start,rows,prediction_key=raw,prediction_weight=weight,
+                     prediction_norm=norm,correction_key=unit*operands[4],specialize=specialize).numpy().copy()
+    results.append((result.tobytes(),state.numpy().tobytes()))
+    assert not result[:,rows:].any()
+  assert results[0]==results[1]

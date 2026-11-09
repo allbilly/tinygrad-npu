@@ -46,3 +46,28 @@ def test_other_activations_do_not_install_tanh_gelu_kernel(monkeypatch,activatio
 def test_invalid_option_and_precision_fail_before_preparation():
   with pytest.raises(ValueError):configure(SimpleNamespace(),fused_gelu_ffn=1)
   with pytest.raises(ValueError):configure(SimpleNamespace(),fused_gelu_ffn=True,precision='fp16')
+
+
+@pytest.mark.parametrize('enabled',[False,True])
+def test_gemma4_sdk_prefill_is_explicit_and_decode_falls_back(monkeypatch,enabled):
+  from tinygrad.llm.gemma4 import Gemma4Transformer
+  monkeypatch.setattr(RockchipInt8Linear,'prepare',fake_prepare)
+  config=TransformerConfig(1,1536,6144,8,1,1e-6,32,512,10000.,512,512,max_context=512)
+  m=Gemma4Transformer(config,(6144,),(False,),256,0,0,0,(),128)
+  result=configure(m,prefill='on',decode='on',precision='int8',fuse_projections=True,split_down=True,
+                   fused_gelu_ffn=True,fused_gelu_sdk_prefill=enabled)
+  assert result['fused_gelu_sdk_prefill_blocks']==int(enabled)
+  if enabled:
+    f=m.blk[0].fused_gelu_ffn
+    assert f.sdk_prefill and f.enabled(Tensor.zeros(1,128,1536,device='CPU'))
+    f.projections.layers[0].phase='decode'
+    assert not f.enabled(Tensor.zeros(1,1,1536,device='CPU'))
+  else:assert not hasattr(m.blk[0],'fused_gelu_ffn')
+
+
+def test_sdk_tanh_gelu_rejects_invalid_phase_selection_before_preparation():
+  for kwargs in ({'fused_gelu_sdk_prefill':1},{'fused_gelu_sdk_prefill':True},
+                 {'fused_gelu_sdk_prefill':True,'fused_gelu_ffn':True,'precision':'fp16'},
+                 {'fused_gelu_sdk_prefill':True,'fused_gelu_ffn':True,'precision':'int8','prefill':'off'},
+                 {'fused_gelu_sdk_prefill':True,'fused_gelu_ffn':True,'fused_gelu_decode':True,'precision':'int8','prefill':'on'}):
+    with pytest.raises(ValueError):configure(SimpleNamespace(),**kwargs)

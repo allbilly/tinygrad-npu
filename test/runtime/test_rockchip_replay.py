@@ -64,6 +64,32 @@ class TestRockchipReplayAliasAnalysis(unittest.TestCase):
         key = (cpu[1][0].base,0,8)
         self.assertEqual((aliases,uploads,downloads),({(0,key):npu[1][2]},{1},set()))
 
+  def test_extra_pack_cleaning_provenance_requires_an_accepted_upload_alias(self):
+    from tinygrad.helpers import Context
+    for name in ('rockchip_quantize_sdk','rockchip_int8_erf_gelu_pack','rockchip_quantize',
+                 'rockchip_int8_swiglu_pack','replay_test_writer'):
+      for read_before_copy in (False,True):
+        with self.subTest(name=name,read_before_copy=read_before_copy):
+          cpu,npu,source,result = self.node(),self.node('ROCKCHIP'),self.node(),self.node()
+          writer=self.program(name=name,opaque=name!='replay_test_writer')
+          calls=[self.call(writer,cpu[0],source[0])]
+          if read_before_copy:calls.append(self.call(self.program(),result[0],cpu[0]))
+          calls.append(self.call(UOp(Ops.STORE),npu[0],cpu[0]))
+          replay=NativeReplay.__new__(NativeReplay)
+          replay.calls,replay.roots,replay.borrow_outputs=calls,[],False
+          bindings={id(node):binding for node,binding in (cpu,npu,source,result)}
+          with Context(ONPU_REPLAY_EXTRA_PACK_ALIAS=1), patch.object(rockchip_replay,'getenv',return_value=1), \
+               patch.object(NativeReplay,'buffer',lambda _,node:bindings[id(node)]):
+            _,uploads,_=replay.copy_aliases()
+          if read_before_copy:
+            self.assertEqual(uploads,set())
+            self.assertEqual(replay.extra_pack_uploads,{})
+          else:
+            self.assertEqual(uploads,{1})
+            expected=({1:(id(npu[1][1].meta),npu[1][1].addr,8)}
+                      if name in ('rockchip_quantize_sdk','rockchip_int8_erf_gelu_pack') else {})
+            self.assertEqual(replay.extra_pack_uploads,expected)
+
   def test_partial_future_reuse_keeps_original_producer(self):
     cpu,npu,source,result = self.node(),self.node('ROCKCHIP'),self.node(),self.node()
     for count in (1,4):

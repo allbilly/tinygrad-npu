@@ -1,8 +1,10 @@
 import os, unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 import numpy as np
-from tinygrad import Tensor, TinyJit, Device, nn
+from tinygrad import Tensor, TinyJit, Device, nn, dtypes
 from tinygrad.helpers import round_up
-from tinygrad.llm.kernels.rockchip_int8 import quantize, RockchipInt8Linear, ffn_pack, RockchipInt8FeedForward
+from tinygrad.llm.kernels.rockchip_int8 import quantize, RockchipInt8Linear, ffn_pack, RockchipInt8FeedForward, RockchipInt8SplitLinear
 from tinygrad.llm.kernels.rockchip import RockchipProjections
 from tinygrad.llm.kernels.rockchip_replay import RockchipCapturedJit
 
@@ -13,10 +15,96 @@ def reference_quantize(values):
 
 
 class TestRockchipInt8(unittest.TestCase):
+  def test_decode_output_tiles_reuse_activation_quantization_exactly(self):
+    from tinygrad.helpers import Context
+    from tinygrad.llm.kernels import rockchip_int8 as r8
+    rng=np.random.default_rng(20261107)
+    source=nn.Linear(64,250,bias=False)
+    source.weight=Tensor(rng.normal(0,.1,(250,64)).astype(np.float32),device='CPU').realize()
+    layer=RockchipInt8Linear(source,'on','on',128)
+    layer.input_scale=Tensor(rng.uniform(.5,2.,64).astype(np.float32),device='CPU').realize()
+    with patch('tinygrad.runtime.ops_rockchip.int8_weight_device',return_value='CPU'):layer.prepare()
+    inputs=[rng.normal(0,.2,(1,1,64)).astype(np.float32),np.zeros((1,1,64),np.float32),
+            np.resize(np.array([-127.,-1.,0.,1.,127.],np.float32),(1,1,64))]
+    original_quantize=r8.quantize
+    calls=[]
+    def counted_quantize(*args,**kwargs):
+      calls.append(1)
+      return original_quantize(*args,**kwargs)
+    def raw_cpu(payload,weight,rows,columns,column_offset=0,**kwargs):
+      k=weight.shape[1]*32
+      width=round_up(columns,32)
+      data=payload.numpy()
+      qa=data[round_up(rows*4,64):].view(np.int8).reshape(rows,k).astype(np.int32)
+      qw=weight.numpy().transpose(0,2,1,3).reshape(-1,k).astype(np.int32)
+      raw=qa@qw[column_offset:column_offset+width].T
+      return Tensor(raw.reshape(-1),device='CPU',dtype=dtypes.int32)
+    def packed_cpu(values,weight,scales,columns,column_offset=0):
+      payload,activation_scales=counted_quantize(values,weight.shape[1]*32)
+      raw=raw_cpu(payload,weight,values.shape[0],columns,column_offset)
+      return r8.dequantize_tiles([raw],[activation_scales],scales[column_offset:column_offset+columns],
+                                 [values.shape[0]],columns)
+    with patch.object(r8,'quantize',side_effect=counted_quantize), patch.object(r8,'raw_int8_matmul',side_effect=raw_cpu), \
+         patch.object(r8,'packed_int8_matmul',side_effect=packed_cpu), Context(ONPU_INT8_REUSE_ACTIVATION=0):
+      for data in inputs:
+        x=Tensor(data,device='CPU').realize()
+        calls.clear()
+        control=layer.npu(x).numpy()
+        control_quantizations=len(calls)
+        calls.clear()
+        with Context(ONPU_INT8_REUSE_ACTIVATION=1):candidate=layer.npu(x).numpy()
+        candidate_quantizations=len(calls)
+        np.testing.assert_array_equal(candidate,control)
+        self.assertEqual(control_quantizations,2)
+        self.assertEqual(candidate_quantizations,1)
+
+  def test_grouped_decode_flag_prepares_grouped_split_weights(self):
+    from tinygrad.helpers import Context
+    rng=np.random.default_rng(79)
+    source=nn.Linear(13696,32,bias=False)
+    source.weight=Tensor(rng.normal(0,.02,(32,13696)).astype(np.float32),device='CPU').realize()
+    with patch('tinygrad.runtime.ops_rockchip.int8_weight_device',return_value='CPU'):
+      layer=RockchipInt8SplitLinear(source,'on','on',24576)
+      with Context(ONPU_GROUPED_DECODE_DOWN=0):layer.prepare()
+      self.assertEqual(layer.grouped_count,0)
+      self.assertIsNone(layer.grouped_weight)
+      layer.release_packed()
+      with Context(ONPU_GROUPED_DECODE_DOWN=1):layer.prepare()
+      self.assertEqual(layer.grouped_count,3)
+      self.assertEqual(tuple(layer.grouped_weight.shape),(3,1,128,32,32))
+      self.assertEqual(tuple(layer.grouped_scale.shape),(3,32))
+
+  def test_grouped_split_decode_branch_is_gated_by_the_new_flag(self):
+    from tinygrad.helpers import Context
+    parts=[]
+    for depth in (4096,4096,4096,1408):
+      parts.append(SimpleNamespace(depth=depth,columns=4096,npu=lambda x: Tensor.zeros(1,1,4096,device='CPU',dtype=dtypes.float).realize()))
+    down=RockchipInt8SplitLinear.__new__(RockchipInt8SplitLinear)
+    down.depth,down.columns,down.bias,down.shared_projection=13696,4096,None,None
+    down.parts=parts
+    down.grouped_weight=Tensor.zeros(3,128,128,32,32,device='CPU',dtype=dtypes.int8).realize()
+    down.grouped_scale=Tensor.ones(3,4096,device='CPU',dtype=dtypes.float).realize()
+    down.grouped_count=3
+    seen=[]
+    def grouped_matmul(x,weight,scales,columns,cores=3,*,residual=False,materialize=False):
+      seen.append((tuple(x.shape),columns,materialize))
+      return Tensor.zeros(3,1,4096,device='CPU',dtype=dtypes.float).realize()
+    x=Tensor.ones(1,1,13696,device='CPU',dtype=dtypes.float).realize()
+    with patch('tinygrad.llm.kernels.rockchip_grouped_int8.matmul',grouped_matmul),Context(ONPU_GROUPED_DECODE_DOWN=0):
+      control=down.npu(x).numpy()
+    self.assertEqual(seen,[])
+    with patch('tinygrad.llm.kernels.rockchip_grouped_int8.matmul',grouped_matmul),Context(ONPU_GROUPED_DECODE_DOWN=1):
+      candidate=down.npu(x).numpy()
+    self.assertEqual(seen,[((3,1,4096),4096,True)])
+    np.testing.assert_array_equal(control,candidate)
+
   def test_decode_bank_extension_is_limited_to_qualified_per_core_width(self):
     from tinygrad.runtime.support.rockchip_int8 import int8_body
     def banks(m,n,k):
       return {(word>>16)&0xffffffff for word in int8_body(m,n,k,0,0,0,n) if word>>48==0x201 and word&0xffff==0x1040}
+    # RKLLM target captures use 0xb1 per-core at k=2560/768, but oNPU submits the full
+    # N with cores=3; copying 0xb1 measured slower on MiniCPM3 (4.46 vs 5.34 tok/s),
+    # so the extension stays limited to the qualified k=4096 widths.
     self.assertEqual(banks(1,512,4096),{0xb1})
     self.assertEqual(banks(1,704,4096),{0x48})
     self.assertEqual(banks(1,1024,4096),{0xb1})
@@ -91,6 +179,26 @@ class TestRockchipInt8(unittest.TestCase):
       for step in range(4):
         source = rng.integers(-128,128,(1,depth),dtype=np.int8)
         if step==3: source[:,::2],source[:,1::2] = -128,127
+        payload = np.zeros(64+depth,dtype=np.uint8)
+        payload[:4] = np.array([1],dtype=np.float32).view(np.uint8)
+        payload[64:] = source.ravel().view(np.uint8)
+        actual = run(Tensor(payload,device='CPU',dtype=dtypes.uint8).realize()).numpy()
+        expected = source.astype(np.int32)@values.astype(np.int32).T
+        np.testing.assert_array_equal(actual,expected.ravel())
+
+  @unittest.skipUnless(os.environ.get('ROCKCHIP_TEST')=='1','explicit Rockchip hardware test')
+  def test_rkllm_captured_decode_geometries_integer_goldens(self):
+    from tinygrad import dtypes
+    from tinygrad.llm.kernels.rockchip_int8 import raw_int8_matmul
+    rng = np.random.default_rng(20261106)
+    for columns,depth in ((96,2560),(256,2560),(1280,768),(1536,4096)):
+      values = rng.integers(-127,128,(columns,depth),dtype=np.int8)
+      packed = values.reshape(columns//32,32,depth//32,32).transpose(0,2,1,3).copy()
+      weight = Tensor(packed,device='ROCKCHIP').realize()
+      run = TinyJit(lambda payload:raw_int8_matmul(payload,weight,1,columns).realize())
+      for step in range(3):
+        source = rng.integers(-128,128,(1,depth),dtype=np.int8)
+        if step==2: source[:,::2],source[:,1::2] = -128,127
         payload = np.zeros(64+depth,dtype=np.uint8)
         payload[:4] = np.array([1],dtype=np.float32).view(np.uint8)
         payload[64:] = source.ravel().view(np.uint8)

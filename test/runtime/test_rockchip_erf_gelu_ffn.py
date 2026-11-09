@@ -41,6 +41,55 @@ def _poison_inactive(scales,input_tile,active):
       scales[index]=Tensor(values,device='CPU').realize()
 
 
+@pytest.mark.parametrize('rows,active,bad_weight',[(1,1,False),(128,1,False),(128,65,False),(128,128,False),(128,65,True)])
+def test_erf_pack_fully_overwrites_poison_before_opt_in_copy_alias(rows,active,bad_weight):
+  import ctypes
+  from unittest.mock import patch
+  from tinygrad import Device,dtypes
+  from tinygrad.device import TinyELF
+  from tinygrad.helpers import Context,getenv
+  from tinygrad.runtime.ops_cpu import CPUProgram
+  from tinygrad.llm.kernels.rockchip_cpu import _renderer
+  from tinygrad.llm.kernels.rockchip_gelu_ffn import _program
+  from tinygrad.llm.kernels.rockchip_replay import _full_write
+
+  hidden,depths=6656,(4096,2560)
+  raw,scales,sw,tiles,projected=fixture(rows,hidden,rows,seed=75500+active+rows)
+  if bad_weight:
+    weights=sw.numpy().copy()
+    weights[0]=np.inf
+    sw=Tensor(weights,device='CPU').realize()
+    projected=_dense_dequant(raw,scales,sw,tiles,rows,hidden)
+  _poison_inactive(scales,rows,active)
+  expected=_reference(projected,active,hidden,depths)
+  values=[x.numpy().copy() for x in (*raw,*scales,sw)]
+  size=len(expected[0])
+  definitions=[(dtypes.uint8,size),*((dtypes.int,x.size) for x in values[:len(raw)]),
+               *((dtypes.float,x.size) for x in values[len(raw):]),(dtypes.int,1),(dtypes.float,rows*len(depths))]
+  params=[UOp.param(i,dt,(n,),device='CPU') for i,(dt,n) in enumerate(definitions)]
+  program=_program(params[0],tuple(params[1:1+len(raw)]),tuple(params[1+len(raw):1+len(raw)+len(scales)]),
+                   params[-3],params[-2],params[-1],rows,hidden,depths,tuple(tiles),True,'gelu')
+  binary=next(x.arg for x in program.src if x.op is Ops.BINARY)
+  runtime=CPUProgram(Device['CPU'],TinyELF(binary,program.src[0].arg.function_name,_renderer().target,()))
+  count=ctypes.c_int(active)
+  for poison in (0xa5,0x5a):
+    packet=np.full(size,poison,np.uint8)
+    headers=np.full(rows*len(depths),poison*0x01010101,np.uint32)
+    runtime(packet.ctypes.data,*[x.ctypes.data for x in values],ctypes.addressof(count),headers.ctypes.data)
+    np.testing.assert_array_equal(packet,expected[0])
+    np.testing.assert_array_equal(headers,expected[1])
+  call=program.call(*(UOp.new_buffer('CPU',n,dt) for dt,n in definitions))
+  try:
+    with patch.dict(os.environ,{'ONPU_FFN_PACKED_UPLOAD':'1'}):
+      getenv.cache_clear()
+      with Context(ONPU_REPLAY_EXTRA_PACK_ALIAS=0):assert not _full_write(call,0,size)
+      with Context(ONPU_REPLAY_EXTRA_PACK_ALIAS=1):
+        assert _full_write(call,0,size)
+        assert not _full_write(call,0,size+64)
+        assert not _full_write(call,1,values[0].nbytes)
+  finally:getenv.cache_clear()
+
+
 @pytest.mark.parametrize('rows,hidden,input_tile,actives',[
   (1,6656,1,(1,)),(17,6656,17,(1,17)),(65,6656,64,(1,17,65)),(128,6656,64,(1,17,65,128)),
   (1,10240,1,(1,)),(17,10240,17,(1,17)),(65,10240,64,(1,17,65)),(128,10240,64,(1,17,65,128)),
@@ -161,3 +210,40 @@ def test_npu_erf_ffn_matches_multistage_and_native_replay():
 
 
 if __name__=='__main__': unittest.main()
+
+
+@pytest.mark.parametrize('sdk',[False,True])
+@pytest.mark.parametrize('active',[1,17,65,128])
+def test_erf_row_batch_preserves_packet_bits_and_requires_sdk_layout(monkeypatch,sdk,active):
+  from tinygrad.llm.kernels import rockchip_gelu_ffn as module
+  from tinygrad.helpers import ceildiv
+  raw,scales,sw,tiles,projected=fixture(128,6656,128,seed=9200+active)
+  expected=_reference(projected,active,6656,(4096,2560))
+  _poison_inactive(scales,128,active)
+  if sdk:
+    converted=[]
+    for value,tile in zip(raw,tiles):
+      values=value.numpy()
+      width=round_up(ceildiv(tile.columns,3),32)
+      parts=[(i,min(width,tile.columns-i)) for i in range(0,tile.columns,width)]
+      if len(parts)!=3:parts=[(0,tile.columns)]
+      converted.append(Tensor(np.concatenate([values[i*128:(i+n)*128].reshape(128,n//4,4).transpose(1,0,2).copy().ravel()
+                                              for i,n in parts]),device='CPU').realize())
+    raw,tiles=converted,[tile._replace(sdk=True) for tile in tiles]
+  getenv=module.getenv
+  monkeypatch.setattr(module,'getenv',lambda key,default=0:4 if key=='ONPU_SWIGLU_PREFILL_ROWS' else getenv(key,default))
+  program=module._program
+  recorded=[]
+  def record(*args):
+    result=program(*args)
+    source=next(u.arg for u in result.src if u.op is Ops.SOURCE)
+    assert ('float batch_values[4][' in source)==sdk
+    import inspect
+    recorded.append(inspect.signature(program).bind(*args).arguments['row_batch'])
+    return result
+  monkeypatch.setattr(module,'_program',record)
+  packet,headers=pack_erf_projection(raw,scales,sw,tiles,128,6656,(4096,2560),active)
+  packet.realize(headers)
+  assert recorded==[4 if sdk else 1]
+  np.testing.assert_array_equal(packet.numpy(),expected[0])
+  np.testing.assert_array_equal(headers.numpy().view(np.uint32),expected[1])

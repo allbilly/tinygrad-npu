@@ -2,7 +2,7 @@
 import itertools
 import numpy as np
 import pytest
-from tinygrad import Tensor, dtypes, nn
+from tinygrad import Tensor, Device, dtypes, nn
 import test.models.test_gemma3n as gemma3n_reference
 from tinygrad.llm.kernels.rockchip_static import configure
 
@@ -104,3 +104,25 @@ def test_static_projection_configure_leaves_unsupported_weights_on_generic_path(
   assert configure(model) == 0
   assert not hasattr(model, 'altup_input_projections')
   assert not hasattr(model, 'altup_output_projections')
+
+
+def test_static_projection_uses_existing_workers_inside_and_outside_pool():
+  from test.runtime.test_rockchip_shared_pool import _needs_pool,_pool_test_lock
+  from tinygrad.llm.kernels.rockchip_pool import AttentionPool
+  from tinygrad.llm.kernels.rockchip_static import prepare
+  _needs_pool()
+  with _pool_test_lock():
+    pool=AttentionPool()
+    try:
+      rng=np.random.default_rng(129257)
+      weight=Tensor(rng.normal(0,.03,(129,257)).astype(np.float16),device='CPU').realize()
+      ordinary,pooled=prepare(weight),prepare(weight,pool=pool)
+      for rows in (1,17):
+        x=Tensor(rng.normal(0,.3,(rows,257)).astype(np.float32),device='CPU').realize()
+        with pool:
+          expected=ordinary(x).numpy().copy()
+          actual=pooled(x).numpy().copy()
+        np.testing.assert_array_equal(actual.view(np.uint32),expected.view(np.uint32))
+        np.testing.assert_array_equal(pooled(x).numpy().view(np.uint32),expected.view(np.uint32))
+      assert not {'ROCKCHIP','CL'}.intersection(Device._opened_devices)
+    finally:pool.close()
