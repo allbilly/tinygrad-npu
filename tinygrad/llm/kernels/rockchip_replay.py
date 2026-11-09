@@ -9,14 +9,145 @@ from tinygrad.device import Buffer, BufferStorage, TinyELF
 from tinygrad.dtype import AddrSpace, dtypes
 from tinygrad.engine.jit import CapturedJit, _copy_input
 from tinygrad.engine.realize import _resolve, estimate_uop, get_runtime, get_call_arg_uops, get_call_outs_ins
-from tinygrad.helpers import DEBUG, PROFILE, ContextVar, GlobalCounters, getenv, unwrap
+from tinygrad.helpers import DEBUG, PROFILE, ContextVar, GlobalCounters, ceildiv, getenv, unwrap
 from tinygrad.renderer import Estimates
 from tinygrad.renderer.cstyle import ClangRenderer
 from tinygrad.runtime.ops_cpu import CPUProgram
-from tinygrad.runtime.ops_rockchip import (RockchipBuffer, RockchipDevice, RockchipProgram, RockchipRoutedMatmul,
-                                         RockchipBucketedMatmul, _FINITE_HALF_SOURCE)
+from tinygrad.runtime.ops_rockchip import (RockchipBuffer, RockchipDevice, RockchipProgram, RockchipMatmul,
+                                         RockchipGroupedMatmul, RockchipBatchedMatmul, RockchipRoutedMatmul,
+                                         RockchipBucketedMatmul, _cmd, _FINITE_HALF_SOURCE)
 from tinygrad.runtime.autogen import rockchip as rk
 from tinygrad.uop.ops import Ops, UOp, sym_infer
+
+
+# ---------------------------------------------------------------------------
+# Adjacent-submit merging (opt-in: ONPU_MERGE_SUBMITS=1 pairs, =2 pairs+triple).
+#
+# The decode graph issues two NPU submits back-to-back with no CPU call between
+# them for gate+up (24576 main tile then the 2816 tail) and for ffn_down (the
+# grouped 3-group k-chain then its 1536 k-tail); the lm_head issues three
+# back-to-back shards. Every one of those submits owns exactly three one-per-
+# core tasks and the same core mask/domain, so they can share ONE ioctl (and
+# pay its fixed cost once) while keeping all their tasks.
+#
+# Mechanism (hardware-proven, scripts/probe_merged_submit.py in oNPU): the
+# earlier plan's per-core terminating tail is patched in place into a PC jump
+# to the later plan's body for the same core; a combined task array lists the
+# descriptors core-major [A0,B0,A1,B1,A2,B2]; one ioctl submits all of them.
+# The command bodies and all arithmetic are unchanged, so results are
+# bit-identical; the group's bodies write disjoint output ranges, so a core may
+# start body 2 while another core is still on body 1.
+#
+# The patch mutates the prepared plan, so every patched word is recorded and
+# _restore_merged_tails() puts them back if the replay falls back to the
+# ordinary executor. Thin plans/cross-domain groups are refused and fall back
+# to one ioctl per plan.
+# ---------------------------------------------------------------------------
+ONPU_MERGE_BODY_LIMIT = 1024
+# (id(plan), tail word offset) -> (plan, offset, FIRST recorded original tail words).
+# A replay may be rebuilt for the same prepared plans; without recording the first
+# original, a second build would record the jump words as "original" and a restore
+# would leave the chain linked.
+_MERGED_TAIL_ORIGINALS: dict[tuple[int,int],tuple[Any,int,list[int]]] = {}
+
+
+def _restore_merged_tails() -> None:
+  """Undo every in-place tail patch (executor fallback, or before a replay rebuild)."""
+  for plan,offset,words in reversed(list(_MERGED_TAIL_ORIGINALS.values())):
+    try:
+      _write_words(plan.cmd,offset,words)
+      plan.dev.sync(plan.cmd, rk.RKNPU_MEM_SYNC_TO_DEVICE)
+    except Exception:
+      pass
+  _MERGED_TAIL_ORIGINALS.clear()
+
+
+def _write_words(cmd:RockchipBuffer, offset:int, words:list[int]) -> None:
+  if not 0<=offset<=cmd.size//8-len(words): raise ValueError('word patch outside command buffer')
+  for i,word in enumerate(words):
+    ctypes.c_uint64.from_address(cmd.addr+(offset+i)*8).value = word
+
+
+def _plan_merge_tails(plan:Any) -> list[tuple[int,int]]:
+  """(body start word, body word count) of each of a plan's three one-per-core tasks."""
+  if plan.tasks!=3 or plan.core_mask!=7: raise ValueError('merge requires three one-per-core tasks')
+  descs=(rk.struct_rknpu_task*3).from_address(plan.task.addr)
+  tails=[]
+  for core in range(3):
+    desc=descs[core]
+    body=desc.regcfg_amount
+    start=(desc.regcmd_addr-plan.cmd.dma)//8
+    if not 1<=body<=ONPU_MERGE_BODY_LIMIT: raise ValueError('unexpected command body length')
+    if desc.regcmd_addr%8 or start<0 or start+body+4>plan.cmd.size//8: raise ValueError('descriptor outside its command buffer')
+    tails.append((start,body))
+  return tails
+
+
+def build_merged_submit(plans:list[Any]) -> tuple[dict,list[Any]]:
+  """One combined PC submit for 2-3 plans, each owning three one-per-core tasks.
+
+  Returns (submit descriptor for the statement, buffers that must stay alive).
+  Patches the earlier plans' terminating command tails to jump to the next
+  plan's body; on any failure the patches are restored before raising.
+  """
+  if not 2<=len(plans)<=3: raise ValueError('merge group must hold 2 or 3 plans')
+  domain=plans[0].dev.domain
+  if any(plan.dev.domain!=domain for plan in plans): raise ValueError('merge group crosses memory domains')
+  tails=[_plan_merge_tails(plan) for plan in plans]
+  group=len(plans)
+  dev=plans[0].dev
+  task=dev.allocate(max(4096,3*group*ctypes.sizeof(rk.struct_rknpu_task)),rk.RKNPU_MEM_KERNEL_MAPPING)
+  patches: list[tuple[Any,int,list[int],bool]] = []  # (plan, offset, words before this build, newly tracked)
+  try:
+    # Combined task array: descriptors unchanged, interleaved core-major.
+    for core in range(3):
+      for position,plan in enumerate(plans):
+        source=(rk.struct_rknpu_task*3).from_address(plan.task.addr)[core]
+        ctypes.memmove(task.addr+(core*group+position)*ctypes.sizeof(rk.struct_rknpu_task),
+                       ctypes.addressof(source),ctypes.sizeof(source))
+    dev.sync(task, rk.RKNPU_MEM_SYNC_TO_DEVICE)
+    # Patch every plan's tail but the last one into a jump to the next plan's body.
+    for position,plan in enumerate(plans[:-1]):
+      following=plans[position+1]
+      for core in range(3):
+        start,body=tails[position][core]
+        next_start,next_body=tails[position+1][core]
+        offset=start+body
+        key=(id(plan),offset)
+        previous=[ctypes.c_uint64.from_address(plan.cmd.addr+(offset+i)*8).value for i in range(2)]
+        tracked=key not in _MERGED_TAIL_ORIGINALS
+        if tracked: _MERGED_TAIL_ORIGINALS[key]=(plan,offset,previous)
+        try:
+          _write_words(plan.cmd,offset,
+                       [_cmd(rk.TARGET_PC_REG,rk.REG_PC_BASE_ADDRESS,(following.cmd.dma+next_start*8)&0xfffffff0),
+                        _cmd(rk.TARGET_PC_REG,rk.REG_PC_REGISTER_AMOUNTS,ceildiv(next_body,2)+1)])
+        except BaseException:
+          _write_words(plan.cmd,offset,previous)
+          if tracked: _MERGED_TAIL_ORIGINALS.pop(key,None)
+          raise
+        patches.append((plan,offset,previous,tracked))
+      plan.dev.sync(plan.cmd, rk.RKNPU_MEM_SYNC_TO_DEVICE)
+  except BaseException:
+    for plan,offset,previous,tracked in reversed(patches):
+      try:
+        _write_words(plan.cmd,offset,previous)
+        plan.dev.sync(plan.cmd, rk.RKNPU_MEM_SYNC_TO_DEVICE)
+      except Exception: pass
+      if tracked: _MERGED_TAIL_ORIGINALS.pop((id(plan),offset),None)
+    dev.free(task)
+    raise
+  return ({'tasks':3*group,'domain':domain,'obj_addr':int(task.meta.obj_addr),'core_mask':7,
+           'subcores':((0,0),(0,0),(0,group),(group,group),(2*group,group))},[task])
+
+
+def mergeable_plan(plan:Any) -> bool:
+  """Only the verified decode geometry: single-row INT8, three one-per-core tasks, one domain."""
+  return (isinstance(plan,(RockchipMatmul,RockchipGroupedMatmul))
+          and not isinstance(plan,(RockchipBatchedMatmul,RockchipRoutedMatmul,RockchipBucketedMatmul))
+          and plan.m==1 and bool(plan.int8) and not plan.dynamic_weights
+          and not getattr(plan,'sdk_prefill',0)  # SDK prefill bodies use a different PC layout
+          and plan.tasks==3 and plan.core_mask==7
+          and tuple(plan.subcores)==((0,0),(0,0),(0,1),(1,1),(2,1)))
 
 
 class UnsupportedReplay(Exception): pass
@@ -179,6 +310,13 @@ class NativeReplay:
     self.estimates = Estimates()
     self.submits = 0
     self.gpu_calls = 0
+    # ONPU_MERGE_SUBMITS: 0 off (default), 1 merge adjacent pairs, 2 pairs + the lm_head triple.
+    self._merge_level = int(getenv('ONPU_MERGE_SUBMITS',0) or 0)
+    self._merge_max_group = 2 if self._merge_level==1 else (3 if self._merge_level>=2 else 0)
+    self._merge_slots: list[dict[str,Any]] = []
+    self._merge_groups: list[list[int]] = []
+    self._merge_run: list[int] = []
+    self._last_merge_plan: Any = None
     for index,call in enumerate(self.calls):
       if call.op is not Ops.CALL: raise UnsupportedReplay('non-call graph entry')
       if call.body.op is Ops.PROGRAM and call.device!='ROCKCHIP': self.pending_npu_outputs.clear()
@@ -197,6 +335,7 @@ class NativeReplay:
       self.labels.append(label)
       if self.profiling:
         self.statements[start:] = ['{U64 begin=now();']+self.statements[start:]+[f'stats[{index+2}]=now()-begin;}}']
+    self._finalize_merged_submits()
     if not self.submits: raise UnsupportedReplay('no prepared NPU work')
     if self.mutated.intersection(self.weight_guards): raise UnsupportedReplay('mutable matrix weights')
     self.estimates = self.estimates.simplify()
@@ -371,6 +510,7 @@ class NativeReplay:
     return aliases,uploads,downloads
 
   def copy(self, call:UOp, index:int):
+    self._last_merge_plan = getattr(self,'_last_merge_plan',None)
     nodes = get_call_arg_uops(call)
     if len(nodes)!=2: raise UnsupportedReplay('copy signature')
     dst,d,dp = self.buffer(nodes[0])
@@ -397,6 +537,9 @@ class NativeReplay:
     return typ,f'(({typ}){int(value)})'
 
   def kernel(self, call:UOp, index:int):
+    # getattr: tests call kernel() on NativeReplay.__new__ instances with no __init__.
+    previous_merge_plan = getattr(self,'_last_merge_plan',None)
+    self._last_merge_plan = None
     device = call.device
     if not isinstance(device,str) or device.split(':')[0] not in ('CPU','ROCKCHIP'): raise UnsupportedReplay('kernel device')
     runtime = get_runtime(device,call.body)
@@ -471,6 +614,22 @@ class NativeReplay:
     else:
       self.statements.append(f'if(!all_finite_half((const unsigned short*){lhs.addr+plan.lhs_offset}ULL,{plan.groups*plan.m*plan.k}UL))'
         f'return {1000000+index};')
+    if getattr(self,'_merge_max_group',0) and mergeable_plan(plan):
+      # Defer this ioctl: a following adjacent NPU plan with the same geometry can
+      # share it. The placeholder is replaced in _finalize_merged_submits().
+      slot = len(self._merge_slots)
+      token = f'/*MERGE-SLOT-{slot}-{index}*/'
+      self._merge_slots.append({'plan':plan,'index':index,'token':token})
+      self.statements.append(token)
+      if (previous_merge_plan is not None and len(self._merge_run)<self._merge_max_group
+          and mergeable_plan(previous_merge_plan) and previous_merge_plan.dev.domain==plan.dev.domain):
+        self._merge_run.append(slot)
+      else:
+        self._merge_run=[slot]
+        self._merge_groups.append(self._merge_run)
+      self._last_merge_plan = plan
+      self.npu_outputs[index] = (id(out.meta),out.addr,out.size)
+      return
     if isinstance(plan,RockchipRoutedMatmul):
       # Validate the entire routing header before changing any command address.
       self.statements.append(f'{{const int *ids=(const int*){lhs.addr+plan.selector_offset}ULL;'
@@ -505,6 +664,44 @@ class NativeReplay:
       f'stats[0]++;stats[1]+={tasks};}}')
     self.submits += 1
     self.npu_outputs[index] = (id(out.meta),out.addr,out.size)
+
+  def _submit_code(self, tasks:Any, obj_addr:Any, domain:int, core_mask:Any, subcore_pairs:Any, index:int) -> str:
+    subcores = [value for pair in subcore_pairs for value in pair]
+    fields = [5,6000,0,tasks,0,0,f'{obj_addr}ULL',domain,0,0,core_mask,-1]
+    request = (3<<30)|(ctypes.sizeof(rk.struct_rknpu_submit)<<16)|(ord('d')<<8)|0x41
+    return ('{struct Submit submit={'+','.join(map(str,fields))+',{'+','.join(map(str,subcores))+'}};'
+      f'if({self.ioctl}({self.dev.fd.fd},{request}UL,&submit)!=0)return {2000000+index};'
+      f'stats[0]++;stats[1]+={tasks};}}')
+
+  def _single_submit_code(self, plan:Any, index:int) -> str:
+    pairs = (*plan.subcores,*((0,0),)*(5-len(plan.subcores)))
+    return self._submit_code(str(plan.tasks),plan.task.meta.obj_addr,plan.dev.domain,plan.core_mask,pairs,index)
+
+  def _finalize_merged_submits(self) -> None:
+    # Patches are left in place across replay rebuilds: a different JIT (prefill)
+    # may build its replay between two decode trials while these plans stay in
+    # use, so restoring here would unlink a live merged replay. _MERGED_TAIL_ORIGINALS
+    # keeps the first original of every patched word so a fallback restore is exact.
+    for group in self._merge_groups:
+      slots = [self._merge_slots[slot] for slot in group]
+      code: str|None = None
+      if len(slots)>1:
+        try:
+          info,keep = build_merged_submit([slot['plan'] for slot in slots])
+        except Exception:
+          info = None
+        else:
+          self.kept.extend(keep)
+          code = self._submit_code(info['tasks'],info['obj_addr'],info['domain'],info['core_mask'],info['subcores'],slots[-1]['index'])
+      if code is None:
+        # Unsupported group: fall back to one ioctl per plan, exactly as the default path.
+        for slot in slots:
+          self.statements[self.statements.index(slot['token'])] = self._single_submit_code(slot['plan'],slot['index'])
+          self.submits += 1
+        continue
+      for slot in slots[:-1]: self.statements[self.statements.index(slot['token'])] = ''
+      self.statements[self.statements.index(slots[-1]['token'])] = code
+      self.submits += 1
 
   @functools.cached_property
   def _output_guards(self) -> tuple[Any,...]:
@@ -618,6 +815,9 @@ class RockchipCapturedJit(CapturedJit):
     if self.native is None:
       try: self.native = NativeReplay(self.linear,concrete,var_vals,self.cleaner)
       except (UnsupportedReplay,KeyError,AssertionError) as exc:
+        # A native replay that merged submits in place mutates prepared command tails;
+        # the ordinary executor must never inherit those links.
+        _restore_merged_tails()
         self.reason = str(exc)
         return result if warming else super().__call__(input_uops,var_vals)
     # Preparing a replay does not execute it. Keep the warmup's state update and
