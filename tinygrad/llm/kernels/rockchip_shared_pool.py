@@ -1,7 +1,7 @@
-"""Opt-in shared workers for fully prepared dense INT8 prefill.
+"""Opt-in shared workers for prepared INT8 inference.
 
-The five kernel factories retain their original arithmetic and work partitions.
-Only kernels constructed in a shared prefill scope change dispatch. The bridge
+The kernel factories retain their original arithmetic and work partitions.
+Only kernels constructed in a shared inference scope change dispatch. The bridge
 parks workers outside that scope, including cached calls made by other paths.
 """
 from __future__ import annotations
@@ -17,6 +17,26 @@ ONPU_SHARED_HOST_POOL = ContextVar('ONPU_SHARED_HOST_POOL', 0)
 ONPU_PREFILL_CPU_TUNING = ContextVar('ONPU_PREFILL_CPU_TUNING', 0)
 _P = ParamSpec('_P')
 _current:contextvars.ContextVar[SharedHostPool|None] = contextvars.ContextVar('rockchip_shared_host_pool', default=None)
+
+
+def erf_pool_eligible(model:Any, prefill:str, decode:str, attention:int, activations:int, ffn:int,
+                      decode_ffn:int, head_gates:int, static:int) -> bool:
+  """The checked head-gated erf graph has shared factories for every threaded helper."""
+  from tinygrad.llm.model import TransformerBlock
+  blocks=getattr(model,'blk',())
+  return (prefill==decode=='on' and getattr(model,'max_context',0)==512 and attention>0
+          and attention==activations==ffn==decode_ffn==head_gates==len(blocks) and static==0
+          and all(type(block) is TransformerBlock for block in blocks))
+
+
+def gemma4_pool_eligible(model:Any, prefill:str, decode:str, attention:int, sdk_ffn:int, norms:int, exact_rows:bool) -> bool:
+  """The qualified Gemma4 graph has pooled FFN, attention and exact preparation helpers."""
+  from tinygrad.llm.gemma4 import Gemma4Block
+  blocks=getattr(model,'blk',())
+  return (prefill==decode=='on' and exact_rows and getattr(model,'max_context',0)==512
+          and attention==sdk_ffn==len(blocks)==35 and norms==71
+          and all(type(b) is Gemma4Block and b.side_dim==256 and b.config.dim==1536
+                  and b.config.n_heads==8 and b.config.n_kv_heads==1 and b.config.head_dim in (256,512) for b in blocks))
 
 
 def pooled_source(source:str, address:int) -> tuple[str,dict[str,Any]]:
@@ -53,6 +73,7 @@ class SharedHostPool:
     from tinygrad.llm.kernels.rockchip_cpu import _renderer
     self.pool, self.active_flag, self.scope_calls = pool, ctypes.c_int(0), 0
     self.changes:list[dict[str,Any]] = []
+    self.preparation_changes:list[dict[str,Any]] = []
     self.parked_address = pool.prefill_address
     self.dispatch_source = f'''
       typedef void (*work_fn)(void**,int,int);

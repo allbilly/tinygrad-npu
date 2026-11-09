@@ -1,18 +1,23 @@
 """Opt-in dynamic per-token/per-channel INT8 matrices with FP32 dequantization."""
 from __future__ import annotations
-import copy, functools, struct
+import copy, functools, math, struct
 from dataclasses import replace
 from typing import TYPE_CHECKING
 from tinygrad import Tensor, dtypes
-from tinygrad.helpers import Target, ceildiv, getenv, round_up
+from tinygrad.helpers import ContextVar, Target, ceildiv, getenv, round_up
 from tinygrad.llm.kernels.rockchip import RockchipLinear, RockchipFeedForward, RockchipProjections, RockchipPreparedQKV
-from tinygrad.llm.kernels.rockchip_cpu import _renderer
+from tinygrad.uop.ops import resolve
+from tinygrad.llm.kernels.rockchip_cpu import _renderer, ONPU_NORM_QUANT
 from tinygrad.llm.kernels.rockchip_shared_pool import ONPU_PREFILL_CPU_TUNING, shared_program
 from tinygrad.llm.kernels.rockchip_padding import capacity_input
 from tinygrad.runtime.support.rockchip_int8 import padded_depth, supported_depth, sdk_prefill_supported
 from tinygrad.uop.ops import KernelInfo, Ops, ProgramInfo, UOp
 if TYPE_CHECKING:
   from tinygrad.llm.kernels.rockchip_pool import AttentionPool
+
+ONPU_INT8_GROUPED_GATE_UP = ContextVar('ONPU_INT8_GROUPED_GATE_UP',0)
+ONPU_GROUPED_DECODE_DOWN = ContextVar('ONPU_GROUPED_DECODE_DOWN',0)
+ONPU_INT8_REUSE_ACTIVATION = ContextVar('ONPU_INT8_REUSE_ACTIVATION',0)
 
 def _quantize_vector_source() -> str:
   return '''typedef signed char char4 __attribute__((aligned(1),ext_vector_type(4)));
@@ -119,13 +124,21 @@ def _quantize(out:UOp, inp:UOp, scale_out:UOp, rows:int, depth:int, padded:int, 
                                      UOp(Ops.BINARY,arg=renderer.compiler.compile_cached(source))))
 
 
-def quantize(x:Tensor, padded:int, *, sdk_prefill:bool=False) -> tuple[Tensor,Tensor]:
+def quantize(x:Tensor, padded:int, *, sdk_prefill:bool=False, weight:bool=False) -> tuple[Tensor,Tensor]:
   if x.ndim!=2 or x.device!='CPU' or not isinstance(x.shape[0],int) or not isinstance(x.shape[1],int):
     raise ValueError('INT8 quantization requires a static CPU matrix')
   rows,depth = x.shape
   assert isinstance(rows,int) and isinstance(depth,int)
   if not 1<=rows<=24576 or not 1<=depth<=padded or not supported_depth(padded): raise ValueError('Unsupported INT8 quantization geometry')
   if type(sdk_prefill) is not bool:raise ValueError('SDK INT8 quantization layout must be a bool')
+  from tinygrad.llm.kernels.rockchip_hadamard import enabled,quantize as hadamard_quantize
+  if type(weight) is not bool:raise ValueError('Weight quantization selection must be a bool')
+  if enabled(depth):
+    if sdk_prefill or ONPU_NORM_QUANT:raise ValueError('Hadamard quantization requires ordinary layout and separate CPU normalization')
+    return hadamard_quantize(x,padded,weight=weight)
+  if ONPU_NORM_QUANT:
+    from tinygrad.llm.kernels.rockchip_norm_quant import try_quantize
+    if (fused:=try_quantize(x,padded,sdk_prefill=sdk_prefill)) is not None:return fused
   result = Tensor.empty(round_up(rows*4,64)+rows*padded,device='CPU',dtype=dtypes.uint8).custom_kernel(
     x.float().contiguous(),Tensor.empty(rows,device='CPU',dtype=dtypes.float),fxn=lambda o,a,s:_quantize(o,a,s,rows,depth,padded,sdk_prefill))
   return result[0],result[2]
@@ -260,8 +273,14 @@ def raw_int8_matmul(payload:Tensor, weight:Tensor, rows:int, columns:int, column
   if type(sdk_prefill) is not bool or sdk_prefill and not sdk_prefill_supported(rows,n,k):
     raise ValueError('Unsupported SDK INT8 matrix geometry')
   if type(cpu_output) is not bool:raise ValueError('CPU output selection must be a bool')
+  # Core mode: RKLLM issues three SINGLE-core jobs from three threads, while
+  # oNPU issues one three-core job. Measured: 14078/14112 of RKLLM's decode
+  # groups have the three cores overlapping, core_mask in {1,2,4}. Expose the
+  # core count so the scheduling difference can be A/B'd.
+  cores = int(getenv('ONPU_INT8_DECODE_CORES',0)) or 3
+  if cores not in (1,3): raise ValueError('INT8 core count must be 1 or 3')
   result = Tensor.empty(rows*n,device=weight.device,dtype=dtypes.int32).custom_kernel(payload.to(weight.device),weight,
-    fxn=lambda o,a,b:_matmul(o,a,b,rows,n,k,column_offset,3,sdk_prefill,payload_offset or 0))[0]
+    fxn=lambda o,a,b:_matmul(o,a,b,rows,n,k,column_offset,cores,sdk_prefill,payload_offset or 0))[0]
   return result.to('CPU') if cpu_output else result
 
 
@@ -283,18 +302,41 @@ def packed_int8_matmul(x:Tensor, weight:Tensor, scales:Tensor, columns:int, colu
     fxn=lambda o,a,b,c:_dequantize(o,a,b,c,rows,columns,n,column_offset,sdk))[0]
 
 
+def _k_split_parts(padded:int) -> tuple[tuple[int,int],...]:
+  """Split a padded INT8 depth into qualified K<=2048 tasks."""
+  if padded<=2048:return ((0,padded),)
+  return tuple((start,min(2048,padded-start)) for start in range(0,padded,2048))
+
+
+def _split_payload(payload:Tensor, rows:int, padded:int, parts:tuple[tuple[int,int],...]) -> list[Tensor]:
+  """Return one valid INT8 payload per K part, reusing the original per-row scales."""
+  header = round_up(rows*4,64)
+  data = payload[header:].reshape(rows,padded)
+  result = []
+  for start,count in parts:
+    result.append(Tensor.cat(payload[:header],data[:,start:start+count].contiguous().reshape(-1)).contiguous())
+  return result
+
+
 class RockchipInt8Linear(RockchipLinear):
   def __init__(self, *args):
     super().__init__(*args)
     if self.weight.device!='CPU': raise ValueError('INT8 acceleration requires CPU weights')
     self.scales:list[Tensor] = []
+    # Dual packing: present only when decode_tile_columns differs from tile_columns.
+    self.decode_packed:list[Tensor] = []
+    self.decode_scales:list[Tensor] = []
+    self.k_parts:list[tuple[Tensor,...]] = []
+    self._prepared = False
     self.input_scale:Tensor|None = None
+    self._grouped_chunks:list[tuple[Tensor,Tensor]] = []
+    self._grouped_first = 0
 
   def scaled_input(self, x:Tensor) -> Tensor: return x if self.input_scale is None else x.float()/self.input_scale
 
   def prepare(self):
     if self.shared_projection is not None:return
-    if self.packed: return
+    if self._prepared: return
     k = padded_depth(self.depth)
     weight = self.weight
     if self.input_scale is not None:
@@ -305,66 +347,163 @@ class RockchipInt8Linear(RockchipLinear):
       assert isinstance(values,list)
       if any(not 0<float(value)<float('inf') for value in values): raise ValueError('INT8 input channel scales must be finite and positive')
       weight = weight.float()*scale
-    for start in range(0,self.columns,self.tile_columns):
-      raw,scales = quantize(weight[start:start+self.tile_columns],k)
-      scales = scales.contiguous().realize()
-      values = scales.tolist()
-      assert isinstance(values,list)
-      if any(not 0<s<float('inf') for s in values): raise ValueError('INT8 weights must be finite')
-      count = len(values)
-      n = round_up(count,32)
-      codes = raw[round_up(count*4,64):].bitcast(dtypes.int8).reshape(count,k).pad(((0,n-count),(0,0)))
-      from tinygrad.runtime.ops_rockchip import int8_weight_device
-      device = int8_weight_device(n*k)
-      self.packed.append(codes.reshape(n//32,32,k//32,32).permute(0,2,1,3).contiguous().to(device).realize())
-      self.scales.append(scales)
+    def pack(width:int) -> tuple[list[Tensor],list[Tensor]]:
+      packed_out:list[Tensor] = []
+      scales_out:list[Tensor] = []
+      for start in range(0,self.columns,width):
+        raw,scales = quantize(weight[start:start+width],k)
+        scales = scales.contiguous().realize()
+        values = scales.tolist()
+        assert isinstance(values,list)
+        if any(not 0<s<float('inf') for s in values): raise ValueError('INT8 weights must be finite')
+        count = len(values)
+        n = round_up(count,32)
+        codes = raw[round_up(count*4,64):].bitcast(dtypes.int8).reshape(count,k).pad(((0,n-count),(0,0)))
+        from tinygrad.runtime.ops_rockchip import int8_weight_device
+        device = int8_weight_device(n*k)
+        packed_out.append(codes.reshape(n//32,32,k//32,32).permute(0,2,1,3).contiguous().to(device).realize())
+        scales_out.append(scales)
+      return packed_out, scales_out
+
+    self.packed, self.scales = pack(self.tile_columns)
+    if self.decode_tile_columns!=self.tile_columns:
+      self.decode_packed, self.decode_scales = pack(self.decode_tile_columns)
+    self._grouped_chunks.clear()
+    if (ONPU_INT8_GROUPED_GATE_UP and self.input_scale is None and self.bias is None
+        and len(self.packed)==2 and self.packed[0].shape[1]*32==padded_depth(self.depth)
+        and self.packed[1].shape[1]*32==padded_depth(self.depth)):
+      first=self.packed[0].shape[0]*32
+      blocks_total=self.packed[0].shape[0]
+      assert isinstance(first,int) and isinstance(blocks_total,int)
+      if first%12288==0 and 0<first<self.columns and self.packed[1].shape[0]*32==self.columns-first:
+        blocks=4096//32
+        for offset in range(0,blocks_total,3*blocks):
+          weight=self.packed[0][offset:offset+3*blocks].reshape(3,blocks,self.packed[0].shape[1],32,32)
+          scales=self.scales[0][offset*32:(offset+3*blocks)*32].reshape(3,4096)
+          self._grouped_chunks.append((weight,scales))
+        self._grouped_first=first
+    self._prepared = True
 
   def release_packed(self):
     super().release_packed()
     self.scales.clear()
+    self.k_parts.clear()
+    self._grouped_chunks.clear()
+    self._grouped_first = 0
+    self._prepared = False
 
   def raw_projection(self, x:Tensor, *, sdk_prefill:bool=False, defer_bias:bool=False) -> tuple[list[Tensor],list[Tensor],list[int]]:
     if type(defer_bias) is not bool:raise ValueError('Deferred raw projection bias must be a bool')
-    if x.device!='CPU' or len(self.packed)!=1 or self.columns>12288 or self.bias is not None and not defer_bias:
+    if x.device!='CPU' or not (len(self.packed)==1 or len(self.k_parts)==1) or self.columns>12288 or self.bias is not None and not defer_bias:
       raise ValueError('Unsupported raw INT8 projection')
     dense = capacity_input(x).reshape(-1,self.depth)
-    k = self.packed[0].shape[1]*32
+    k = padded_depth(self.depth)
     assert isinstance(k,int)
-    tile_rows = 128 if k<=2048 else 64
+    tile_rows = 128 if len(self.k_parts)==1 or self.depth<=2048 else 64
     raw,scales,counts = [],[],[]
     for start in range(0,dense.shape[0],tile_rows):
       part = dense[start:start+tile_rows]
       count = part.shape[0]
       assert isinstance(count,int)
-      sdk = sdk_prefill and sdk_prefill_supported(count,round_up(self.columns,32),k)
+      sdk = sdk_prefill and not self.k_parts and sdk_prefill_supported(count,round_up(self.columns,32),k)
       payload,scale = quantize(self.scaled_input(part),k,sdk_prefill=sdk)
-      raw.append(raw_int8_matmul(payload,self.packed[0],count,self.columns,sdk_prefill=sdk))
+      if self.k_parts:
+        payloads = _split_payload(payload,count,k,_k_split_parts(k))
+        raw.append(self._sum_k_parts(payloads,count,0,0,self.columns))
+      else:
+        raw.append(raw_int8_matmul(payload,self.packed[0],count,self.columns,sdk_prefill=sdk))
       scales.append(scale)
       counts.append(count)
     return raw,scales,counts
+
+  def _sum_k_parts(self, payloads:list[Tensor], rows:int, tile:int=0, column:int=0, columns:int|None=None) -> Tensor:
+    if tile>=len(self.k_parts) or len(payloads)!=len(self.k_parts[tile]):raise ValueError('INT8 K-split layout changed')
+    width = min(self.tile_columns,self.columns-tile*self.tile_columns)-column if columns is None else columns
+    total:Tensor|None = None
+    for payload,weight in zip(payloads,self.k_parts[tile]):
+      value = raw_int8_matmul(payload,weight,rows,width,column_offset=column)
+      total = value if total is None else total+value
+    assert total is not None
+    return total
+
+  def _phase_tiles(self, phase:str|None) -> tuple[int,list[Tensor],list[Tensor]]:
+    if phase=='decode' and self.decode_tile_columns!=self.tile_columns:
+      return self.decode_tile_columns, self.decode_packed, self.decode_scales
+    return self.tile_columns, self.packed, self.scales
 
   def npu(self, x:Tensor) -> Tensor:
     if self.shared_projection is not None:return self.shared_npu(x)
     if x.device!='CPU': raise ValueError('INT8 acceleration requires CPU activations')
     shape = x.shape
     dense = capacity_input(x).reshape(-1,self.depth)
+    if (self._grouped_chunks and not self.k_parts and x.ndim==3 and x.shape[0]==1 and x.dtype is dtypes.float
+        and isinstance(x.max_shape[1],int) and x.max_shape[1]>1):
+      capacity=dense.shape[0]
+      if isinstance(capacity,int) and 1<=capacity<=128:
+        from tinygrad.llm.kernels.rockchip_grouped_int8 import shared_matmul
+        pieces=[]
+        for weight,scales in self._grouped_chunks:
+          grouped=shared_matmul(dense,weight,scales,4096).realize()
+          pieces.append(Tensor.cat(grouped[0],grouped[1],grouped[2],dim=1))
+        tail_width=self.columns-self._grouped_first
+        tail=[packed_int8_matmul(self.scaled_input(dense[start:start+64,self._grouped_first:self.columns]),
+                                 self.packed[1],self.scales[1],tail_width) for start in range(0,capacity,64)]
+        pieces.append(Tensor.cat(*tail,dim=0))
+        out=Tensor.cat(*pieces,dim=1).reshape(*x.max_shape[:-1],self.columns)
+        out=out.shrink(tuple((0,s) for s in (*shape[:-1],self.columns))).cast(x.dtype)
+        return out if self.bias is None else out+self.bias
     rows = []
+    if self.k_parts:
+      k = padded_depth(self.depth)
+      parts = _k_split_parts(k)
+      tile_rows = 128
+      for start in range(0,dense.shape[0],tile_rows):
+        part = dense[start:start+tile_rows]
+        count = part.shape[0]
+        assert isinstance(count,int)
+        payload,scale = quantize(self.scaled_input(part),k)
+        payloads = _split_payload(payload,count,k,parts)
+        columns = []
+        for tile in range(len(self.k_parts)):
+          width = min(self.tile_columns,self.columns-tile*self.tile_columns)
+          limit = 24576 if count==1 else 12288
+          for col in range(0,width,limit):
+            chunk = min(limit,width-col)
+            raw = self._sum_k_parts(payloads,count,tile,col,chunk)
+            columns.append(dequantize_tiles([raw],[scale],self.scales[tile][col:col+chunk],[count],chunk))
+        rows.append(Tensor.cat(*columns,dim=1) if len(columns)>1 else columns[0])
+      out = Tensor.cat(*rows,dim=0).reshape(*x.max_shape[:-1],self.columns)
+      out = out.shrink(tuple((0,s) for s in (*shape[:-1],self.columns))).cast(x.dtype)
+      return out if self.bias is None else out+self.bias
+    phase = self.phase or ('decode' if resolve(math.prod(x.shape[:-1])==1,default=False) else 'prefill')
+    tile_columns, packed, scales = self._phase_tiles(phase)
     tile_rows = 128 if padded_depth(self.depth)<=2048 else 64
-    if len(self.packed)==1 and self.columns<=12288 and dense.shape[0]>1 and self.bias is None:
+    if len(packed)==1 and self.columns<=12288 and dense.shape[0]>1 and self.bias is None:
       sdk_enabled = bool(getenv('ONPU_INT8_SDK_PREFILL',0))
       raw_tiles,tile_scales,counts = self.raw_projection(x,sdk_prefill=sdk_enabled)
       sdk_tiles = tuple(sdk_enabled and sdk_prefill_supported(m,round_up(self.columns,32),padded_depth(self.depth)) for m in counts)
-      out = dequantize_tiles(raw_tiles,tile_scales,self.scales[0],counts,self.columns,sdk_tiles=sdk_tiles)
+      out = dequantize_tiles(raw_tiles,tile_scales,scales[0],counts,self.columns,sdk_tiles=sdk_tiles)
       out = out.reshape(*x.max_shape[:-1],self.columns)
       out = out.shrink(tuple((0,s) for s in (*shape[:-1],self.columns))).cast(x.dtype)
       return out if self.bias is None else out+self.bias
     for start in range(0,dense.shape[0],tile_rows):
       part = dense[start:start+tile_rows]
+      count = part.shape[0]
+      assert isinstance(count,int)
       columns = []
-      for index,(weight,scales) in enumerate(zip(self.packed,self.scales)):
-        width = min(self.tile_columns,self.columns-index*self.tile_columns)
-        limit = 24576 if part.shape[0]==1 else 12288
-        for col in range(0,width,limit): columns.append(packed_int8_matmul(self.scaled_input(part),weight,scales,min(limit,width-col),col))
+      reuse_activation = bool(ONPU_INT8_REUSE_ACTIVATION) and count==1 and len(packed)>1
+      if reuse_activation:
+        payload,activation_scales = quantize(self.scaled_input(part),padded_depth(self.depth))
+      for index,(weight,ws) in enumerate(zip(packed,scales)):
+        width = min(tile_columns,self.columns-index*tile_columns)
+        limit = 24576 if count==1 else 12288
+        for col in range(0,width,limit):
+          chunk = min(limit,width-col)
+          if reuse_activation:
+            raw = raw_int8_matmul(payload,weight,count,chunk,column_offset=col)
+            columns.append(dequantize_tiles([raw],[activation_scales],ws[col:col+chunk],[count],chunk))
+          else:
+            columns.append(packed_int8_matmul(self.scaled_input(part),weight,ws,chunk,col))
       rows.append(Tensor.cat(*columns,dim=1))
     out = Tensor.cat(*rows,dim=0).reshape(*x.max_shape[:-1],self.columns)
     out = out.shrink(tuple((0,s) for s in (*shape[:-1],self.columns))).cast(x.dtype)
@@ -376,10 +515,13 @@ class RockchipInt8SplitLinear(RockchipInt8Linear):
   def __init__(self, *args):
     super().__init__(*args)
     self.parts:list[RockchipInt8Linear] = []
+    self.grouped_weight:Tensor|None = None
+    self.grouped_scale:Tensor|None = None
+    self.grouped_count = 0
 
   def prepare(self):
     if self.shared_projection is not None:return
-    if self.packed:return
+    if self._prepared:return
     if not 4096<self.depth<=32768:raise ValueError('Unsupported split INT8 projection depth')
     for start in range(0,self.depth,4096):
       source = copy.copy(self.source)
@@ -388,16 +530,54 @@ class RockchipInt8SplitLinear(RockchipInt8Linear):
       if self.input_scale is not None:part.input_scale = self.input_scale[start:start+4096].contiguous().realize()
       part.prepare()
       self.parts.append(part)
-      self.packed.extend(part.packed)
+      if not part.k_parts and len(part.packed)==1:
+        self.packed.append(part.packed[0])
       self.scales.extend(part.scales)
+    if len(self.packed)!=len(self.parts):self.packed.clear()
+    if ((getenv('ONPU_INT8_GROUPED_SPLIT',0) or ONPU_GROUPED_DECODE_DOWN) and self.input_scale is None and self.bias is None
+        and len(self.parts)>=4
+        and all(part.depth==4096 and part.columns==self.columns and part.input_scale is None and part.bias is None
+                and len(part.packed)==1 and len(part.scales)==1 for part in self.parts[:3])):
+      # Stack host copies once; the per-part weights stay resident for decode.
+      device = self.parts[0].packed[0].device
+      self.grouped_weight = Tensor.stack(*(part.packed[0].to('CPU') for part in self.parts[:3]),dim=0).contiguous().to(device).realize()
+      self.grouped_scale = Tensor.stack(*(part.scales[0] for part in self.parts[:3]),dim=0).contiguous().realize()
+      self.grouped_count = 3
+    self._prepared = True
 
   def release_packed(self):
     super().release_packed()
     self.scales.clear()
+    self.grouped_weight = None
+    self.grouped_scale = None
+    self.grouped_count = 0
     self.parts.clear()
 
   def npu(self, x:Tensor) -> Tensor:
     if self.shared_projection is not None:return self.shared_npu(x)
+    if (self.grouped_weight is not None and self.grouped_scale is not None and self.grouped_count
+        and x.device=='CPU' and x.ndim==3 and x.shape[0]==1
+        and isinstance(x.max_shape[1],int) and x.max_shape[1]>=1):
+      from tinygrad.llm.kernels.rockchip_grouped_int8 import matmul as grouped_int8_matmul
+      dense = capacity_input(x)
+      capacity = dense.shape[1]
+      if isinstance(capacity,int) and 1<=capacity<=128 and (capacity>1 or (ONPU_GROUPED_DECODE_DOWN and self.columns==4096)):
+        groups = self.grouped_count
+        first = dense[...,:groups*4096]
+        grouped_x = first.reshape(1,-1,groups,4096).squeeze(0).permute(1,0,2).contiguous()
+        # The grouped dequantizer is a custom program, so the cross-group adds cannot
+        # contract its final multiply into an FMA and change the reference FP32 sum.
+        grouped = grouped_int8_matmul(grouped_x,self.grouped_weight,self.grouped_scale,4096,materialize=True)
+        outputs = [grouped[index].reshape(*dense.shape[:-1],self.columns) for index in range(groups)]
+        result = outputs[0]
+        for output in outputs[1:]:result = result+output
+        offset = groups*4096
+        for index in range(groups,len(self.parts)):
+          part = self.parts[index]
+          result = result+part.npu(dense[...,offset:offset+part.depth].float().contiguous())
+          offset += part.depth
+        result = result.shrink(tuple((0,s) for s in (*x.shape[:-1],self.columns))).cast(x.dtype)
+        return result if self.bias is None else result+self.bias
     values = [part.npu(x[...,index*4096:index*4096+part.depth].float().contiguous()) for index,part in enumerate(self.parts)]
     result = values[0]
     for value in values[1:]:result = result+value
@@ -530,6 +710,16 @@ class RockchipInt8FeedForward(RockchipFeedForward):
       from tinygrad.llm.kernels.rockchip_sigmoid import sigmoid_gate
       projected = joint.npu(x)
       depth = self.down.depth
+      if getenv('ONPU_FUSED_GATE_MUL',0):
+        from tinygrad.llm.kernels.rockchip_sigmoid import sigmoid_gate_mul
+        try:return self.down(sigmoid_gate_mul(projected,pool=self.pool))
+        except ValueError:pass
+      if getenv('ONPU_VECTOR_SIGMOID',0):
+        # sigmoid_gate is a custom kernel whose C is still scalar-per-lane.
+        # Replace only the sigmoid with a float4 helper, keeping the two
+        # multiplies as-is so the arithmetic order is unchanged.
+        from tinygrad.llm.kernels.rockchip_sigmoid import sigmoid_gate_vector
+        return self.down((projected[...,:depth]*sigmoid_gate_vector(projected))*projected[...,depth:])
       return self.down((projected[...,:depth]*sigmoid_gate(projected,pool=self.pool))*projected[...,depth:])
     dense = capacity_input(x).reshape(-1,joint.depth)
     outputs,output_scales,output_counts = [],[],[]

@@ -577,6 +577,10 @@ class NativeReplay:
       # it can say a kernel averages X ms but not how its individual calls spread.
       # For a tile whose cost may depend on position in the layer (a tail tile
       # stalling behind a wide sibling) the distribution is the whole question.
+      if path := os.getenv('ONPU_REPLAY_PROFILE_OUT'):
+        with open(path,'a') as output:
+          output.write(json.dumps({'labels':self.labels,'ns':dict(self.profile_ns),'counts':dict(self.profile_counts),
+                                   'submits':stats[0],'tasks':stats[1]})+'\n')
       if path := os.getenv('ONPU_REPLAY_CALLS_OUT'):
         with open(path,'a') as output:
           output.write(json.dumps({'calls':[[label,stats[i+2]]

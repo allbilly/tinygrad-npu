@@ -180,10 +180,18 @@ class RockchipMatmul:
     active_cores = 1 if self.tasks==1 else 3
     self.core_mask = (1<<active_cores)-1
     if self.int8:
-      from tinygrad.runtime.support.rockchip_int8 import int8_body, int8_sdk_body
-      body_builder = int8_sdk_body if self.sdk_prefill else int8_body
-      bodies = tuple(body_builder(self.m,n,self.k,lhs.dma+self.lhs_offset,rhs.dma+self.rhs_offset+offset*self.k,
-                               out.dma+offset*self.m*4,n) for offset,n in parts)
+      from tinygrad.runtime.support.rockchip_int8 import int8_body, int8_sdk_bodies, int8_sdk_decode_body
+      if self.sdk_prefill:
+        bodies = tuple(body for offset,n in parts for body in int8_sdk_bodies(self.m,n,self.k,lhs.dma+self.lhs_offset,
+          rhs.dma+self.rhs_offset+offset*self.k,out.dma+offset*self.m*4,n))
+      elif self.m==1 and int(getenv('ONPU_INT8_SDK_DECODE',0)):
+        # Opt-in: emit the A16/C4 recipe RKLLM uses for decode (register-identical
+        # to its captured task). Off by default pending an A/B on this part.
+        bodies = tuple(int8_sdk_decode_body(self.m,n,self.k,lhs.dma+self.lhs_offset,rhs.dma+self.rhs_offset+offset*self.k,
+                                            out.dma+offset*self.m*4,n) for offset,n in parts)
+      else:
+        bodies = tuple(int8_body(self.m,n,self.k,lhs.dma+self.lhs_offset,rhs.dma+self.rhs_offset+offset*self.k,
+                                 out.dma+offset*self.m*4,n) for offset,n in parts)
     elif self.split_k:
       part = self.k//3
       bodies = tuple(_matmul_body(self.m,self.n,part,lhs.dma+self.lhs_offset+i*self.m*part*2,
@@ -191,6 +199,9 @@ class RockchipMatmul:
     else:
       bodies = tuple(_matmul_body(self.m,n,self.k,lhs.dma+self.lhs_offset,rhs.dma+self.rhs_offset+offset*self.k*2,
         out.dma+offset*self.m*4) for offset,n in parts)
+    self.tasks = len(bodies)
+    if self.tasks%active_cores:raise ValueError('Unbalanced Rockchip matrix task chains')
+    per_core = self.tasks//active_cores
     total_words = sum(round_up(len(b)+4,2) for b in bodies)
     self.cmd = self.dev.allocate(round_up(total_words*8,4096))
     self.owned.append(self.cmd)
@@ -200,8 +211,11 @@ class RockchipMatmul:
     words, offset = to_mv(self.cmd.addr,self.cmd.size).cast('Q'), 0
     descs = (rk.struct_rknpu_task*self.tasks).from_address(self.task.addr)
     for i,body in enumerate(bodies):
-      tail = (_cmd(1,0),_cmd(rk.TARGET_PC_REG,rk.REG_PC_REGISTER_AMOUNTS),_cmd(rk.TARGET_VERSION,0),
-              _cmd(rk.TARGET_PC,rk.REG_PC_OPERATION_ENABLE,0xd))
+      next_task = i+1 if (i+1)%per_core else None
+      tail:tuple[int,...] = ((_cmd(rk.TARGET_PC_REG,rk.REG_PC_BASE_ADDRESS,(self.cmd.dma+(offset+round_up(len(body)+4,2))*8)&0xfffffff0),
+               _cmd(rk.TARGET_PC_REG,rk.REG_PC_REGISTER_AMOUNTS,ceildiv(len(bodies[next_task]),2)+1)) if next_task is not None else
+              (_cmd(1,0),_cmd(rk.TARGET_PC_REG,rk.REG_PC_REGISTER_AMOUNTS)))
+      tail += (_cmd(rk.TARGET_VERSION,0),_cmd(rk.TARGET_PC,rk.REG_PC_OPERATION_ENABLE,0xd))
       words[offset:offset+len(body)+4] = array.array('Q',body+tail)
       descs[i] = rk.struct_rknpu_task(0,0,0xd,0x300,0x1ffff,0,len(body),0,self.cmd.dma+offset*8)
       offset += round_up(len(body)+4,2)
