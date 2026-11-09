@@ -698,6 +698,21 @@ def configure(model, prefill:str='off', decode:str='off', tile_columns:int=4096,
         group = RockchipProjections(members,tile_columns,share_packed=share_projection_weights)
         setattr(block,name,group)
         groups.append(group)
+      # ONPU_BLOCK_DOMAIN_ORDER (default OFF, bit-exact): the historical placement
+      # prepares every fused joint projection (qkv, gate+up) in this block loop and
+      # only later prepares the standalone projections (attn_output, ffn_down) in a
+      # second `layers` pass. The two passes advance the sequential iommu-domain
+      # cursor separately, so a layer's four NPU submits end up in different weight
+      # domains, and the blocking submit path then pays an iommu detach/attach
+      # (rknpu_iommu_switch_domain) on nearly every submit. Preparing each block's
+      # standalone projections right after its joints makes the cursor walk
+      # block-major, so a layer stays in one domain and switches collapse to the
+      # few domain boundaries per token. See scripts/probe_submit_domain.py.
+      if share_projection_weights and getenv('ONPU_BLOCK_DOMAIN_ORDER',0):
+        for member in getattr(block,'__dict__',{}).values():
+          if (isinstance(member,RockchipLinear) and member.shared_projection is None
+              and (member.prefill!='off' or member.decode!='off')):
+            member.prepare()
   if share_projection_weights:
     for layer in layers:
       if layer.shared_projection is None and (layer.prefill!='off' or layer.decode!='off'):layer.prepare()
