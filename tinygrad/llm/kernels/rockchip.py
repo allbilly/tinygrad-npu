@@ -14,6 +14,11 @@ from tinygrad.uop.ops import KernelInfo, Ops, ProgramInfo, UOp, resolve
 
 
 ONPU_CPU_RMS_ALL_ROWS = ContextVar('ONPU_CPU_RMS_ALL_ROWS',0)
+# One-token decode may reuse the prepared QKV graph (one host kernel for INT8
+# dequantize + rotary + KV-cache store) instead of the generic elementwise graph
+# that launches a separate dequantize, query-rotary and key/value-store kernel
+# per layer. Default off: it is an opt-in A/B switch, prefill is unaffected.
+ONPU_DECODE_FUSED_QKV_ROPE = ContextVar('ONPU_DECODE_FUSED_QKV_ROPE',0)
 
 @functools.cache
 def _matmul(out:UOp, lhs:UOp, rhs:UOp, m:int, n:int, k:int, cores:int, column_offset:int, row_offset:int=0,
@@ -304,17 +309,37 @@ class RockchipRMSNorm:
 
 
 class RockchipPreparedQKV:
-  def __init__(self, projections:RockchipProjections, heads:int, qnorm:Tensor|None, knorm:Tensor|None, eps:float):
+  def __init__(self, projections:RockchipProjections, heads:int, qnorm:Tensor|None, knorm:Tensor|None, eps:float,
+               rope_dim:int|None=None, decode:bool=False):
     self.projections,self.heads,self.qnorm,self.knorm,self.eps = projections,heads,qnorm,knorm,eps
+    # `rope_dim=None` keeps the original full-head rotary. `decode=True` opts the
+    # one-token path into the prepared QKV graph (dequantize + rotary + cache store
+    # in a single host kernel); prefill stays on the generic elementwise graph.
+    self.rope_dim,self.decode = rope_dim,decode
+    # The prepared kernel takes a RESIDENT contiguous bias. Under
+    # --defer-weight-realization the fused INT8 QKV bias is a lazy gather over the
+    # fused GGUF tensors (`Tensor.cat(half_split(q_bias), half_split(k_bias), v.clone())`),
+    # so `prepare_qkv_int8`'s `bias.contiguous()` re-materialises it as a head-permuted
+    # scalar-lane kernel inside EVERY replayed decode token (measured:
+    # CPU:E_36_2_32_2, 28 calls x ~37 us = 1.04 ms/token, hoisted to the head of the
+    # graph because the bias is weight-only). Realize it once, here, instead.
+    joint = getattr(projections,'joint',None)
+    bias = getattr(joint,'bias',None)
+    if isinstance(bias,Tensor) and bias.device=='CPU':
+      joint.bias = bias.contiguous().realize()
 
   def enabled(self, x:Tensor) -> bool:
     phase = self.projections.layers[0].phase or ('decode' if resolve(math.prod(x.shape[:-1])==1,default=False) else 'prefill')
-    return phase=='prefill' and x.device=='CPU' and x.dtype is dtypes.float and x.ndim==3 and x.shape[0]==1 and x.max_shape[1]>=16 \
+    if phase=='decode':
+      return self.decode and x.device=='CPU' and x.dtype is dtypes.float and x.ndim==3 and x.shape[0]==1 \
+        and x.max_shape[1]==1 and all(layer.decode=='on' for layer in self.projections.layers)
+    return not self.decode and x.device=='CPU' and x.dtype is dtypes.float and x.ndim==3 and x.shape[0]==1 and x.max_shape[1]>=16 \
       and all(layer.prefill=='on' for layer in self.projections.layers)
 
   def __call__(self, x:Tensor, start:int|UOp, cache:Tensor, freqs:Tensor) -> tuple[Tensor,Tensor]:
     from tinygrad.llm.kernels.rockchip_qkv import prepare_qkv
-    return prepare_qkv(self.projections.joint.npu(x),cache,self.qnorm,self.knorm,freqs,start,self.heads,self.eps)
+    return prepare_qkv(self.projections.joint.npu(x),cache,self.qnorm,self.knorm,freqs,start,self.heads,self.eps,
+                       rope_dim=self.rope_dim or 0)
 
 
 class RockchipFeedForward:
@@ -861,12 +886,18 @@ def configure(model, prefill:str='off', decode:str='off', tile_columns:int=4096,
         qkv_group = getattr(block,'attn_qkv',None)
         query_weight,key_weight = getattr(getattr(block,'attn_q_norm',None),'weight',None),getattr(getattr(block,'attn_k_norm',None),'weight',None)
         unnormalized = fused_qkv_without_norm and config.qk_norm==0 and query_weight is None and key_weight is None
+        # Prefill keeps the original full-head-rotary prepared graph. One-token
+        # decode can additionally opt in (default off) to a partial-rotary
+        # prepared graph that fuses INT8 dequantize + rotary + KV-cache store.
+        full_rotary_prefill = config.head_dim==config.rope_dim and (unnormalized or config.qk_norm==config.head_dim)
+        decode_rotary = (bool(ONPU_DECODE_FUSED_QKV_ROPE) and config.qk_norm==0 and query_weight is None and key_weight is None
+                         and 0<config.rope_dim<=config.head_dim and config.rope_dim%8==0)
         if (fused_qkv and not attention_softcap and getattr(block,'prepared_attention_compatible',True)
             and not config.attn_output_gate and not config.attn_head_gate
             and config.max_context<=4096 and isinstance(qkv_group,RockchipProjections)
-            and config.head_dim==config.rope_dim and (unnormalized or config.qk_norm==config.head_dim)
+            and (full_rotary_prefill or decode_rotary)
             and 8<=config.head_dim<=256 and config.head_dim%8==0 and 1<=config.n_kv_heads<=config.n_heads<=128
-            and (unnormalized or isinstance(query_weight,Tensor) and isinstance(key_weight,Tensor)
+            and (full_rotary_prefill or decode_rotary or isinstance(query_weight,Tensor) and isinstance(key_weight,Tensor)
                  and all(w.device=='CPU' and w.dtype in (dtypes.half,dtypes.float) for w in (query_weight,key_weight)))):
           prepared_type:type[RockchipPreparedQKV] = RockchipPreparedQKV
           if (precision=='int8' and (len(qkv_group.joint.packed)==1 or len(getattr(qkv_group.joint,'k_parts',()))==1)
@@ -874,7 +905,8 @@ def configure(model, prefill:str='off', decode:str='off', tile_columns:int=4096,
                    and qkv_group.joint.bias.dtype in (dtypes.half,dtypes.float))):
             from tinygrad.llm.kernels.rockchip_int8 import RockchipInt8PreparedQKV
             prepared_type = RockchipInt8PreparedQKV
-          setattr(block,'prepared_qkv',prepared_type(qkv_group,config.n_heads,query_weight,key_weight,config.norm_eps))
+          setattr(block,'prepared_qkv',prepared_type(qkv_group,config.n_heads,query_weight,key_weight,config.norm_eps,
+                                                     rope_dim=config.rope_dim,decode=decode_rotary and not full_rotary_prefill))
           prepared_blocks += 1
   head_gates=0
   for block in getattr(model,'blk',[]):

@@ -321,9 +321,11 @@ class TransformerBlock(FFNBlock):
     if not self.config.attn_logit_softcap and not self.config.attn_head_gate and not self.config.attn_output_gate and \
        (prepared:=getattr(self,'prepared_qkv',None)) is not None and prepared.enabled(x):
       q,assigned_kv = prepared(x,start_pos,self.cache_kv,self.freqs_cis)
-      attention = self.prefill_attention
-      assert attention is not None
       B,T,_ = x.shape
+      # The prepared graph also serves one-token decode, where the specialized
+      # decode attention kernel (worker pool + GQA head fusion) is required.
+      attention = self.decode_attention if resolve(T==1) else self.prefill_attention
+      assert attention is not None
       return self.attn_output(attention(q,assigned_kv,start_pos+T).transpose(1,2).reshape(B,T,-1))
     q,k,v = joint(x) if (joint:=getattr(self,'attn_qkv',None)) is not None else (self.attn_q(x),self.attn_k(x),self.attn_v(x))
     if self.config.qk_norm and self.config.qk_norm != self.config.head_dim: q, k = self.attn_q_norm(q), self.attn_k_norm(k)

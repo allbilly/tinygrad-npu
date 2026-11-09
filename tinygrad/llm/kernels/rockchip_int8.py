@@ -764,4 +764,5 @@ class RockchipInt8PreparedQKV(RockchipPreparedQKV):
     joint = self.projections.joint
     assert isinstance(joint,RockchipInt8Linear)
     raw,scales,counts = joint.raw_projection(x,defer_bias=True)
-    return prepare_qkv_int8(raw,scales,joint.scales[0],counts,cache,self.qnorm,self.knorm,freqs,start,self.heads,self.eps,x.shape[1],bias=joint.bias)
+    return prepare_qkv_int8(raw,scales,joint.scales[0],counts,cache,self.qnorm,self.knorm,freqs,start,self.heads,self.eps,x.shape[1],
+                            bias=joint.bias,rope_dim=self.rope_dim or 0)
