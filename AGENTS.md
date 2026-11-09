@@ -9,9 +9,10 @@
 
 ## RKLLM benchmark status
 
-**2026-11-10: ChatGLM3-6B decode now beats local RKLLM, bit-exact. Two of the
-three tracked models are qualified in every phase they are measured in. ONE
-MODEL REMAINS: MiniCPM3-4B, behind in both phases — it is the current target.**
+**2026-11-10: ChatGLM3-6B decode beats local RKLLM, bit-exact. Of the three
+tracked models, LFM2.5-VL and ChatGLM3-6B are qualified in every measured phase;
+MiniCPM3-4B decode has reached PARITY and its prefill is the one remaining
+deficit (structurally blocked host-side).**
 
 - **LFM2.5-VL 450M — wins both phases** (oNPU 70.13 ms prefill / 67.59 tok/s
   decode vs local RKLLM 103.70 / 54.58). Do not re-convert or re-benchmark LFM
@@ -24,13 +25,18 @@ MODEL REMAINS: MiniCPM3-4B, behind in both phases — it is the current target.*
   All 64 `generated_ids` are bit-identical on every trial. Do not re-litigate
   ChatGLM decode: the whole 4.7711 → 5.1212 tok/s path is in
   `~/oNPU/progress.md` §0.3–0.4f; the remaining default-OFF levers are margin.
-- **Remaining target: MiniCPM3-4B, both phases.** Best recorded oNPU cohorts:
-  prefill 2300.4–2412.5 ms vs local RKLLM 1461.6 ms (−36…−39%); decode
-  5.309–5.342 vs 5.785 tok/s (−8…−9%). Known budget: MiniCPM3 kernel label sum
-  174.22 ms ≈ RKLLM's whole 174.73 ms (math at parity), harness 185.86 ms so
-  11.6 ms sits outside the labels, and the CPU MLA path is 27.17 ms/token
-  (qk 9.48, pv 9.49, softmax 0.89, projection 7.32). Apply the model-agnostic
-  levers below first — the IOMMU-domain and submit-merge wins should transfer.
+- **MiniCPM3-4B: decode is now at PARITY; prefill is the remaining blocker.**
+  soak-minicpm3-v1 (55 °C cold start, n=3 pairs, 5 trials, 64 tokens, ids
+  bit-exact, gate PASS): oNPU 5.7024 tok/s / 175.37 ms vs RKLLM 5.7880 / 172.77
+  ms, paired median **0.9979 (−0.21%, sd 0.0078)**; within clock buckets oNPU
+  leads (1 GHz +0.10%, 800 MHz +1.90%). Trajectory: recorded 5.3807 → 5.87 tok/s
+  at 1 GHz (+9.1%) via the merge/fast/host-fusion/MLA-retile levers. **Prefill
+  remains −29.4%** (TTFT ratio 0.7059, 2300–2413 ms vs 1461.6) and cannot be
+  closed host-side (measured NPU prefill phase 1486.3 ms alone ≥ RKLLM's whole
+  1461.6 ms); only SDK M128/A16-C4 tiling for k=2560/4096/2304 (multi-week).
+  Optional margin built: `ONPU_MLA_PROJ_BLOCKED=1` (projection −35.5%, TTFT
+  −165…−180 ms, bit-exact, default OFF). Block-order was tried and dropped for
+  MiniCPM3 (already semi-block-major; ambiguous/negative).
 - Fair comparison is W8A8 only: no speculative draft model, no lower precision,
   no changed algorithm basis. "Bit-exact" means identical `generated_ids`, not
   merely close logits.
@@ -57,7 +63,7 @@ MODEL REMAINS: MiniCPM3-4B, behind in both phases — it is the current target.*
 - Pending changes live in worktrees, not the main tree. Merge only after CPU
   goldens pass. Session-3 state: the winning decode stack is committed on branch
   `codex/decode-parity-20261110` (worktree `/home/orangepi/tg-commit`, base
-  `3a1b2e1c9`, 9 commits / 169 files, exported to
+  `3a1b2e1c9`, 10 commits / 170 files, exported to
   `~/oNPU/patches/tg-main-tree-20261110-commits/` and replay-validated); the
   benchmark copy `~/tg-decode-all` carries the same files; the dirty main
   working tree is untouched. Map + evidence:
