@@ -36,6 +36,25 @@ static void project_part(MLAProjection *w,int group,int groups) {
     }
   }
 }
+#if MLA_FP16
+/* Decode-only FP16 accumulation matching RKLLM's captured fmla v*.8h kv_b dot
+   (count 160 = key 96 + value 64); prefill keeps the FP32 sequential-K path. */
+static void project_part_fp16(MLAProjection *w,int group,int groups) {
+  for(int h=group;h<w->heads;h+=groups) {
+    const float *x=w->input+((size_t)h*w->capacity)*w->depth;
+    for(int column=0;column<w->columns;column+=4) {
+      MLAH4 a={0,0,0,0};
+      const __fp16 *weights=w->weight+((size_t)h*w->columns+column)*w->depth;
+      for(int k=0;k<w->depth;k++) {
+        __fp16 value=(__fp16)x[k];
+        a=a+*(const MLAH4*)(weights+(size_t)k*4)*(MLAH4){value,value,value,value};
+      }
+      *(MLA4*)(w->out+((size_t)h*w->capacity)*w->columns+column)=__builtin_convertvector(a,MLA4);
+    }
+  }
+}
+#endif
+
 static void project_worker(void **args,int unused,int group) {
   (void)unused;
   if(group<0||group>=4)__builtin_trap();
@@ -47,6 +66,9 @@ static int mla_project(float *out,const float *input,const __fp16 *weight,
       depth<4||depth>4096||depth%4||columns<4||columns>4096||columns%4)return 1;
   for(size_t i=0;i<(size_t)heads*capacity*columns;i++)out[i]=0;
   MLAProjection work={out,input,weight,heads,capacity,rows,depth,columns};
+#if MLA_FP16
+  if(rows==1&&!parallel){project_part_fp16(&work,0,1);return 0;}
+#endif
   if(!parallel){project_part(&work,0,1);return 0;}
   void *args[4]={&work,0,0,0};
   return ((MLAParallel)parallel)(project_worker,args,0);

@@ -4,11 +4,12 @@
 #define MLA_CAUSAL_WORK 1
 #endif
 typedef float M4 __attribute__((vector_size(16),aligned(1)));
+typedef __fp16 MLAH4 __attribute__((vector_size(8),aligned(1)));
 typedef int (*mla_parallel_fn)(void (*)(void**,int,int),void**,int);
 typedef struct {
   float *out;
-  const float *input,*cache,*packed;
-  int heads,capacity,rows,start,context,width,values,stride;
+  const float *input,*input_rope,*cache,*packed;
+  int heads,capacity,rows,start,context,width,nope,rope,values,stride;
   float scale;
   int done[4];
   int causal_safe;
@@ -31,17 +32,18 @@ static int mla_tail_needed(M4 x) {
 static void mla_qk_part(MLAWork *w,int group,int groups) {
   const int total=w->start+w->rows;
   for(int head=group;head<w->heads;head+=groups)for(int row=0;row<w->rows;row++) {
-    const float *q=w->input+((size_t)head*w->capacity+row)*w->width;
+    const float *q=w->input+((size_t)head*w->capacity+row)*w->nope;
+    const float *qr=w->rope?w->input_rope+((size_t)head*w->capacity+row)*w->rope:q;
     float *out=w->out+((size_t)head*w->capacity+row)*w->stride;
     int end=total;
-    if(w->causal_safe&&mla_causal_safe_values(q,w->width))end=w->start+row+1;
+    if(w->causal_safe&&mla_causal_safe_values(q,w->nope)&&mla_causal_safe_values(qr,w->rope))end=w->start+row+1;
     /* Four independent vectors hide FMA latency; padding avoids power-of-two strides. */
     for(int key=0;key<end;key+=16) {
       M4 sum0={0,0,0,0};
       M4 sum1={0,0,0,0};
       M4 sum2={0,0,0,0};
       M4 sum3={0,0,0,0};
-      for(int c=0;c<w->width;c++) {
+      for(int c=0;c<w->nope;c++) {
         M4 query={q[c],q[c],q[c],q[c]};
         M4 k0=*(const M4*)(w->packed+(size_t)c*(((w->context+15)&~15)+4)+key+0);
         sum0=sum0+query*k0;
@@ -50,6 +52,19 @@ static void mla_qk_part(MLAWork *w,int group,int groups) {
         M4 k2=*(const M4*)(w->packed+(size_t)c*(((w->context+15)&~15)+4)+key+8);
         sum2=sum2+query*k2;
         M4 k3=*(const M4*)(w->packed+(size_t)c*(((w->context+15)&~15)+4)+key+12);
+        sum3=sum3+query*k3;
+      }
+      /* The rope row continues the same sequential c reduction, so feeding it
+         from a second pointer keeps the contiguous-query accumulation bits. */
+      for(int c=0;c<w->rope;c++) {
+        M4 query={qr[c],qr[c],qr[c],qr[c]};
+        M4 k0=*(const M4*)(w->packed+(size_t)(c+w->nope)*(((w->context+15)&~15)+4)+key+0);
+        sum0=sum0+query*k0;
+        M4 k1=*(const M4*)(w->packed+(size_t)(c+w->nope)*(((w->context+15)&~15)+4)+key+4);
+        sum1=sum1+query*k1;
+        M4 k2=*(const M4*)(w->packed+(size_t)(c+w->nope)*(((w->context+15)&~15)+4)+key+8);
+        sum2=sum2+query*k2;
+        M4 k3=*(const M4*)(w->packed+(size_t)(c+w->nope)*(((w->context+15)&~15)+4)+key+12);
         sum3=sum3+query*k3;
       }
       for(int lane=0;lane<4&&key+0+lane<total;lane++)
@@ -80,6 +95,20 @@ static void mla_pv_part(MLAWork *w,int group,int groups) {
         if(p0[r*w->stride+key]!=0.0f){zero_tail=0;break;}
       if(zero_tail)end=candidate;
     }
+#if MLA_FP16
+    if(count==1) {
+      for(int c=0;c<w->values;c+=4) {
+        MLAH4 a={0,0,0,0};
+        for(int key=0;key<end;key++) {
+          MLAH4 value=__builtin_convertvector(*(const M4*)(w->cache+(size_t)key*w->width+c),MLAH4);
+          __fp16 p=(__fp16)p0[key];
+          a=a+value*(MLAH4){p,p,p,p};
+        }
+        *(M4*)(w->out+((size_t)head*w->capacity+row)*w->values+c)=__builtin_convertvector(a,M4);
+      }
+      continue;
+    }
+#endif
     for(int c=0;c<w->values;c+=4) {
       M4 a0={0,0,0,0},a1={0,0,0,0},a2={0,0,0,0},a3={0,0,0,0};
       for(int key=0;key<end;key++) {

@@ -2,10 +2,11 @@
 from tinygrad import Tensor, dtypes
 
 
-def configure_weights(model, enabled:bool=True) -> int:
-  """Realize contiguous FP16 tables once; recreate captures after changing weights."""
+def configure_weights(model, enabled:bool=True, *, materialize:bool=True) -> int:
+  """Validate CPU tables, optionally realizing the contiguous FP16 representation."""
   from tinygrad.llm.model import MLATransformerBlock
   if type(enabled) is not bool:raise ValueError('CPU MLA weight preparation selection must be a bool')
+  if type(materialize) is not bool:raise ValueError('CPU MLA materialization selection must be a bool')
   if not enabled:return 0
   weights:list[Tensor] = []
   for block in getattr(model,'blk',[]):
@@ -22,5 +23,6 @@ def configure_weights(model, enabled:bool=True) -> int:
   if not weights or sum(w.nbytes() for w in weights)>256*1024**2:return 0
   # Keep state-dict tensor identities and values. No derived copies are added
   # to model attributes, so implicit function arguments cannot retain them.
-  for weight in weights:weight.replace(weight.contiguous().realize())
+  if materialize:
+    for weight in weights:weight.replace(weight.contiguous().realize())
   return len(weights)
