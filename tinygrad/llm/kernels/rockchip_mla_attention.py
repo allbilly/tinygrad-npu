@@ -25,6 +25,10 @@ ONPU_MLA_HEAD_BLOCK = ContextVar('ONPU_MLA_HEAD_BLOCK',0)
 # in a small local buffer, removing the 13 MB score write + read + memset per
 # layer while producing bit-identical probabilities.
 ONPU_MLA_QK_SOFTMAX = ContextVar('ONPU_MLA_QK_SOFTMAX',0)
+# Opt-in (default 0): additionally fuse the weighted value into the same prefill
+# kernel, so the probability matrix never reaches memory either (13 MB write +
+# read per layer removed). Same exact pv accumulation/shortcut/tail guard.
+ONPU_MLA_FUSED_ATTN = ContextVar('ONPU_MLA_FUSED_ATTN',0)
 
 
 @functools.cache
@@ -63,8 +67,8 @@ void {name}({args}) {{
 @functools.cache
 def _fused_program(out:UOp, inp:UOp, rope_inp:UOp, cache:UOp, start:UOp, rows:UOp, heads:int, capacity:int,
                    context:int, width:int, rope_width:int, values:int, stride:int, scale:float, pool:int|None,
-                   causal_work:bool=True, head_block:int=0) -> UOp:
-  name='rockchip_cpu_mla_qk_softmax'
+                   causal_work:bool=True, head_block:int=0, pv:bool=False) -> UOp:
+  name='rockchip_cpu_mla_fused_attn' if pv else 'rockchip_cpu_mla_qk_softmax'
   pstride=((context+15)//16*16+4)
   scratch=('float packed['+str(width*pstride)+'] __attribute__((aligned(16)));\n'
            '  for(int c=0;c<'+str(width)+';c++) {\n'
@@ -80,9 +84,10 @@ def _fused_program(out:UOp, inp:UOp, rope_inp:UOp, cache:UOp, start:UOp, rows:UO
              +float(scale).hex()+'f,{0,0,0,0}};')
   body=('void '+name+'('+args+') {\n'
         '  if(*start<0||*rows<1||*rows>'+str(capacity)+'||*start+*rows>'+str(context)+')__builtin_trap();\n'
-        '  '+scratch+'\n'
+        + ('  for(unsigned long i=0;i<'+str(heads*capacity*values)+'UL;i++)out[i]=0;\n' if pv else '')
+        + '  '+scratch+'\n'
         '  '+work_init+'\n'
-        '  mla_execute_qk_softmax(&work,(mla_parallel_fn)'+(str(pool or 0))+'ULL);\n'
+        '  mla_execute_qk_softmax(&work,(mla_parallel_fn)'+(str(pool or 0))+'ULL,'+('1' if pv else '0')+');\n'
         '}\n')
   source=(f'#define MLA_CAUSAL_WORK {int(causal_work)}\n#define MLA_FP16 0\n#define MLA_HEAD_BLOCK {int(head_block)}\n#define MLA_FUSED_QK_SOFTMAX 1\n'
           +_vector_exp2_source()+Path(__file__).with_suffix('.c').read_text()+body)
@@ -111,6 +116,7 @@ class MLAAttention:
     self.causal_work=bool(getenv('ONPU_MLA_CAUSAL_WORK',1))
     self.fused_softmax=bool(ONPU_MLA_FUSED_SOFTMAX)
     self.qk_softmax=bool(ONPU_MLA_QK_SOFTMAX) and (heads,context,width,values)==(40,512,288,256)
+    self.fused_attn=bool(ONPU_MLA_FUSED_ATTN) and (heads,context,width,values)==(40,512,288,256)
     self._pool=lambda:pool  # Keep worker-library internals out of state-dict walks.
 
   def _validate(self, x:Tensor, cache:Tensor, start:int|UOp, rope:Tensor|None=None):
@@ -170,6 +176,34 @@ class MLAAttention:
                                       self.scale,address,qk,self.causal_work,fp16,head_block))[0]
     logical=out.shrink(((0,1),(0,self.heads),(0,rows),(0,start+rows if qk else self.values)))
     return mark_zero_tail(logical,out,'mla_scores' if qk else 'mla_context') if self.fused_softmax else logical
+
+  def query_key_softmax_value(self, query:Tensor, cache:Tensor, start:int|UOp, *, rope:Tensor|None=None) -> Tensor:
+    """Fused prefill qk + exact softmax + weighted value: returns the context the
+    three-kernel path would produce, with no score or probability buffer traffic."""
+    if not self.fused_attn:raise ValueError('Fused MLA attention is not enabled for this geometry')
+    rows,capacity=self._validate(query,cache,start,rope)
+    if capacity<2:raise ValueError('Fused MLA attention is a prefill path')
+    rope_width=0 if rope is None else rope.shape[-1]
+    assert isinstance(rope_width,int)
+    stride=self.context+capacity-1
+    dense=capacity_input(query).contiguous()
+    dense_rope=None if rope is None else capacity_input(rope).contiguous()
+    position=Tensor(start,device='CPU',dtype=dtypes.int).reshape(1).clone()
+    count=Tensor(rows,device='CPU',dtype=dtypes.int).reshape(1).clone()
+    pool=self._pool()
+    address=pool.prefill_address if pool is not None and pool.active and self.heads>=4 else None
+    head_block=int(ONPU_MLA_HEAD_BLOCK.value)
+    head_block=4 if head_block else 0
+    out=Tensor.empty(1,self.heads,capacity,self.values,device='CPU',dtype=dtypes.float)
+    if dense_rope is None:
+      full=out.custom_kernel(dense,cache,position,count,fxn=lambda o,a,k,s,n:_fused_program(
+        o,a,a,k,s,n,self.heads,capacity,self.context,self.width,0,self.values,stride,self.scale,address,
+        self.causal_work,head_block,True))[0]
+    else:
+      full=out.custom_kernel(dense,dense_rope,cache,position,count,fxn=lambda o,a,r,k,s,n:_fused_program(
+        o,a,r,k,s,n,self.heads,capacity,self.context,self.width,rope_width,self.values,stride,self.scale,address,
+        self.causal_work,head_block,True))[0]
+    return mark_zero_tail(full[:,:,:rows,:],full,'mla_fused_attn')
 
   def softmax(self, scores:Tensor, start:int|UOp) -> Tensor:
     if not self.fused_softmax or self.heads!=40 or self.context!=512 or self.width!=288 or self.values!=256:

@@ -13,6 +13,7 @@ typedef struct {
   float scale;
   int done[4];
   int causal_safe;
+  int fused_pv;
 } MLAWork;
 
 /* Restrict the shortcut to a range that cannot overflow a width<=512 dot
@@ -355,6 +356,43 @@ static void mla_pv_single_rows(MLAWork *w,int head) {
     }
   }
 }
+/* One shared implementation of the four-head weighted-value row: both the
+   reference pv kernel and the fused qk+softmax+value kernel call it, so the
+   floating-point operation order is identical by construction. */
+static __attribute__((noinline)) void mla_pv_row4(MLAWork *w,const float *p0,const float *p1,
+    const float *p2,const float *p3,float *o0,float *o1,float *o2,float *o3,int row) {
+  const int total=w->start+w->rows;
+  int end=total;
+  if(w->causal_safe&&w->start+row+1<total) {
+    int candidate=w->start+row+1,zero_tail=1;
+    for(int key=candidate;key<total&&zero_tail;key++) {
+      if(p0[key]!=0.0f||p1[key]!=0.0f||p2[key]!=0.0f||p3[key]!=0.0f)zero_tail=0;
+    }
+    if(zero_tail)end=candidate;
+  }
+  for(int c=0;c<w->values;c+=4) {
+    M4 a0={0,0,0,0},a1={0,0,0,0},a2={0,0,0,0},a3={0,0,0,0};
+    for(int key=0;key<end;key++) {
+      M4 value=*(const M4*)(w->cache+(size_t)key*w->width+c);
+      float p;M4 b;
+      p=p0[key];b=(M4){p,p,p,p};a0=a0+b*value;
+      p=p1[key];b=(M4){p,p,p,p};a1=a1+b*value;
+      p=p2[key];b=(M4){p,p,p,p};a2=a2+b*value;
+      p=p3[key];b=(M4){p,p,p,p};a3=a3+b*value;
+    }
+    if(end<total&&(mla_tail_needed(a0)||mla_tail_needed(a1)||mla_tail_needed(a2)||mla_tail_needed(a3))) {
+      for(int key=end;key<total;key++) {
+        M4 value=*(const M4*)(w->cache+(size_t)key*w->width+c);
+        float p;M4 b;
+        p=p0[key];b=(M4){p,p,p,p};a0=a0+b*value;
+        p=p1[key];b=(M4){p,p,p,p};a1=a1+b*value;
+        p=p2[key];b=(M4){p,p,p,p};a2=a2+b*value;
+        p=p3[key];b=(M4){p,p,p,p};a3=a3+b*value;
+      }
+    }
+    *(M4*)(o0+c)=a0;*(M4*)(o1+c)=a1;*(M4*)(o2+c)=a2;*(M4*)(o3+c)=a3;
+  }
+}
 static void mla_pv_part_hb_rows(MLAWork *w,int group,int groups) {
   const int HB=MLA_HB;const int total=w->start+w->rows;
   const int nblocks=(w->heads+HB-1)/HB;
@@ -369,42 +407,9 @@ static void mla_pv_part_hb_rows(MLAWork *w,int group,int groups) {
     float *oh1=w->out+(size_t)(hb+1)*w->capacity*w->values;
     float *oh2=w->out+(size_t)(hb+2)*w->capacity*w->values;
     float *oh3=w->out+(size_t)(hb+3)*w->capacity*w->values;
-    for(int row=0;row<w->rows;row++) {
-      const float *p0=ph0+(size_t)row*w->stride,*p1=ph1+(size_t)row*w->stride;
-      const float *p2=ph2+(size_t)row*w->stride,*p3=ph3+(size_t)row*w->stride;
-      float *o0=oh0+(size_t)row*w->values,*o1=oh1+(size_t)row*w->values;
-      float *o2=oh2+(size_t)row*w->values,*o3=oh3+(size_t)row*w->values;
-      int end=total;
-      if(w->causal_safe&&w->start+row+1<total) {
-        int candidate=w->start+row+1,zero_tail=1;
-        for(int key=candidate;key<total&&zero_tail;key++) {
-          if(p0[key]!=0.0f||p1[key]!=0.0f||p2[key]!=0.0f||p3[key]!=0.0f)zero_tail=0;
-        }
-        if(zero_tail)end=candidate;
-      }
-      for(int c=0;c<w->values;c+=4) {
-        M4 a0={0,0,0,0},a1={0,0,0,0},a2={0,0,0,0},a3={0,0,0,0};
-        for(int key=0;key<end;key++) {
-          M4 value=*(const M4*)(w->cache+(size_t)key*w->width+c);
-          float p;M4 b;
-          p=p0[key];b=(M4){p,p,p,p};a0=a0+b*value;
-          p=p1[key];b=(M4){p,p,p,p};a1=a1+b*value;
-          p=p2[key];b=(M4){p,p,p,p};a2=a2+b*value;
-          p=p3[key];b=(M4){p,p,p,p};a3=a3+b*value;
-        }
-        if(end<total&&(mla_tail_needed(a0)||mla_tail_needed(a1)||mla_tail_needed(a2)||mla_tail_needed(a3))) {
-          for(int key=end;key<total;key++) {
-            M4 value=*(const M4*)(w->cache+(size_t)key*w->width+c);
-            float p;M4 b;
-            p=p0[key];b=(M4){p,p,p,p};a0=a0+b*value;
-            p=p1[key];b=(M4){p,p,p,p};a1=a1+b*value;
-            p=p2[key];b=(M4){p,p,p,p};a2=a2+b*value;
-            p=p3[key];b=(M4){p,p,p,p};a3=a3+b*value;
-          }
-        }
-        *(M4*)(o0+c)=a0;*(M4*)(o1+c)=a1;*(M4*)(o2+c)=a2;*(M4*)(o3+c)=a3;
-      }
-    }
+    for(int row=0;row<w->rows;row++) mla_pv_row4(w,
+      ph0+(size_t)row*w->stride,ph1+(size_t)row*w->stride,ph2+(size_t)row*w->stride,ph3+(size_t)row*w->stride,
+      oh0+(size_t)row*w->values,oh1+(size_t)row*w->values,oh2+(size_t)row*w->values,oh3+(size_t)row*w->values,row);
   }
 }
 static void mla_pv_part_hb(MLAWork *w,int group,int groups) {
@@ -456,7 +461,7 @@ static void mla_pv_part_hb(MLAWork *w,int group,int groups) {
    accumulation (causal end, ascending c), the -inf causal mask, the sequential
    max/sum and the vector exp2 polynomial are reproduced exactly, so the
    probabilities are bit-identical to running the two reference kernels. */
-static void mla_qk_softmax_part(MLAWork *w,int group,int groups) {
+static void mla_qk_softmax_part(MLAWork *w,int group,int groups,int pv) {
   const int total=w->start+w->rows;
   const int pstride=((w->context+15)&~15)+4;
   float sc[4][1024];
@@ -520,7 +525,6 @@ static void mla_qk_softmax_part(MLAWork *w,int group,int groups) {
       }
       for(int key=(end+15)&~15;key<total;key++)for(int h=0;h<nh;h++)sc[h][key]=-__builtin_inff();
       for(int h=0;h<nh;h++) {
-        float *out=w->out+((size_t)(hb+h)*w->capacity+row)*w->stride;
         float maximum=-__builtin_inff();
         for(int k=0;k<total;k++)if(maximum<sc[h][k])maximum=sc[h][k];
         float sum=0.0f;
@@ -529,16 +533,45 @@ static void mla_qk_softmax_part(MLAWork *w,int group,int groups) {
           float4 x={sc[h][k],sc[h][k+1],sc[h][k+2],sc[h][k+3]};
           x=(x-(float4)maximum)*(float4)1.4426950216293335f;
           float4 e=rockchip_exp2_vector(x);
-          out[k]=e[0];out[k+1]=e[1];out[k+2]=e[2];out[k+3]=e[3];
+          sc[h][k]=e[0];sc[h][k+1]=e[1];sc[h][k+2]=e[2];sc[h][k+3]=e[3];
           sum+=e[0];sum+=e[1];sum+=e[2];sum+=e[3];
         }
         for(;k<total;k++) {
           float x=(sc[h][k]-maximum)*1.4426950216293335f;
           float4 e4=rockchip_exp2_vector((float4){x,x,x,x});
-          out[k]=e4[0];sum+=e4[0];
+          sc[h][k]=e4[0];sum+=e4[0];
         }
-        for(k=0;k<total;k++)out[k]/=sum;
-        for(;k<w->stride;k++)out[k]=0.0f;
+        for(k=0;k<total;k++)sc[h][k]/=sum;
+        if(!pv) {
+          float *po=w->out+((size_t)(hb+h)*w->capacity+row)*w->stride;
+          for(k=0;k<total;k++)po[k]=sc[h][k];
+          for(;k<w->stride;k++)po[k]=0.0f;
+        }
+      }
+      if(pv&&nh==4) {
+        mla_pv_row4(w,sc[0],sc[1],sc[2],sc[3],
+          w->out+((size_t)(hb+0)*w->capacity+row)*w->values,
+          w->out+((size_t)(hb+1)*w->capacity+row)*w->values,
+          w->out+((size_t)(hb+2)*w->capacity+row)*w->values,
+          w->out+((size_t)(hb+3)*w->capacity+row)*w->values,row);
+      } else if(pv) {
+        for(int h=0;h<nh;h++) {
+          float *o=w->out+((size_t)(hb+h)*w->capacity+row)*w->values;
+          int pvend=total;
+          if(w->causal_safe&&w->start+row+1<total) {
+            int candidate=w->start+row+1,zero=1;
+            for(int key=candidate;key<total;key++)if(sc[h][key]!=0.0f){zero=0;break;}
+            if(zero)pvend=candidate;
+          }
+          for(int c=0;c<w->values;c+=4) {
+            M4 a={0,0,0,0};
+            for(int key=0;key<pvend;key++) {
+              M4 value=*(const M4*)(w->cache+(size_t)key*w->width+c);
+              float p=sc[h][key];a=a+(M4){p,p,p,p}*value;
+            }
+            *(M4*)(o+c)=a;
+          }
+        }
       }
     }
   }
@@ -565,14 +598,15 @@ static void mla_pv_worker(void **args,int unused,int group) {
 #ifdef MLA_FUSED_QK_SOFTMAX
 static void mla_qk_softmax_worker(void **args,int unused,int group) {
   (void)unused;MLAWork *w=args[0];if(group<0||group>=4)return;
-  mla_qk_softmax_part(w,group,4);
+  mla_qk_softmax_part(w,group,4,w->fused_pv);
   w->done[group]=1;
 }
-static void mla_execute_qk_softmax(MLAWork *w,mla_parallel_fn parallel) {
+static void mla_execute_qk_softmax(MLAWork *w,mla_parallel_fn parallel,int pv) {
   if(w->start<0||w->rows<1||w->rows>w->capacity||w->start+w->rows>w->context)__builtin_trap();
   w->causal_safe=MLA_CAUSAL_WORK&&w->capacity>1&&w->scale>0.0f&&w->scale<=1024.0f&&
     mla_causal_safe_values(w->cache,(size_t)(w->start+w->rows)*w->width);
-  if(!parallel){mla_qk_softmax_part(w,0,1);return;}
+  w->fused_pv=pv;
+  if(!parallel){mla_qk_softmax_part(w,0,1,pv);return;}
   void *args[4]={w,0,0,0};
   if(parallel(mla_qk_softmax_worker,args,0))__builtin_trap();
   for(int i=0;i<4;i++)if(!w->done[i])__builtin_trap();

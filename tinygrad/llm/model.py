@@ -468,19 +468,23 @@ class MLATransformerBlock(FFNBlock):
     v = k[..., :self.config.kv_lora_rank]
 
     mla = getattr(self,'cpu_mla_attention',None)
-    fused_qk_softmax = (mla is not None and getattr(mla,'qk_softmax',False) and int(q_nope.max_shape[2])>1
-                        and not getenv('ONPU_MLA_LEGACY_Q',0))
-    if mla is not None and fused_qk_softmax:
-      attn = mla.query_key_softmax(q_nope,cache,start_pos,rope=q_rope)
+    fused_prefill = (mla is not None and int(q_nope.max_shape[2])>1 and not getenv('ONPU_MLA_LEGACY_Q',0))
+    fused_attn = fused_prefill and getattr(mla,'fused_attn',False)
+    fused_qk_softmax = fused_prefill and getattr(mla,'qk_softmax',False)
+    if fused_attn:
+      context = mla.query_key_softmax_value(q_nope,cache,start_pos,rope=q_rope)
     else:
-      if mla is not None:
-        if getenv('ONPU_MLA_LEGACY_Q',0): attn = mla.query_key(q_nope.cat(q_rope,dim=-1),cache,start_pos)
-        else: attn = mla.query_key(q_nope,cache,start_pos,rope=q_rope)
+      if mla is not None and fused_qk_softmax:
+        attn = mla.query_key_softmax(q_nope,cache,start_pos,rope=q_rope)
       else:
-        attn = q_nope.cat(q_rope, dim=-1) @ k.transpose(-1, -2) * (1.0 / self.config.head_dim ** 0.5)
-        if (mask:=self._attn_mask(x, start_pos)) is not None: attn = attn + mask
-      attn = mla.softmax(attn,start_pos) if mla is not None else attn.softmax(-1)
-    context = mla.weighted_value(attn,cache,start_pos) if mla is not None else attn @ v
+        if mla is not None:
+          if getenv('ONPU_MLA_LEGACY_Q',0): attn = mla.query_key(q_nope.cat(q_rope,dim=-1),cache,start_pos)
+          else: attn = mla.query_key(q_nope,cache,start_pos,rope=q_rope)
+        else:
+          attn = q_nope.cat(q_rope, dim=-1) @ k.transpose(-1, -2) * (1.0 / self.config.head_dim ** 0.5)
+          if (mask:=self._attn_mask(x, start_pos)) is not None: attn = attn + mask
+        attn = mla.softmax(attn,start_pos) if mla is not None else attn.softmax(-1)
+      context = mla.weighted_value(attn,cache,start_pos) if mla is not None else attn @ v
     attn = (projections.value(context) if projections is not None else context @ self.attn_v_b["weight"].transpose(-1, -2)).transpose(
       1, 2).reshape(B, T, -1)
     return self.attn_output(attn)
