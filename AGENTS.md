@@ -35,19 +35,21 @@ deficit (structurally blocked host-side).**
   latent cache once per head (40×); loading it once for 4 heads with 16/8
   explicit accumulators keeps each output's ascending-c/key order (bit-exact),
   cutting qk 8.09→7.46 and pv 8.07→4.11 ms/token (CPU total 29.67→25.12). **Prefill
-  remains ≈−19%** (measured TTFT ratio ~0.78-0.81 in the latest runs; the older
-  parity config read −29.4%) and is *host-bound on the current stack*: the
-  native prefill NPU phase is only ~462 ms, while CPU MLA (qk 287 + pv 288 +
-  projection 255 + softmax 120 ms), other host (~430 ms) and copies (~51 ms)
-  dominate the ~1852 ms TTFT. Head-blocked MLA already cut it −3.4%; the
-  remaining ~−300 ms is ranked in
-  `~/oNPU/analysis/minicpm3/prefill/PREFILL_DECOMPOSITION_CURRENT.md` (softmax,
-  projection blocking, E_* labels, swiglu/quant fusions, copies). SDK
+  is ≈−18%** (TTFT **1799.5/1799.3 ms** after the qk+softmax fusion; trajectory
+  2407 recorded → 1850 → 1799) and is *host-bound on the current stack*: the
+  native prefill NPU phase is only ~462 ms (and empirically at a local optimum —
+  a 128-row K-split variant was bit-exact but 150 ms slower), while CPU MLA
+  (qk+softmax now fused at 346 ms, pv 292, projection 256), other host
+  (~430 ms) and copies dominate. **New lever: `ONPU_MLA_QK_SOFTMAX=1`** fuses
+  the prefill qk and the exact softmax into one kernel, so the padded 13 MB FP32
+  score buffer is never materialised; measured −59 ms on the pair, TTFT −2.8%
+  (1850.5→1799.5), bit-exact (verified at rows 128/64/3 against the two-kernel
+  path; decode untouched). Other default-OFF margin: `ONPU_MLA_PROJ_BLOCKED=1`
+  (projection −35.5%) and `ONPU_MLA_HEAD_BLOCK=4` (decode kernels above + the
+  prefill rows path that cut TTFT −3.4%). Next prefill targets are ranked in
+  `~/oNPU/analysis/minicpm3/prefill/PREFILL_DECOMPOSITION_CURRENT.md` (fuse pv
+  into the same kernel, E_* layout folding, padded-score-stride change); SDK
   M128/A16-C4 tiling would still be needed for the NPU phase itself.
-  Optional margin built: `ONPU_MLA_PROJ_BLOCKED=1` (projection −35.5%, TTFT
-  −165…−180 ms, bit-exact, default OFF) and `ONPU_MLA_HEAD_BLOCK=4` (decode
-  kernels above; prefill TTFT ratio improved to 0.78). Block-order was tried and
-  dropped for MiniCPM3 (already semi-block-major; ambiguous/negative).
 - Fair comparison is W8A8 only: no speculative draft model, no lower precision,
   no changed algorithm basis. "Bit-exact" means identical `generated_ids`, not
   merely close logits.
