@@ -444,6 +444,18 @@ class NativeReplay:
       label = (f'{call.device}:{call.body.src[0].arg.function_name}' if call.body.op is Ops.PROGRAM else
                f'COPY:{call.src[2].device}->{call.src[1].device}')
       self.labels.append(label)
+      if dump_path := os.getenv('ONPU_REPLAY_DUMP_DTYPES'):
+        # Map opaque replay labels (E_*/r_*) back to their tensors: one JSONL row
+        # per captured call with its input dtypes/shapes/numels. Opt-in only.
+        info={'label':label,'ins':[]}
+        for u in call.src[1:]:
+          try:
+            ins=info['ins']
+            ins.append({'dtype':getattr(u.dtype,'name',str(u.dtype)),'shape':str(u.shape),
+                        'numel':u.numel() if hasattr(u,'numel') else None})
+          except Exception as exc: info['ins'].append({'err':str(exc)})
+        with open(dump_path,'a') as f:
+          f.write(json.dumps(info)+'\n')
       if self.profiling:
         self.statements[start:] = ['{U64 begin=now();']+self.statements[start:]+[f'stats[{index+2}]=now()-begin;}}']
     self._finalize_merged_submits()
