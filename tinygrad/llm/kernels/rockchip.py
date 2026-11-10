@@ -14,6 +14,12 @@ from tinygrad.uop.ops import KernelInfo, Ops, ProgramInfo, UOp, resolve
 
 
 ONPU_CPU_RMS_ALL_ROWS = ContextVar('ONPU_CPU_RMS_ALL_ROWS',0)
+# `ONPU_CPU_RMS_ALL_ROWS` only routes a one-token decode norm through the dedicated CPU
+# kernel when the width is 4096 (ChatGLM). Other models (MiniCPM3: width 2560) fall back
+# to tinygrad's generic elementwise decomposition at decode, which costs ~5.9 us more per
+# norm. This opt-in extends the dedicated kernel to every 4-aligned width; its exact decode
+# arithmetic is bit-identical to the generic decomposition (verified at 2560, fp16 weights).
+ONPU_CPU_RMS_ALL_WIDTHS = ContextVar('ONPU_CPU_RMS_ALL_WIDTHS',0)
 # One-token decode may reuse the prepared QKV graph (one host kernel for INT8
 # dequantize + rotary + KV-cache store) instead of the generic elementwise graph
 # that launches a separate dequantize, query-rotary and key/value-store kernel
@@ -296,11 +302,23 @@ class RockchipProjections:
 
 
 class RockchipRMSNorm:
-  def __init__(self, source:nn.RMSNorm): self.source,self.weight,self.eps = source,source.weight,source.eps
+  def __init__(self, source:nn.RMSNorm):
+    self.source,self.weight,self.eps = source,source.weight,source.eps
+    # Deferred/mapped weights arrive as lazy cast chains. Realizing the norm weight here
+    # keeps that cast out of the captured decode graph, where it would otherwise run on
+    # every token as a weight-only kernel at the graph head (0.155 ms/token).
+    from tinygrad.llm.kernels.rockchip_cpu import ONPU_HOST_REALIZE_NORM_WEIGHTS
+    if ONPU_HOST_REALIZE_NORM_WEIGHTS and self.weight is not None and self.weight.device=='CPU':
+      self.weight = self.weight.contiguous().realize()
 
   def __call__(self, x:Tensor) -> Tensor:
+    width = x.max_shape[-1]
+    # Decode (one row) must be routed to the dedicated exact kernel; `ONPU_CPU_RMS_ALL_ROWS`
+    # alone only covered ChatGLM's 4096, so other models ran the generic decomposition.
+    decode_width_ok = (width==4096
+                       or (ONPU_CPU_RMS_ALL_WIDTHS and isinstance(width,int) and 4<=width<=8192 and width%4==0))
     if (x.device=='CPU' and x.dtype is dtypes.float
-        and (math.prod(x.max_shape[:-1])>=16 or ONPU_CPU_RMS_ALL_ROWS and x.max_shape[-1]==4096)
+        and (math.prod(x.max_shape[:-1])>=16 or ONPU_CPU_RMS_ALL_ROWS and decode_width_ok)
         and self.weight is not None and self.weight.device=='CPU' and self.weight.dtype in (dtypes.float,dtypes.half)
         and 4<=x.max_shape[-1]<=8192 and x.max_shape[-1]%4==0):
       from tinygrad.llm.kernels.rockchip_cpu import rms_norm

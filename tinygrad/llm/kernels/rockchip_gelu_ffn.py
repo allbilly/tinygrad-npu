@@ -28,6 +28,16 @@ ONPU_WIDE_RAW_SWIGLU = ContextVar('ONPU_WIDE_RAW_SWIGLU',0)
 # raw INT32 dots and writes the down payload straight from the pack kernel.
 # Default off: the decode route is selected only when the caller asks for it.
 ONPU_WIDE_RAW_SWIGLU_DECODE = ContextVar('ONPU_WIDE_RAW_SWIGLU_DECODE',0)
+# Decode-only: merge the grouped-down and tail-down INT32 dequantization with the K-group
+# summation into ONE kernel, instead of 2 dequant launches plus 3 elementwise adds per
+# layer. Per-element arithmetic and the summation order (((g0+g1)+g2)+tail) are unchanged.
+# Default off; only used by the wide raw decode route with an exactly-four-part down.
+ONPU_FFN_DOWN_MERGE = ContextVar('ONPU_FFN_DOWN_MERGE',0)
+# Extend the pack's K-group worker split to the narrow (single-tile) raw decode route.
+# ChatGLM's wide route is already opted in by ONPU_WIDE_RAW_SWIGLU_DECODE; MiniCPM3's
+# 12800-column joint takes the narrow route (fused_swiglu_decode), so it needs this flag.
+# The split is bit-exact for any group count <= the pool width and is gated off by default.
+ONPU_FFN_GROUP_POOL_ALL = ContextVar('ONPU_FFN_GROUP_POOL_ALL',0)
 _batched_pack_traces = 0
 
 
@@ -424,9 +434,10 @@ def _program(out:UOp, raw:tuple[UOp,...], sa:tuple[UOp,...], sw:UOp, active:UOp,
   # independent K group instead: each group owns its own FP32 range reduction, so the
   # scales and codes are bit-identical to the serial pass and no reduction crosses a
   # worker. Requires exactly four groups to fill the four-worker pool.
-  if group_pool is not None and not parallel and len(loops)==4:
+  if group_pool is not None and not parallel and 2<=len(loops)<=4:
+    # One worker per independent K group; workers beyond the group count return at once.
     group_calls=' '.join(f'{"else " if index else ""}if(group=={index})part_g{index}(w->out,w->raw,w->sa,'
-                         f'w->sw,w->scales,w->active,0,{rows});' for index in range(4))
+                         f'w->sw,w->scales,w->active,0,{rows});' for index in range(len(loops)))
     declarations+=f'''typedef struct {{unsigned char *out;const int *const *raw;const float *const *sa;
       const float *sw;float *scales;int active;}} GroupWork;
     static void pool_group_part(void **args,int unused,int group) {{
@@ -495,7 +506,7 @@ def _pack_projection(raw:list[Tensor], sa:list[Tensor], sw:Tensor, tiles:list[Pr
   # Decode has one active row, so it cannot fill the pool by row; hand it the group split.
   # Only the opted-in wide decode route passes decode_pool=True, so with every new flag off
   # the dispatch below is exactly the pristine one (no pool address is baked into the kernel).
-  group_address=(pool.address if decode_pool and pool is not None and pool.active and rows<16 and len(depths)==4
+  group_address=(pool.address if decode_pool and pool is not None and pool.active and rows<16 and 2<=len(depths)<=4
                  and getenv('ONPU_SWIGLU_GROUP_POOL',1) else None)
   layout=payload_layout(rows,depths,grouped)
   count=Tensor(active_rows,device='CPU',dtype=dtypes.int).reshape(1).clone()
@@ -562,6 +573,101 @@ def wide_swiglu_supported(joint:RockchipLinear, down:RockchipInt8Linear) -> bool
           and tuple(p.depth for p in down.parts)==(4096,4096,4096,1408)
           and tuple(p.shape for p in joint.packed)==((768,128,32,32),(88,128,32,32))
           and tuple(p.shape for p in joint.scales)==((24576,),(2816,)))
+
+
+@functools.cache
+def _down_merge_program(out:UOp, grouped_raw:UOp, activation_scales:UOp, grouped_weight_scales:UOp,
+                        tail_raw:UOp, tail_weight_scales:UOp, columns:int, padded:int) -> UOp:
+  """One kernel: grouped dequant, tail dequant and the K-group sums for decode ffn_down."""
+  text=f'''typedef float float4 __attribute__((aligned(16),ext_vector_type(4)));
+  typedef int int4 __attribute__((aligned(16),ext_vector_type(4)));
+  void rockchip_ffn_down_merge(float *out,const int *grouped_raw,const float *sa,const float *grouped_sw,
+                               const int *tail_raw,const float *tail_sw) {{
+    for(int c=0;c<{columns};c+=4) {{
+      float4 g0=__builtin_convertvector(*(const int4*)(grouped_raw+c),float4);
+      float4 g1=__builtin_convertvector(*(const int4*)(grouped_raw+{padded}+c),float4);
+      float4 g2=__builtin_convertvector(*(const int4*)(grouped_raw+2*{padded}+c),float4);
+      float4 gt=__builtin_convertvector(*(const int4*)(tail_raw+c),float4);
+      // Each dequantized value is a separate statement so it is rounded in FP32 before the
+      // ordered summation, exactly like the two standing dequantize kernels: no multiply is
+      // in the same expression as an add, so clang cannot contract one into the other.
+      float4 v0=(g0*(float4)sa[0])*(*(const float4*)(grouped_sw+c));
+      float4 v1=(g1*(float4)sa[1])*(*(const float4*)(grouped_sw+{padded}+c));
+      float4 v2=(g2*(float4)sa[2])*(*(const float4*)(grouped_sw+2*{padded}+c));
+      float4 vt=(gt*(float4)sa[3])*(*(const float4*)(tail_sw+c));
+      float4 sum=(v0+v1)+v2;
+      *(float4*)(out+c)=sum+vt;
+    }}
+  }}'''
+  inputs=(out,grouped_raw,activation_scales,grouped_weight_scales,tail_raw,tail_weight_scales)
+  sink=UOp.sink(*inputs,arg=KernelInfo('rockchip_ffn_down_merge'))
+  renderer=_renderer()
+  info=replace(ProgramInfo.from_sink(sink,renderer.target),outs=(0,),ins=(1,2,3,4,5))
+  return UOp(Ops.PROGRAM,arg=info,src=(sink,UOp(Ops.LINEAR,src=inputs),UOp(Ops.SOURCE,arg=text),
+                                     UOp(Ops.BINARY,arg=renderer.compiler.compile_cached(text))))
+
+
+def _down_merge(grouped_raw:Tensor, activation_scales:Tensor, grouped_weight_scales:Tensor,
+                tail_raw:Tensor, tail_weight_scales:Tensor, columns:int, padded:int) -> Tensor:
+  """Bit-exact merge of the two decode ffn_down dequantizers and the K-group sums."""
+  rows = 4
+  if (grouped_raw.device!='CPU' or grouped_raw.dtype is not dtypes.int32 or grouped_raw.numel()!=3*padded
+      or tail_raw.device!='CPU' or tail_raw.dtype is not dtypes.int32 or tail_raw.numel()!=columns
+      or activation_scales.device!='CPU' or activation_scales.dtype is not dtypes.float or activation_scales.numel()<rows
+      or grouped_weight_scales.device!='CPU' or grouped_weight_scales.dtype is not dtypes.float
+      or grouped_weight_scales.shape!=(3,padded)
+      or tail_weight_scales.device!='CPU' or tail_weight_scales.dtype is not dtypes.float or tail_weight_scales.shape!=(columns,)
+      or columns%4 or columns>padded):
+    raise ValueError('Unsupported fused ffn_down dequantization layout')
+  return Tensor.empty(1,columns,device='CPU',dtype=dtypes.float).custom_kernel(
+    grouped_raw.reshape(-1).contiguous(),activation_scales.contiguous(),grouped_weight_scales.contiguous(),
+    tail_raw.reshape(-1).contiguous(),tail_weight_scales.contiguous(),
+    fxn=lambda o,g,a,w,t,tw:_down_merge_program(o,g,a,w,t,tw,columns,padded))[0]
+
+
+@functools.cache
+def _down_merge_parts_program(out:UOp, raws:tuple[UOp,...], activation_scales:UOp, sws:tuple[UOp,...],
+                              columns:int) -> UOp:
+  """One kernel for the narrow (un-grouped) ffn_down: N part dequantizers plus their sums."""
+  parts=len(raws)
+  if not 2<=parts<=3:raise ValueError('Unsupported fused ffn_down part count')
+  graw=','.join(f'const int *r{i}' for i in range(parts))
+  gsw=','.join(f'const float *w{i}' for i in range(parts))
+  loads=' '.join(f'float4 g{i}=__builtin_convertvector(*(const int4*)(r{i}+c),float4);' for i in range(parts))
+  # Each dequantized value is its own statement, so it rounds in FP32 before the ordered
+  # sum and no multiply is contracted into an add.
+  values=' '.join(f'float4 v{i}=(g{i}*(float4)sa[{i}])*(*(const float4*)(w{i}+c));' for i in range(parts))
+  summation='float4 sum=v0;'+' '.join(f'sum=sum+v{i};' for i in range(1,parts))
+  text=f'''typedef float float4 __attribute__((aligned(16),ext_vector_type(4)));
+  typedef int int4 __attribute__((aligned(16),ext_vector_type(4)));
+  void rockchip_ffn_down_merge_parts(float *out,{graw},const float *sa,{gsw}) {{
+    for(int c=0;c<{columns};c+=4) {{
+      {loads}
+      {values}
+      {summation}
+      *(float4*)(out+c)=sum;
+    }}
+  }}'''
+  inputs=(out,*raws,activation_scales,*sws)
+  sink=UOp.sink(*inputs,arg=KernelInfo('rockchip_ffn_down_merge_parts'))
+  renderer=_renderer()
+  info=replace(ProgramInfo.from_sink(sink,renderer.target),outs=(0,),ins=tuple(range(1,len(inputs))))
+  return UOp(Ops.PROGRAM,arg=info,src=(sink,UOp(Ops.LINEAR,src=inputs),UOp(Ops.SOURCE,arg=text),
+                                     UOp(Ops.BINARY,arg=renderer.compiler.compile_cached(text))))
+
+
+def _down_merge_parts(raws:list[Tensor], activation_scales:Tensor, sws:list[Tensor], columns:int) -> Tensor:
+  """Bit-exact merge of the narrow ffn_down dequantizers and their ordered sums."""
+  parts=len(raws)
+  if (not 2<=parts<=3 or len(sws)!=parts or raws[0].device!='CPU' or sws[0].device!='CPU'
+      or activation_scales.device!='CPU' or activation_scales.dtype is not dtypes.float
+      or activation_scales.numel()<parts or columns%4
+      or any(r.device!='CPU' or r.dtype is not dtypes.int32 or r.numel()!=columns for r in raws)
+      or any(w.device!='CPU' or w.dtype is not dtypes.float or w.shape!=(columns,) for w in sws)):
+    raise ValueError('Unsupported fused ffn_down dequantization parts')
+  return Tensor.empty(1,columns,device='CPU',dtype=dtypes.float).custom_kernel(
+    *[r.reshape(-1).contiguous() for r in raws],activation_scales.contiguous(),*[w.contiguous() for w in sws],
+    fxn=lambda o,*a:_down_merge_parts_program(o,tuple(a[:parts]),a[parts],tuple(a[parts+1:]),columns))[0]
 
 
 class _RockchipInt8GatedFeedForward:
@@ -649,7 +755,8 @@ class _RockchipInt8GatedFeedForward:
         and tuple(part.depth for part in parts[:3])==(4096,4096,4096)
         and grouped_down.grouped_weight.shape==(3,grouped_down.columns//32,128,32,32)
         and grouped_down.grouped_scale.shape==(3,grouped_down.columns)):grouped_groups=grouped_down.grouped_count
-    decode_pool=(bool(ONPU_WIDE_RAW_SWIGLU_DECODE) and self.decode_enabled and capacity==1)
+    decode_pool=((bool(ONPU_WIDE_RAW_SWIGLU_DECODE) or bool(ONPU_FFN_GROUP_POOL_ALL))
+                 and self.decode_enabled and capacity==1)
     packed,scales=pack(raw,sa,weight_scales,tiles,capacity,self.down.depth,depths,math.prod(x.shape[:-1]),
                        pool=self.pool,input_scale=self.down.input_scale,grouped=grouped_groups,decode_pool=decode_pool)
     layout=payload_layout(capacity,depths,grouped_groups)
@@ -665,12 +772,22 @@ class _RockchipInt8GatedFeedForward:
       packed=packed.to(parts[0].packed[0].device)
     outputs:list[Tensor]=[]
     first_part=0
+    grouped:Tensor|None=None
+    tail_merge:tuple[Tensor,Tensor]|None=None
+    # Decode can merge the ffn_down dequantizers with the K-part sums into one kernel when
+    # the down projection is exactly the grouped three parts plus one single-row tail part
+    # (wide route) or two/three un-grouped parts (narrow route, e.g. MiniCPM3 4096+2304).
+    fused_parts:list[tuple[Tensor,Tensor]]=[] if (bool(ONPU_FFN_DOWN_MERGE) and capacity==1
+                                                 and grouped_payload is None and 2<=len(parts)<=3) else None
+    fused_down=bool(ONPU_FFN_DOWN_MERGE) and capacity==1 and grouped_payload is not None and grouped_down is not None
     if grouped_payload is not None:
       assert grouped_down is not None and grouped_down.grouped_weight is not None and grouped_down.grouped_scale is not None
       grouped=grouped_raw_matmul(grouped_payload[0],grouped_down.grouped_weight,capacity,grouped_down.columns)
-      grouped_values=grouped_dequantize(grouped,grouped_payload[1],grouped_down.grouped_scale,grouped_down.grouped_count,
-                                        capacity,grouped_down.columns,layout[0][1])
-      outputs.extend(grouped_values[index] for index in range(grouped_down.grouped_count))
+      fused_down = fused_down and len(parts)-grouped_down.grouped_count==1 and grouped_down.columns==layout[0][1]
+      if not fused_down:
+        grouped_values=grouped_dequantize(grouped,grouped_payload[1],grouped_down.grouped_scale,grouped_down.grouped_count,
+                                          capacity,grouped_down.columns,layout[0][1])
+        outputs.extend(grouped_values[index] for index in range(grouped_down.grouped_count))
       first_part=grouped_down.grouped_count
     for index in range(first_part,len(parts)):
       layer=parts[index]
@@ -685,9 +802,19 @@ class _RockchipInt8GatedFeedForward:
         values.append(raw_int8_matmul(payload,layer.packed[0],rows,layer.columns,payload_offset=begin if shared_input else None))
         activation_scales.append(scales[index*capacity+first:index*capacity+first+rows])
         counts.append(rows)
-      outputs.append(dequantize_tiles(values,activation_scales,layer.scales[0],counts,layer.columns))
-    result=outputs[0]
-    for value in outputs[1:]:result=result+value
+      if fused_parts is not None and len(values)==1 and counts==[1]:fused_parts.append((values[0],layer.scales[0]))
+      elif fused_down and len(values)==1 and counts==[1]:tail_merge=(values[0],layer.scales[0])
+      else:outputs.append(dequantize_tiles(values,activation_scales,layer.scales[0],counts,layer.columns))
+    if fused_parts is not None and len(fused_parts)==len(parts)-first_part:
+      result=_down_merge_parts([entry[0] for entry in fused_parts],scales,[entry[1] for entry in fused_parts],
+                               self.down.columns)
+    elif fused_down and tail_merge is not None and grouped is not None and grouped_down is not None:
+      assert grouped_down.grouped_scale is not None and grouped_payload is not None
+      result=_down_merge(grouped,scales,grouped_down.grouped_scale,tail_merge[0],tail_merge[1],
+                         grouped_down.columns,layout[0][1])
+    else:
+      result=outputs[0]
+      for value in outputs[1:]:result=result+value
     result=result.reshape(*x.max_shape[:-1],self.down.columns).shrink(tuple((0,s) for s in (*x.shape[:-1],self.down.columns)))
     result=result.cast(x.dtype)
     # Match SplitLinear: sum K groups, cast, then apply the original bias once.

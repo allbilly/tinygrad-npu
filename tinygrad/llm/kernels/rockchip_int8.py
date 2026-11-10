@@ -7,7 +7,7 @@ from tinygrad import Tensor, dtypes
 from tinygrad.helpers import ContextVar, Target, ceildiv, getenv, round_up
 from tinygrad.llm.kernels.rockchip import RockchipLinear, RockchipFeedForward, RockchipProjections, RockchipPreparedQKV
 from tinygrad.uop.ops import resolve
-from tinygrad.llm.kernels.rockchip_cpu import _renderer, ONPU_NORM_QUANT
+from tinygrad.llm.kernels.rockchip_cpu import _renderer, ONPU_NORM_QUANT, ONPU_NORM_QUANT_DECODE
 from tinygrad.llm.kernels.rockchip_shared_pool import ONPU_PREFILL_CPU_TUNING, shared_program
 from tinygrad.llm.kernels.rockchip_padding import capacity_input
 from tinygrad.runtime.support.rockchip_int8 import padded_depth, supported_depth, sdk_prefill_supported
@@ -136,7 +136,7 @@ def quantize(x:Tensor, padded:int, *, sdk_prefill:bool=False, weight:bool=False)
   if enabled(depth):
     if sdk_prefill or ONPU_NORM_QUANT:raise ValueError('Hadamard quantization requires ordinary layout and separate CPU normalization')
     return hadamard_quantize(x,padded,weight=weight)
-  if ONPU_NORM_QUANT:
+  if ONPU_NORM_QUANT or ONPU_NORM_QUANT_DECODE:
     from tinygrad.llm.kernels.rockchip_norm_quant import try_quantize
     if (fused:=try_quantize(x,padded,sdk_prefill=sdk_prefill)) is not None:return fused
   result = Tensor.empty(round_up(rows*4,64)+rows*padded,device='CPU',dtype=dtypes.uint8).custom_kernel(

@@ -11,15 +11,20 @@ from tinygrad.uop.ops import KernelInfo, Ops, ProgramInfo, UOp
 from tinygrad.helpers import ContextVar
 
 ONPU_MLA_CPU_FP16 = ContextVar('ONPU_MLA_CPU_FP16',0)
+# Opt-in row/column-blocked projection tiling: bit-identical arithmetic, but one
+# weight vector feeds 8 rows x 2 column vectors so the FP16 table is re-read half
+# as often and each row group covers twice the output columns.
+ONPU_MLA_PROJ_BLOCKED = ContextVar('ONPU_MLA_PROJ_BLOCKED',0)
 if TYPE_CHECKING:
   from tinygrad.llm.kernels.rockchip_pool import AttentionPool
 
 
 @functools.cache
-def _program(out:UOp, inp:UOp, weight:UOp, rows:UOp, heads:int, capacity:int, depth:int, columns:int, pool:int|None, fp16:bool=False) -> UOp:
+def _program(out:UOp, inp:UOp, weight:UOp, rows:UOp, heads:int, capacity:int, depth:int, columns:int, pool:int|None,
+             fp16:bool=False, blocked:bool=False) -> UOp:
   source=f'#define MLA_FP16 {int(fp16)}\n'+Path(__file__).with_suffix('.c').read_text()+f'''
 void rockchip_cpu_mla_projection(float *out,const float *input,const __fp16 *weight,const int *rows) {{
-  if(mla_project(out,input,weight,{heads},{capacity},*rows,{depth},{columns},{pool or 0}ULL))__builtin_trap();
+  if(mla_project(out,input,weight,{heads},{capacity},*rows,{depth},{columns},{pool or 0}ULL,{int(blocked)}))__builtin_trap();
 }}
 '''
   inputs=(out,inp,weight,rows)
@@ -77,7 +82,8 @@ class CPUMLAProjections:
     if capacity==1 and self.decode_pool and pool is not None and pool.active:address=pool.address
     out=Tensor.empty(self.heads,capacity,columns,device='CPU',dtype=dtypes.float).custom_kernel(
       dense,packed[0 if key else 1],count,
-      fxn=lambda o,x,w,n:_program(o,x,w,n,self.heads,capacity,depth,columns,address,bool(ONPU_MLA_CPU_FP16) and capacity==1))[0]
+      fxn=lambda o,x,w,n:_program(o,x,w,n,self.heads,capacity,depth,columns,address,
+                                  bool(ONPU_MLA_CPU_FP16) and capacity==1,bool(ONPU_MLA_PROJ_BLOCKED)))[0]
     return out.reshape(1,self.heads,capacity,columns)[:,:,:rows]
 
   def query(self,x:Tensor) -> Tensor:return self._run(x,True)
