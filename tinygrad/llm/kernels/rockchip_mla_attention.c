@@ -230,6 +230,183 @@ static void mla_pv_single(MLAWork *w,int head) {
     *(M4*)(out+c)=a;
   }
 }
+
+/* Multi-row (prefill) head-blocked variants: 4 heads share one K-block load
+   (qk) or one latent-cache load (pv). The per-row causal shortcut, the
+   -inf masking and the signed-zero/non-finite tail guard are reproduced exactly,
+   so each output keeps the reference kernel's bit pattern. */
+static void mla_qk_single_rows(MLAWork *w,int head) {
+  const int total=w->start+w->rows;const int pstride=((w->context+15)&~15)+4;
+  for(int row=0;row<w->rows;row++) {
+    const float *q=w->input+((size_t)head*w->capacity+row)*w->nope;
+    const float *qr=w->rope?w->input_rope+((size_t)head*w->capacity+row)*w->rope:q;
+    float *out=w->out+((size_t)head*w->capacity+row)*w->stride;
+    int end=total;
+    if(w->causal_safe&&mla_causal_safe_values(q,w->nope)&&mla_causal_safe_values(qr,w->rope))end=w->start+row+1;
+    for(int key=0;key<end;key+=16) {
+      M4 s0={0,0,0,0},s1={0,0,0,0},s2={0,0,0,0},s3={0,0,0,0};
+      for(int c=0;c<w->nope;c++) {
+        M4 query={q[c],q[c],q[c],q[c]};
+        const float *base=w->packed+(size_t)c*pstride+key;
+        M4 k0=*(const M4*)(base),k1=*(const M4*)(base+4),k2=*(const M4*)(base+8),k3=*(const M4*)(base+12);
+        s0=s0+query*k0;s1=s1+query*k1;s2=s2+query*k2;s3=s3+query*k3;
+      }
+      for(int c=0;c<w->rope;c++) {
+        M4 query={qr[c],qr[c],qr[c],qr[c]};
+        const float *base=w->packed+(size_t)(c+w->nope)*pstride+key;
+        M4 k0=*(const M4*)(base),k1=*(const M4*)(base+4),k2=*(const M4*)(base+8),k3=*(const M4*)(base+12);
+        s0=s0+query*k0;s1=s1+query*k1;s2=s2+query*k2;s3=s3+query*k3;
+      }
+      for(int lane=0;lane<4&&key+lane<total;lane++)out[key+lane]=s0[lane]*w->scale+(key+lane>w->start+row?-__builtin_inff():0.0f);
+      for(int lane=0;lane<4&&key+4+lane<total;lane++)out[key+4+lane]=s1[lane]*w->scale+(key+4+lane>w->start+row?-__builtin_inff():0.0f);
+      for(int lane=0;lane<4&&key+8+lane<total;lane++)out[key+8+lane]=s2[lane]*w->scale+(key+8+lane>w->start+row?-__builtin_inff():0.0f);
+      for(int lane=0;lane<4&&key+12+lane<total;lane++)out[key+12+lane]=s3[lane]*w->scale+(key+12+lane>w->start+row?-__builtin_inff():0.0f);
+    }
+    for(int key=(end+15)&~15;key<total;key++)out[key]=-__builtin_inff();
+  }
+}
+static void mla_qk_part_hb_rows(MLAWork *w,int group,int groups) {
+  const int HB=MLA_HB;const int total=w->start+w->rows;const int pstride=((w->context+15)&~15)+4;
+  const int nblocks=(w->heads+HB-1)/HB;
+  for(int blk=group;blk<nblocks;blk+=groups) {
+    int hb=blk*HB,nh=w->heads-hb;if(nh>HB)nh=HB;
+    if(nh<HB){for(int h=0;h<nh;h++)mla_qk_single_rows(w,hb+h);continue;}
+    for(int row=0;row<w->rows;row++) {
+      const size_t qstep=(size_t)w->capacity*w->nope,rstep=(size_t)w->capacity*w->rope;
+      const float *q0=w->input+((size_t)hb*w->capacity+row)*w->nope;
+      const float *q1=q0+qstep,*q2=q1+qstep,*q3=q2+qstep;
+      const float *r0=w->rope?w->input_rope+((size_t)hb*w->capacity+row)*w->rope:q0;
+      const float *r1=w->rope?r0+rstep:q1,*r2=w->rope?r1+rstep:q2,*r3=w->rope?r2+rstep:q3;
+      int end=total;
+      if(w->causal_safe&&mla_causal_safe_values(q0,w->nope)&&mla_causal_safe_values(q1,w->nope)
+         &&mla_causal_safe_values(q2,w->nope)&&mla_causal_safe_values(q3,w->nope)
+         &&(w->rope==0||(mla_causal_safe_values(r0,w->rope)&&mla_causal_safe_values(r1,w->rope)
+                         &&mla_causal_safe_values(r2,w->rope)&&mla_causal_safe_values(r3,w->rope))))
+        end=w->start+row+1;
+      for(int key=0;key<end;key+=16) {
+        M4 a00={0,0,0,0},a01={0,0,0,0},a02={0,0,0,0},a03={0,0,0,0};
+        M4 a10={0,0,0,0},a11={0,0,0,0},a12={0,0,0,0},a13={0,0,0,0};
+        M4 a20={0,0,0,0},a21={0,0,0,0},a22={0,0,0,0},a23={0,0,0,0};
+        M4 a30={0,0,0,0},a31={0,0,0,0},a32={0,0,0,0},a33={0,0,0,0};
+        for(int c=0;c<w->nope;c++) {
+          const float *base=w->packed+(size_t)c*pstride+key;
+          M4 k0=*(const M4*)(base),k1=*(const M4*)(base+4),k2=*(const M4*)(base+8),k3=*(const M4*)(base+12);
+          float v;M4 b;
+          v=q0[c];b=(M4){v,v,v,v};a00=a00+b*k0;a01=a01+b*k1;a02=a02+b*k2;a03=a03+b*k3;
+          v=q1[c];b=(M4){v,v,v,v};a10=a10+b*k0;a11=a11+b*k1;a12=a12+b*k2;a13=a13+b*k3;
+          v=q2[c];b=(M4){v,v,v,v};a20=a20+b*k0;a21=a21+b*k1;a22=a22+b*k2;a23=a23+b*k3;
+          v=q3[c];b=(M4){v,v,v,v};a30=a30+b*k0;a31=a31+b*k1;a32=a32+b*k2;a33=a33+b*k3;
+        }
+        for(int c=0;c<w->rope;c++) {
+          const float *base=w->packed+(size_t)(c+w->nope)*pstride+key;
+          M4 k0=*(const M4*)(base),k1=*(const M4*)(base+4),k2=*(const M4*)(base+8),k3=*(const M4*)(base+12);
+          float v;M4 b;
+          v=r0[c];b=(M4){v,v,v,v};a00=a00+b*k0;a01=a01+b*k1;a02=a02+b*k2;a03=a03+b*k3;
+          v=r1[c];b=(M4){v,v,v,v};a10=a10+b*k0;a11=a11+b*k1;a12=a12+b*k2;a13=a13+b*k3;
+          v=r2[c];b=(M4){v,v,v,v};a20=a20+b*k0;a21=a21+b*k1;a22=a22+b*k2;a23=a23+b*k3;
+          v=r3[c];b=(M4){v,v,v,v};a30=a30+b*k0;a31=a31+b*k1;a32=a32+b*k2;a33=a33+b*k3;
+        }
+        /* write with the same mask expression as the reference kernels */
+        float *o0=w->out+((size_t)(hb+0)*w->capacity+row)*w->stride;
+        float *o1=w->out+((size_t)(hb+1)*w->capacity+row)*w->stride;
+        float *o2=w->out+((size_t)(hb+2)*w->capacity+row)*w->stride;
+        float *o3=w->out+((size_t)(hb+3)*w->capacity+row)*w->stride;
+        for(int lane=0;lane<4&&key+lane<total;lane++){int idx=key+lane;float m=idx>w->start+row?-__builtin_inff():0.0f;o0[idx]=a00[lane]*w->scale+m;o1[idx]=a10[lane]*w->scale+m;o2[idx]=a20[lane]*w->scale+m;o3[idx]=a30[lane]*w->scale+m;}
+        for(int lane=0;lane<4&&key+4+lane<total;lane++){int idx=key+4+lane;float m=idx>w->start+row?-__builtin_inff():0.0f;o0[idx]=a01[lane]*w->scale+m;o1[idx]=a11[lane]*w->scale+m;o2[idx]=a21[lane]*w->scale+m;o3[idx]=a31[lane]*w->scale+m;}
+        for(int lane=0;lane<4&&key+8+lane<total;lane++){int idx=key+8+lane;float m=idx>w->start+row?-__builtin_inff():0.0f;o0[idx]=a02[lane]*w->scale+m;o1[idx]=a12[lane]*w->scale+m;o2[idx]=a22[lane]*w->scale+m;o3[idx]=a32[lane]*w->scale+m;}
+        for(int lane=0;lane<4&&key+12+lane<total;lane++){int idx=key+12+lane;float m=idx>w->start+row?-__builtin_inff():0.0f;o0[idx]=a03[lane]*w->scale+m;o1[idx]=a13[lane]*w->scale+m;o2[idx]=a23[lane]*w->scale+m;o3[idx]=a33[lane]*w->scale+m;}
+      }
+      for(int key=(end+15)&~15;key<total;key++) {
+        float *o0=w->out+((size_t)(hb+0)*w->capacity+row)*w->stride;
+        float *o1=w->out+((size_t)(hb+1)*w->capacity+row)*w->stride;
+        float *o2=w->out+((size_t)(hb+2)*w->capacity+row)*w->stride;
+        float *o3=w->out+((size_t)(hb+3)*w->capacity+row)*w->stride;
+        o0[key]=o1[key]=o2[key]=o3[key]=-__builtin_inff();
+      }
+    }
+  }
+}
+static void mla_pv_single_rows(MLAWork *w,int head) {
+  const int total=w->start+w->rows;
+  const float *ph=w->input+(size_t)head*w->capacity*w->stride;
+  float *oh=w->out+(size_t)head*w->capacity*w->values;
+  for(int row=0;row<w->rows;row++) {
+    const float *p0=ph+(size_t)row*w->stride;
+    float *out=oh+(size_t)row*w->values;
+    int end=total;
+    if(w->causal_safe&&w->start+row+1<total) {
+      int candidate=w->start+row+1,zero_tail=1;
+      for(int key=candidate;key<total;key++)if(p0[key]!=0.0f){zero_tail=0;break;}
+      if(zero_tail)end=candidate;
+    }
+    for(int c=0;c<w->values;c+=4) {
+      M4 a={0,0,0,0};
+      for(int key=0;key<end;key++) {
+        M4 value=*(const M4*)(w->cache+(size_t)key*w->width+c);
+        float p=p0[key];a=a+(M4){p,p,p,p}*value;
+      }
+      if(end<total&&mla_tail_needed(a)) {
+        for(int key=end;key<total;key++) {
+          M4 value=*(const M4*)(w->cache+(size_t)key*w->width+c);
+          float p=p0[key];a=a+(M4){p,p,p,p}*value;
+        }
+      }
+      *(M4*)(out+c)=a;
+    }
+  }
+}
+static void mla_pv_part_hb_rows(MLAWork *w,int group,int groups) {
+  const int HB=MLA_HB;const int total=w->start+w->rows;
+  const int nblocks=(w->heads+HB-1)/HB;
+  for(int blk=group;blk<nblocks;blk+=groups) {
+    int hb=blk*HB,nh=w->heads-hb;if(nh>HB)nh=HB;
+    if(nh<HB){for(int h=0;h<nh;h++)mla_pv_single_rows(w,hb+h);continue;}
+    const float *ph0=w->input+(size_t)(hb+0)*w->capacity*w->stride;
+    const float *ph1=w->input+(size_t)(hb+1)*w->capacity*w->stride;
+    const float *ph2=w->input+(size_t)(hb+2)*w->capacity*w->stride;
+    const float *ph3=w->input+(size_t)(hb+3)*w->capacity*w->stride;
+    float *oh0=w->out+(size_t)(hb+0)*w->capacity*w->values;
+    float *oh1=w->out+(size_t)(hb+1)*w->capacity*w->values;
+    float *oh2=w->out+(size_t)(hb+2)*w->capacity*w->values;
+    float *oh3=w->out+(size_t)(hb+3)*w->capacity*w->values;
+    for(int row=0;row<w->rows;row++) {
+      const float *p0=ph0+(size_t)row*w->stride,*p1=ph1+(size_t)row*w->stride;
+      const float *p2=ph2+(size_t)row*w->stride,*p3=ph3+(size_t)row*w->stride;
+      float *o0=oh0+(size_t)row*w->values,*o1=oh1+(size_t)row*w->values;
+      float *o2=oh2+(size_t)row*w->values,*o3=oh3+(size_t)row*w->values;
+      int end=total;
+      if(w->causal_safe&&w->start+row+1<total) {
+        int candidate=w->start+row+1,zero_tail=1;
+        for(int key=candidate;key<total&&zero_tail;key++) {
+          if(p0[key]!=0.0f||p1[key]!=0.0f||p2[key]!=0.0f||p3[key]!=0.0f)zero_tail=0;
+        }
+        if(zero_tail)end=candidate;
+      }
+      for(int c=0;c<w->values;c+=4) {
+        M4 a0={0,0,0,0},a1={0,0,0,0},a2={0,0,0,0},a3={0,0,0,0};
+        for(int key=0;key<end;key++) {
+          M4 value=*(const M4*)(w->cache+(size_t)key*w->width+c);
+          float p;M4 b;
+          p=p0[key];b=(M4){p,p,p,p};a0=a0+b*value;
+          p=p1[key];b=(M4){p,p,p,p};a1=a1+b*value;
+          p=p2[key];b=(M4){p,p,p,p};a2=a2+b*value;
+          p=p3[key];b=(M4){p,p,p,p};a3=a3+b*value;
+        }
+        if(end<total&&(mla_tail_needed(a0)||mla_tail_needed(a1)||mla_tail_needed(a2)||mla_tail_needed(a3))) {
+          for(int key=end;key<total;key++) {
+            M4 value=*(const M4*)(w->cache+(size_t)key*w->width+c);
+            float p;M4 b;
+            p=p0[key];b=(M4){p,p,p,p};a0=a0+b*value;
+            p=p1[key];b=(M4){p,p,p,p};a1=a1+b*value;
+            p=p2[key];b=(M4){p,p,p,p};a2=a2+b*value;
+            p=p3[key];b=(M4){p,p,p,p};a3=a3+b*value;
+          }
+        }
+        *(M4*)(o0+c)=a0;*(M4*)(o1+c)=a1;*(M4*)(o2+c)=a2;*(M4*)(o3+c)=a3;
+      }
+    }
+  }
+}
 static void mla_pv_part_hb(MLAWork *w,int group,int groups) {
   const int HB=MLA_HB;const int total=w->start+w->rows;const int nblocks=(w->heads+HB-1)/HB;
   for(int blk=group;blk<nblocks;blk+=groups) {
@@ -275,16 +452,20 @@ static void mla_pv_part_hb(MLAWork *w,int group,int groups) {
 static void mla_qk_worker(void **args,int unused,int group) {
   (void)unused;MLAWork *w=args[0];if(group<0||group>=4)return;
 #if MLA_HEAD_BLOCK > 1
-  if(w->capacity==1&&w->rows==1)mla_qk_part_hb(w,group,4);else
+  if(w->capacity==1&&w->rows==1)mla_qk_part_hb(w,group,4);else mla_qk_part_hb_rows(w,group,4);
+#else
+  mla_qk_part(w,group,4);
 #endif
-  mla_qk_part(w,group,4);w->done[group]=1;
+  w->done[group]=1;
 }
 static void mla_pv_worker(void **args,int unused,int group) {
   (void)unused;MLAWork *w=args[0];if(group<0||group>=4)return;
 #if MLA_HEAD_BLOCK > 1 && !MLA_FP16
-  if(w->capacity==1&&w->rows==1)mla_pv_part_hb(w,group,4);else
+  if(w->capacity==1&&w->rows==1)mla_pv_part_hb(w,group,4);else mla_pv_part_hb_rows(w,group,4);
+#else
+  mla_pv_part(w,group,4);
 #endif
-  mla_pv_part(w,group,4);w->done[group]=1;
+  w->done[group]=1;
 }
 static void mla_execute(MLAWork *w,mla_parallel_fn parallel,int qk) {
   if(w->start<0||w->rows<1||w->rows>w->capacity||w->start+w->rows>w->context)__builtin_trap();
@@ -292,8 +473,9 @@ static void mla_execute(MLAWork *w,mla_parallel_fn parallel,int qk) {
   w->causal_safe=MLA_CAUSAL_WORK&&w->capacity>1&&w->scale>0.0f&&w->scale<=1024.0f&&
     mla_causal_safe_values(w->cache,(size_t)(w->start+w->rows)*w->width);
   if(!parallel){
-#if MLA_HEAD_BLOCK > 1
+#if MLA_HEAD_BLOCK > 1 && !MLA_FP16
     if(w->capacity==1&&w->rows==1){if(qk)mla_qk_part_hb(w,0,1);else mla_pv_part_hb(w,0,1);return;}
+    if(qk)mla_qk_part_hb_rows(w,0,1);else mla_pv_part_hb_rows(w,0,1);return;
 #endif
     if(qk)mla_qk_part(w,0,1);else mla_pv_part(w,0,1);return;}
   void *args[4]={w,0,0,0};
