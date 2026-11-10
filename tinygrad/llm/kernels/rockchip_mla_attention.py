@@ -29,6 +29,10 @@ ONPU_MLA_QK_SOFTMAX = ContextVar('ONPU_MLA_QK_SOFTMAX',0)
 # kernel, so the probability matrix never reaches memory either (13 MB write +
 # read per layer removed). Same exact pv accumulation/shortcut/tail guard.
 ONPU_MLA_FUSED_ATTN = ContextVar('ONPU_MLA_FUSED_ATTN',0)
+# Opt-in (default 0): one fused kernel splits the q_b projection output into the
+# padded head-major q_nope and the rotated q_rope, replacing the transpose copy,
+# the q_nope pad and the separate rope kernels (pure layout + exact elementwise).
+ONPU_MLA_FUSED_QUERY = ContextVar('ONPU_MLA_FUSED_QUERY',0)
 
 
 @functools.cache
@@ -99,6 +103,25 @@ def _fused_program(out:UOp, inp:UOp, rope_inp:UOp, cache:UOp, start:UOp, rows:UO
     UOp(Ops.BINARY,arg=renderer.compiler.compile_cached(source))))
 
 
+_QUERY_HEAD_ENTRY = '''
+void rockchip_mla_query_head_entry(float *nope,float *rope,const float *src,const float *table,
+                                   const int *start,const int *rows) {
+  rockchip_mla_query_head(nope,rope,src,table,start,rows);
+}
+'''
+
+
+@functools.cache
+def _query_head_program(nope:UOp, rope:UOp, src:UOp, table:UOp, start:UOp, rows:UOp) -> UOp:
+  source=Path(__file__).with_name('rockchip_mla_rope.c').read_text()+_QUERY_HEAD_ENTRY
+  inputs=(nope,rope,src,table,start,rows)
+  renderer=_renderer()
+  sink=UOp.sink(*inputs,arg=KernelInfo('rockchip_mla_query_head_entry'))
+  info=replace(ProgramInfo.from_sink(sink,renderer.target),outs=(0,1),ins=(2,3,4,5))
+  return UOp(Ops.PROGRAM,arg=info,src=(sink,UOp(Ops.LINEAR,src=inputs),UOp(Ops.SOURCE,arg=source),
+    UOp(Ops.BINARY,arg=renderer.compiler.compile_cached(source))))
+
+
 def _bounds(start:int|UOp, rows:int|UOp, capacity:int, context:int):
   if (isinstance(start,bool) or not isinstance(start,(int,UOp)) or isinstance(rows,bool) or not isinstance(rows,(int,UOp))
       or isinstance(start,int) and not 0<=start<context or isinstance(start,UOp) and not 0<=start.vmin<=start.vmax<context
@@ -117,6 +140,7 @@ class MLAAttention:
     self.fused_softmax=bool(ONPU_MLA_FUSED_SOFTMAX)
     self.qk_softmax=bool(ONPU_MLA_QK_SOFTMAX) and (heads,context,width,values)==(40,512,288,256)
     self.fused_attn=bool(ONPU_MLA_FUSED_ATTN) and (heads,context,width,values)==(40,512,288,256)
+    self.fused_query=bool(ONPU_MLA_FUSED_QUERY) and (heads,context,width,values)==(40,512,288,256)
     self._pool=lambda:pool  # Keep worker-library internals out of state-dict walks.
 
   def _validate(self, x:Tensor, cache:Tensor, start:int|UOp, rope:Tensor|None=None):
@@ -213,6 +237,24 @@ class MLAAttention:
 
   def query_key(self, query:Tensor, cache:Tensor, start:int|UOp, *, rope:Tensor|None=None) -> Tensor:
     return self._run(query,cache,start,True,rope)
+  def split_query(self, q_proj:Tensor, table:Tensor, start:int|UOp) -> tuple[Tensor,Tensor]:
+    """Fused q_b-output split: returns (q_nope, q_rope) in the kernel layout."""
+    if not self.fused_query:raise ValueError('Fused MLA query split is not enabled for this geometry')
+    rows=q_proj.shape[1]
+    capacity=128
+    _bounds(start,rows,capacity,self.context)
+    src=capacity_input(q_proj).reshape(capacity,self.heads*96).contiguous()
+    table_view=table.reshape(-1,32).contiguous()
+    position=Tensor(start,device='CPU',dtype=dtypes.int).reshape(1).clone()
+    count=Tensor(rows,device='CPU',dtype=dtypes.int).reshape(1).clone()
+    nope=Tensor.empty(1,self.heads,capacity,64,device='CPU',dtype=dtypes.float)
+    rope=Tensor.empty(1,self.heads,capacity,32,device='CPU',dtype=dtypes.float)
+    result=nope.custom_kernel(rope,src,table_view,position,count,
+      fxn=lambda n,r,s,t,p,c:_query_head_program(n,r,s,t,p,c))
+    nope_out,rope_out=result[0],result[1]
+    return (mark_zero_tail(nope_out[:,:,:rows,:],nope_out,'mla_q_nope'),
+            mark_zero_tail(rope_out[:,:,:rows,:],rope_out,'mla_q_rope'))
+
   def query_key_softmax(self, query:Tensor, cache:Tensor, start:int|UOp, *, rope:Tensor|None=None) -> Tensor:
     """Fused prefill qk + exact softmax: returns the same probability tensor the
     qk + rockchip_mla_softmax pair would produce, without the padded score buffer."""

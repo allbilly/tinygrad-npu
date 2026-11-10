@@ -451,9 +451,16 @@ class MLATransformerBlock(FFNBlock):
     B, T, _ = x.shape
     q_nope_head_dim = self.config.head_dim - self.config.rope_dim
     q_proj = self.attn_q_b(self.attn_q_a_norm(self.attn_q_a(x))) if self.config.q_lora_rank > 0 else self.attn_q(x)
-    q = q_proj.reshape(B, T, self.config.n_heads, self.config.head_dim).transpose(1, 2)
-    q_nope, q_rope = q[..., :q_nope_head_dim], q[..., q_nope_head_dim:]
-    if not self.config.ssm or not self.config.ssm.kda: q_rope = apply_rope(q_rope, self.freqs_cis[start_pos:start_pos+T])
+    mla_hint = getattr(self,'cpu_mla_attention',None)
+    fused_query = (mla_hint is not None and getattr(mla_hint,'fused_query',False)
+                   and int(q_proj.max_shape[1])>1 and not getenv('ONPU_MLA_LEGACY_Q',0)
+                   and (not self.config.ssm or not self.config.ssm.kda))
+    if fused_query:
+      q_nope, q_rope = mla_hint.split_query(q_proj, self.freqs_cis, start_pos)
+    else:
+      q = q_proj.reshape(B, T, self.config.n_heads, self.config.head_dim).transpose(1, 2)
+      q_nope, q_rope = q[..., :q_nope_head_dim], q[..., q_nope_head_dim:]
+      if not self.config.ssm or not self.config.ssm.kda: q_rope = apply_rope(q_rope, self.freqs_cis[start_pos:start_pos+T])
     projections=getattr(self,'npu_mla_projections',None) or getattr(self,'cpu_mla_projections',None)
     q_nope = projections.query(q_nope) if projections is not None else q_nope @ self.attn_k_b["weight"].transpose(-1, -2)
 
