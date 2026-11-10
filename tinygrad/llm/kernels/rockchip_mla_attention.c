@@ -449,6 +449,101 @@ static void mla_pv_part_hb(MLAWork *w,int group,int groups) {
   }
 }
 #endif
+
+#ifdef MLA_FUSED_QK_SOFTMAX
+/* Fused qk + exact softmax (prefill): the per-row scores stay in a small local
+   buffer, so the padded FP32 score buffer is never written or read. The qk
+   accumulation (causal end, ascending c), the -inf causal mask, the sequential
+   max/sum and the vector exp2 polynomial are reproduced exactly, so the
+   probabilities are bit-identical to running the two reference kernels. */
+static void mla_qk_softmax_part(MLAWork *w,int group,int groups) {
+  const int total=w->start+w->rows;
+  const int pstride=((w->context+15)&~15)+4;
+  float sc[4][1024];
+  const int HB=MLA_HEAD_BLOCK>1?MLA_HEAD_BLOCK:1;
+  const int nblocks=(w->heads+HB-1)/HB;
+  for(int blk=group;blk<nblocks;blk+=groups) {
+    int hb=blk*HB,nh=w->heads-hb;if(nh>HB)nh=HB;
+    for(int row=0;row<w->rows;row++) {
+      const float *q0,*q1,*q2,*q3,*r0,*r1,*r2,*r3;
+      q0=w->input+((size_t)(hb+0)*w->capacity+row)*w->nope;
+      q1=nh>1?q0+(size_t)w->capacity*w->nope:q0;
+      q2=nh>2?q1+(size_t)w->capacity*w->nope:q0;
+      q3=nh>3?q2+(size_t)w->capacity*w->nope:q0;
+      r0=w->rope?w->input_rope+((size_t)(hb+0)*w->capacity+row)*w->rope:q0;
+      r1=w->rope?(nh>1?r0+(size_t)w->capacity*w->rope:r0):q0;
+      r2=w->rope?(nh>2?r1+(size_t)w->capacity*w->rope:r0):q0;
+      r3=w->rope?(nh>3?r2+(size_t)w->capacity*w->rope:r0):q0;
+      int end=total;
+      if(w->causal_safe&&mla_causal_safe_values(q0,w->nope)&&mla_causal_safe_values(q1,w->nope)
+         &&mla_causal_safe_values(q2,w->nope)&&mla_causal_safe_values(q3,w->nope)
+         &&(w->rope==0||(mla_causal_safe_values(r0,w->rope)&&mla_causal_safe_values(r1,w->rope)
+                         &&mla_causal_safe_values(r2,w->rope)&&mla_causal_safe_values(r3,w->rope))))
+        end=w->start+row+1;
+      for(int key=0;key<end;key+=16) {
+        M4 a00={0,0,0,0},a01={0,0,0,0},a02={0,0,0,0},a03={0,0,0,0};
+        M4 a10={0,0,0,0},a11={0,0,0,0},a12={0,0,0,0},a13={0,0,0,0};
+        M4 a20={0,0,0,0},a21={0,0,0,0},a22={0,0,0,0},a23={0,0,0,0};
+        M4 a30={0,0,0,0},a31={0,0,0,0},a32={0,0,0,0},a33={0,0,0,0};
+        for(int c=0;c<w->nope;c++) {
+          const float *base=w->packed+(size_t)c*pstride+key;
+          M4 k0=*(const M4*)(base),k1=*(const M4*)(base+4),k2=*(const M4*)(base+8),k3=*(const M4*)(base+12);
+          float v;M4 b;
+          v=q0[c];b=(M4){v,v,v,v};a00=a00+b*k0;a01=a01+b*k1;a02=a02+b*k2;a03=a03+b*k3;
+          if(nh>1){v=q1[c];b=(M4){v,v,v,v};a10=a10+b*k0;a11=a11+b*k1;a12=a12+b*k2;a13=a13+b*k3;}
+          if(nh>2){v=q2[c];b=(M4){v,v,v,v};a20=a20+b*k0;a21=a21+b*k1;a22=a22+b*k2;a23=a23+b*k3;}
+          if(nh>3){v=q3[c];b=(M4){v,v,v,v};a30=a30+b*k0;a31=a31+b*k1;a32=a32+b*k2;a33=a33+b*k3;}
+        }
+        for(int c=0;c<w->rope;c++) {
+          const float *base=w->packed+(size_t)(c+w->nope)*pstride+key;
+          M4 k0=*(const M4*)(base),k1=*(const M4*)(base+4),k2=*(const M4*)(base+8),k3=*(const M4*)(base+12);
+          float v;M4 b;
+          v=r0[c];b=(M4){v,v,v,v};a00=a00+b*k0;a01=a01+b*k1;a02=a02+b*k2;a03=a03+b*k3;
+          if(nh>1){v=r1[c];b=(M4){v,v,v,v};a10=a10+b*k0;a11=a11+b*k1;a12=a12+b*k2;a13=a13+b*k3;}
+          if(nh>2){v=r2[c];b=(M4){v,v,v,v};a20=a20+b*k0;a21=a21+b*k1;a22=a22+b*k2;a23=a23+b*k3;}
+          if(nh>3){v=r3[c];b=(M4){v,v,v,v};a30=a30+b*k0;a31=a31+b*k1;a32=a32+b*k2;a33=a33+b*k3;}
+        }
+        for(int h=0;h<nh;h++) {
+          M4 *aa = h==0?&a00:h==1?&a10:h==2?&a20:&a30;
+          M4 *ab = h==0?&a01:h==1?&a11:h==2?&a21:&a31;
+          M4 *ac = h==0?&a02:h==1?&a12:h==2?&a22:&a32;
+          M4 *ad = h==0?&a03:h==1?&a13:h==2?&a23:&a33;
+          for(int lane=0;lane<4;lane++){int idx=key+lane;
+            if(idx<total)sc[h][idx]=idx<end?(*aa)[lane]*w->scale:-__builtin_inff();}
+          for(int lane=0;lane<4;lane++){int idx=key+4+lane;
+            if(idx<total)sc[h][idx]=idx<end?(*ab)[lane]*w->scale:-__builtin_inff();}
+          for(int lane=0;lane<4;lane++){int idx=key+8+lane;
+            if(idx<total)sc[h][idx]=idx<end?(*ac)[lane]*w->scale:-__builtin_inff();}
+          for(int lane=0;lane<4;lane++){int idx=key+12+lane;
+            if(idx<total)sc[h][idx]=idx<end?(*ad)[lane]*w->scale:-__builtin_inff();}
+        }
+      }
+      for(int key=(end+15)&~15;key<total;key++)for(int h=0;h<nh;h++)sc[h][key]=-__builtin_inff();
+      for(int h=0;h<nh;h++) {
+        float *out=w->out+((size_t)(hb+h)*w->capacity+row)*w->stride;
+        float maximum=-__builtin_inff();
+        for(int k=0;k<total;k++)if(maximum<sc[h][k])maximum=sc[h][k];
+        float sum=0.0f;
+        int k=0;
+        for(;k+4<=total;k+=4) {
+          float4 x={sc[h][k],sc[h][k+1],sc[h][k+2],sc[h][k+3]};
+          x=(x-(float4)maximum)*(float4)1.4426950216293335f;
+          float4 e=rockchip_exp2_vector(x);
+          out[k]=e[0];out[k+1]=e[1];out[k+2]=e[2];out[k+3]=e[3];
+          sum+=e[0];sum+=e[1];sum+=e[2];sum+=e[3];
+        }
+        for(;k<total;k++) {
+          float x=(sc[h][k]-maximum)*1.4426950216293335f;
+          float4 e4=rockchip_exp2_vector((float4){x,x,x,x});
+          out[k]=e4[0];sum+=e4[0];
+        }
+        for(k=0;k<total;k++)out[k]/=sum;
+        for(;k<w->stride;k++)out[k]=0.0f;
+      }
+    }
+  }
+}
+#endif
 static void mla_qk_worker(void **args,int unused,int group) {
   (void)unused;MLAWork *w=args[0];if(group<0||group>=4)return;
 #if MLA_HEAD_BLOCK > 1
@@ -467,6 +562,22 @@ static void mla_pv_worker(void **args,int unused,int group) {
 #endif
   w->done[group]=1;
 }
+#ifdef MLA_FUSED_QK_SOFTMAX
+static void mla_qk_softmax_worker(void **args,int unused,int group) {
+  (void)unused;MLAWork *w=args[0];if(group<0||group>=4)return;
+  mla_qk_softmax_part(w,group,4);
+  w->done[group]=1;
+}
+static void mla_execute_qk_softmax(MLAWork *w,mla_parallel_fn parallel) {
+  if(w->start<0||w->rows<1||w->rows>w->capacity||w->start+w->rows>w->context)__builtin_trap();
+  w->causal_safe=MLA_CAUSAL_WORK&&w->capacity>1&&w->scale>0.0f&&w->scale<=1024.0f&&
+    mla_causal_safe_values(w->cache,(size_t)(w->start+w->rows)*w->width);
+  if(!parallel){mla_qk_softmax_part(w,0,1);return;}
+  void *args[4]={w,0,0,0};
+  if(parallel(mla_qk_softmax_worker,args,0))__builtin_trap();
+  for(int i=0;i<4;i++)if(!w->done[i])__builtin_trap();
+}
+#endif
 static void mla_execute(MLAWork *w,mla_parallel_fn parallel,int qk) {
   if(w->start<0||w->rows<1||w->rows>w->capacity||w->start+w->rows>w->context)__builtin_trap();
   /* Single-row decode keeps its existing work and avoids the safety scan. */

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from tinygrad import Tensor, dtypes
 from tinygrad.helpers import getenv, ContextVar
-from tinygrad.llm.kernels.rockchip_cpu import _renderer
+from tinygrad.llm.kernels.rockchip_cpu import _renderer, _vector_exp2_source
 from tinygrad.llm.kernels.rockchip_recurrent import _whole_storage
 from tinygrad.llm.kernels.rockchip_padding import capacity_input, mark_zero_tail
 from tinygrad.uop.ops import KernelInfo, Ops, ProgramInfo, UOp, resolve
@@ -20,6 +20,11 @@ ONPU_MLA_ATTN_FP16 = ContextVar('ONPU_MLA_ATTN_FP16',0)
 # once for several heads instead of once per head. Each output keeps its
 # ascending-c/key accumulation, so results are bit-identical.
 ONPU_MLA_HEAD_BLOCK = ContextVar('ONPU_MLA_HEAD_BLOCK',0)
+# Opt-in (default 0): fuse qk + the exact softmax into one kernel on the prefill
+# path. The padded FP32 score buffer is never materialised: each row's scores stay
+# in a small local buffer, removing the 13 MB score write + read + memset per
+# layer while producing bit-identical probabilities.
+ONPU_MLA_QK_SOFTMAX = ContextVar('ONPU_MLA_QK_SOFTMAX',0)
 
 
 @functools.cache
@@ -55,6 +60,40 @@ void {name}({args}) {{
     UOp(Ops.BINARY,arg=renderer.compiler.compile_cached(source))))
 
 
+@functools.cache
+def _fused_program(out:UOp, inp:UOp, rope_inp:UOp, cache:UOp, start:UOp, rows:UOp, heads:int, capacity:int,
+                   context:int, width:int, rope_width:int, values:int, stride:int, scale:float, pool:int|None,
+                   causal_work:bool=True, head_block:int=0) -> UOp:
+  name='rockchip_cpu_mla_qk_softmax'
+  pstride=((context+15)//16*16+4)
+  scratch=('float packed['+str(width*pstride)+'] __attribute__((aligned(16)));\n'
+           '  for(int c=0;c<'+str(width)+';c++) {\n'
+           '    for(int key=0;key<*start+*rows;key++)packed[c*'+str(pstride)+'+key]=cache[key*'+str(width)+'+c];\n'
+           '    for(int key=*start+*rows;key<((*start+*rows+15)&~15);key++)packed[c*'+str(pstride)+'+key]=0;\n'
+           '  }')
+  split=rope_width>0
+  args=('float *out,const float *input,const float *input_rope,const float *cache,const int *start,const int *rows' if split
+        else 'float *out,const float *input,const float *cache,const int *start,const int *rows')
+  work='out,input,'+('input_rope' if split else '(const float*)0')+',cache,packed'
+  work_init=('MLAWork work={'+work+','+str(heads)+','+str(capacity)+',*rows,*start,\n'
+             '    '+str(context)+','+str(width)+','+str(width-rope_width)+','+str(rope_width)+','+str(values)+','+str(stride)+','
+             +float(scale).hex()+'f,{0,0,0,0}};')
+  body=('void '+name+'('+args+') {\n'
+        '  if(*start<0||*rows<1||*rows>'+str(capacity)+'||*start+*rows>'+str(context)+')__builtin_trap();\n'
+        '  '+scratch+'\n'
+        '  '+work_init+'\n'
+        '  mla_execute_qk_softmax(&work,(mla_parallel_fn)'+(str(pool or 0))+'ULL);\n'
+        '}\n')
+  source=(f'#define MLA_CAUSAL_WORK {int(causal_work)}\n#define MLA_FP16 0\n#define MLA_HEAD_BLOCK {int(head_block)}\n#define MLA_FUSED_QK_SOFTMAX 1\n'
+          +_vector_exp2_source()+Path(__file__).with_suffix('.c').read_text()+body)
+  inputs=(out,inp,rope_inp,cache,start,rows) if split else (out,inp,cache,start,rows)
+  renderer=_renderer()
+  sink=UOp.sink(*inputs,arg=KernelInfo(name))
+  info=replace(ProgramInfo.from_sink(sink,renderer.target),outs=(0,),ins=tuple(range(1,len(inputs))))
+  return UOp(Ops.PROGRAM,arg=info,src=(sink,UOp(Ops.LINEAR,src=inputs),UOp(Ops.SOURCE,arg=source),
+    UOp(Ops.BINARY,arg=renderer.compiler.compile_cached(source))))
+
+
 def _bounds(start:int|UOp, rows:int|UOp, capacity:int, context:int):
   if (isinstance(start,bool) or not isinstance(start,(int,UOp)) or isinstance(rows,bool) or not isinstance(rows,(int,UOp))
       or isinstance(start,int) and not 0<=start<context or isinstance(start,UOp) and not 0<=start.vmin<=start.vmax<context
@@ -71,6 +110,7 @@ class MLAAttention:
     self.heads,self.context,self.width,self.values,self.scale=heads,context,width,values,scale
     self.causal_work=bool(getenv('ONPU_MLA_CAUSAL_WORK',1))
     self.fused_softmax=bool(ONPU_MLA_FUSED_SOFTMAX)
+    self.qk_softmax=bool(ONPU_MLA_QK_SOFTMAX) and (heads,context,width,values)==(40,512,288,256)
     self._pool=lambda:pool  # Keep worker-library internals out of state-dict walks.
 
   def _validate(self, x:Tensor, cache:Tensor, start:int|UOp, rope:Tensor|None=None):
@@ -139,6 +179,33 @@ class MLAAttention:
 
   def query_key(self, query:Tensor, cache:Tensor, start:int|UOp, *, rope:Tensor|None=None) -> Tensor:
     return self._run(query,cache,start,True,rope)
+  def query_key_softmax(self, query:Tensor, cache:Tensor, start:int|UOp, *, rope:Tensor|None=None) -> Tensor:
+    """Fused prefill qk + exact softmax: returns the same probability tensor the
+    qk + rockchip_mla_softmax pair would produce, without the padded score buffer."""
+    if not self.qk_softmax:raise ValueError('Fused MLA qk+softmax is not enabled for this geometry')
+    rows,capacity=self._validate(query,cache,start,rope)
+    if capacity<2:raise ValueError('Fused MLA qk+softmax is a prefill path')
+    rope_width=0 if rope is None else rope.shape[-1]
+    assert isinstance(rope_width,int)
+    stride=self.context+capacity-1
+    dense=capacity_input(query).contiguous()
+    dense_rope=None if rope is None else capacity_input(rope).contiguous()
+    position=Tensor(start,device='CPU',dtype=dtypes.int).reshape(1).clone()
+    count=Tensor(rows,device='CPU',dtype=dtypes.int).reshape(1).clone()
+    pool=self._pool()
+    address=pool.prefill_address if pool is not None and pool.active and self.heads>=4 else None
+    head_block=int(ONPU_MLA_HEAD_BLOCK.value)
+    head_block=4 if head_block else 0
+    out=Tensor.empty(1,self.heads,capacity,stride,device='CPU',dtype=dtypes.float)
+    if dense_rope is None:
+      full=out.custom_kernel(dense,cache,position,count,fxn=lambda o,a,k,s,n:_fused_program(
+        o,a,a,k,s,n,self.heads,capacity,self.context,self.width,0,self.values,stride,self.scale,address,
+        self.causal_work,head_block))[0]
+    else:
+      full=out.custom_kernel(dense,dense_rope,cache,position,count,fxn=lambda o,a,r,k,s,n:_fused_program(
+        o,a,r,k,s,n,self.heads,capacity,self.context,self.width,rope_width,self.values,stride,self.scale,address,
+        self.causal_work,head_block))[0]
+    return mark_zero_tail(full[:,:,:rows,:start+rows],full,'mla_qk_softmax')
   def weighted_value(self, probabilities:Tensor, cache:Tensor, start:int|UOp) -> Tensor:return self._run(probabilities,cache,start,False)
 
 
