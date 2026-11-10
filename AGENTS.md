@@ -35,9 +35,10 @@ deficit (structurally blocked host-side).**
   latent cache once per head (40×); loading it once for 4 heads with 16/8
   explicit accumulators keeps each output's ascending-c/key order (bit-exact),
   cutting qk 8.09→7.46 and pv 8.07→4.11 ms/token (CPU total 29.67→25.12). **Prefill
-  remains −29.4%** (TTFT ratio 0.7059, 2300–2413 ms vs 1461.6) and cannot be
-  closed host-side (measured NPU prefill phase 1486.3 ms alone ≥ RKLLM's whole
-  1461.6 ms); only SDK M128/A16-C4 tiling for k=2560/4096/2304 (multi-week).
+  remains −22.0%** (TTFT ratio 0.7804 in the latest soak; the earlier parity
+  config read −29.4%) and cannot be closed host-side (measured NPU prefill phase
+  1486.3 ms alone ≥ RKLLM's whole 1461.6 ms); only SDK M128/A16-C4 tiling for
+  k=2560/4096/2304 (multi-week).
   Optional margin built: `ONPU_MLA_PROJ_BLOCKED=1` (projection −35.5%, TTFT
   −165…−180 ms, bit-exact, default OFF) and `ONPU_MLA_HEAD_BLOCK=4` (decode
   kernels above; prefill TTFT ratio improved to 0.78). Block-order was tried and
