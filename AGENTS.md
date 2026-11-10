@@ -25,18 +25,23 @@ deficit (structurally blocked host-side).**
   All 64 `generated_ids` are bit-identical on every trial. Do not re-litigate
   ChatGLM decode: the whole 4.7711 → 5.1212 tok/s path is in
   `~/oNPU/progress.md` §0.3–0.4f; the remaining default-OFF levers are margin.
-- **MiniCPM3-4B: decode is now at PARITY; prefill is the remaining blocker.**
-  soak-minicpm3-v1 (55 °C cold start, n=3 pairs, 5 trials, 64 tokens, ids
-  bit-exact, gate PASS): oNPU 5.7024 tok/s / 175.37 ms vs RKLLM 5.7880 / 172.77
-  ms, paired median **0.9979 (−0.21%, sd 0.0078)**; within clock buckets oNPU
-  leads (1 GHz +0.10%, 800 MHz +1.90%). Trajectory: recorded 5.3807 → 5.87 tok/s
-  at 1 GHz (+9.1%) via the merge/fast/host-fusion/MLA-retile levers. **Prefill
+- **MiniCPM3-4B: decode now WINS; prefill is the remaining blocker.**
+  soak-minicpm3-hb-v1 (55 °C cold start, n=3 pairs × 3 trials, 64 tokens, every
+  arm at 55 °C, ids bit-exact, gate PASS): oNPU **6.0195 tok/s / 166.1 ms** vs
+  RKLLM **5.8260 / 171.6 ms**, paired median **1.0389 (+3.89%)**, decode gap
+  −5.5 ms, 312 submits/token. Trajectory: recorded 5.3807 → 5.87 (parity) → 6.02
+  (win). The flip lever: **head-blocked MLA decode kernels**
+  (`ONPU_MLA_HEAD_BLOCK=4`) — the CPU qk/pv dots re-read their shared K block /
+  latent cache once per head (40×); loading it once for 4 heads with 16/8
+  explicit accumulators keeps each output's ascending-c/key order (bit-exact),
+  cutting qk 8.09→7.46 and pv 8.07→4.11 ms/token (CPU total 29.67→25.12). **Prefill
   remains −29.4%** (TTFT ratio 0.7059, 2300–2413 ms vs 1461.6) and cannot be
   closed host-side (measured NPU prefill phase 1486.3 ms alone ≥ RKLLM's whole
   1461.6 ms); only SDK M128/A16-C4 tiling for k=2560/4096/2304 (multi-week).
   Optional margin built: `ONPU_MLA_PROJ_BLOCKED=1` (projection −35.5%, TTFT
-  −165…−180 ms, bit-exact, default OFF). Block-order was tried and dropped for
-  MiniCPM3 (already semi-block-major; ambiguous/negative).
+  −165…−180 ms, bit-exact, default OFF) and `ONPU_MLA_HEAD_BLOCK=4` (decode
+  kernels above; prefill TTFT ratio improved to 0.78). Block-order was tried and
+  dropped for MiniCPM3 (already semi-block-major; ambiguous/negative).
 - Fair comparison is W8A8 only: no speculative draft model, no lower precision,
   no changed algorithm basis. "Bit-exact" means identical `generated_ids`, not
   merely close logits.

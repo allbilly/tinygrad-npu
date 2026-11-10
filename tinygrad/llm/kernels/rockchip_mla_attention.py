@@ -15,12 +15,17 @@ if TYPE_CHECKING:
 
 ONPU_MLA_FUSED_SOFTMAX = ContextVar('ONPU_MLA_FUSED_SOFTMAX',0)
 ONPU_MLA_ATTN_FP16 = ContextVar('ONPU_MLA_ATTN_FP16',0)
+# Opt-in (default 0): process MLA_HEAD_BLOCK heads per K/cache pass in the
+# single-row decode kernels so the shared K block / latent cache row is loaded
+# once for several heads instead of once per head. Each output keeps its
+# ascending-c/key accumulation, so results are bit-identical.
+ONPU_MLA_HEAD_BLOCK = ContextVar('ONPU_MLA_HEAD_BLOCK',0)
 
 
 @functools.cache
 def _program(out:UOp, inp:UOp, rope_inp:UOp, cache:UOp, start:UOp, rows:UOp, heads:int, capacity:int, context:int,
              width:int, rope_width:int, values:int, score_stride:int, scale:float, pool:int|None, qk:bool,
-             causal_work:bool=True, fp16:bool=False) -> UOp:
+             causal_work:bool=True, fp16:bool=False, head_block:int=0) -> UOp:
   name='rockchip_cpu_mla_qk' if qk else 'rockchip_cpu_mla_pv'
   scratch=f'''float packed[{width*(((context+15)//16*16+4))}] __attribute__((aligned(16)));
   for(int c=0;c<{width};c++) {{
@@ -32,7 +37,7 @@ def _program(out:UOp, inp:UOp, rope_inp:UOp, cache:UOp, start:UOp, rows:UOp, hea
   args=('float *out,const float *input,const float *input_rope,const float *cache,const int *start,const int *rows' if split
         else 'float *out,const float *input,const float *cache,const int *start,const int *rows')
   work=f'out,input,{("input_rope" if split else "(const float*)0")},cache,{("packed" if qk else "(const float*)0")}'
-  source=f'#define MLA_CAUSAL_WORK {int(causal_work)}\n#define MLA_FP16 {int(fp16)}\n'+Path(__file__).with_suffix('.c').read_text()+f'''
+  source=f'#define MLA_CAUSAL_WORK {int(causal_work)}\n#define MLA_FP16 {int(fp16)}\n#define MLA_HEAD_BLOCK {int(head_block)}\n'+Path(__file__).with_suffix('.c').read_text()+f'''
 void {name}({args}) {{
   if(*start<0||*rows<1||*rows>{capacity}||*start+*rows>{context})__builtin_trap();
   for(unsigned long i=0;i<{elements}UL;i++)out[i]=0;
@@ -113,14 +118,16 @@ class MLAAttention:
     if pool is not None and pool.active and self.heads>=4:
       address=pool.address if capacity==1 else pool.prefill_address
     fp16=bool(ONPU_MLA_ATTN_FP16) and capacity==1 and not qk
+    head_block=int(ONPU_MLA_HEAD_BLOCK.value)
+    head_block=4 if head_block else 0  # the C fast path is written for 4 heads per pass
     if dense_rope is None:
       out=Tensor.empty(*shape,device='CPU',dtype=dtypes.float).custom_kernel(dense,cache,position,count,
         fxn=lambda o,a,k,s,n:_program(o,a,a,k,s,n,self.heads,capacity,self.context,self.width,0,self.values,stride,self.scale,
-                                      address,qk,self.causal_work,fp16))[0]
+                                      address,qk,self.causal_work,fp16,head_block))[0]
     else:
       out=Tensor.empty(*shape,device='CPU',dtype=dtypes.float).custom_kernel(dense,dense_rope,cache,position,count,
         fxn=lambda o,a,r,k,s,n:_program(o,a,r,k,s,n,self.heads,capacity,self.context,self.width,rope_width,self.values,stride,
-                                      self.scale,address,qk,self.causal_work,fp16))[0]
+                                      self.scale,address,qk,self.causal_work,fp16,head_block))[0]
     logical=out.shrink(((0,1),(0,self.heads),(0,rows),(0,start+rows if qk else self.values)))
     return mark_zero_tail(logical,out,'mla_scores' if qk else 'mla_context') if self.fused_softmax else logical
 

@@ -139,12 +139,151 @@ static void mla_pv_part(MLAWork *w,int group,int groups) {
   }
 }
 
+
+/* ---- Opt-in head-blocked single-row decode path (MLA_HEAD_BLOCK > 1) ----
+   The baseline kernels reload the shared K block (qk) or the latent cache row
+   (pv) once PER HEAD. These variants load it once for MLA_HEAD_BLOCK heads;
+   every output still accumulates over ascending c (qk) / ascending key (pv)
+   with the same multiply/add expression, so results are bit-identical. Only
+   the capacity==1, rows==1 shape (decode) uses this path. */
+#if MLA_HEAD_BLOCK > 1
+#define MLA_HB MLA_HEAD_BLOCK
+static void mla_qk_single(MLAWork *w,int head) {
+  const int total=w->start+w->rows;const int pstride=((w->context+15)&~15)+4;
+  const float *q=w->input+((size_t)head*w->capacity)*w->nope;
+  const float *qr=w->rope?w->input_rope+((size_t)head*w->capacity)*w->rope:q;
+  float *out=w->out+((size_t)head*w->capacity)*w->stride;
+  for(int key=0;key<total;key+=16) {
+    M4 s0={0,0,0,0},s1={0,0,0,0},s2={0,0,0,0},s3={0,0,0,0};
+    for(int c=0;c<w->nope;c++) {
+      M4 query={q[c],q[c],q[c],q[c]};
+      const float *base=w->packed+(size_t)c*pstride+key;
+      M4 k0=*(const M4*)(base),k1=*(const M4*)(base+4),k2=*(const M4*)(base+8),k3=*(const M4*)(base+12);
+      s0=s0+query*k0;s1=s1+query*k1;s2=s2+query*k2;s3=s3+query*k3;
+    }
+    for(int c=0;c<w->rope;c++) {
+      M4 query={qr[c],qr[c],qr[c],qr[c]};
+      const float *base=w->packed+(size_t)(c+w->nope)*pstride+key;
+      M4 k0=*(const M4*)(base),k1=*(const M4*)(base+4),k2=*(const M4*)(base+8),k3=*(const M4*)(base+12);
+      s0=s0+query*k0;s1=s1+query*k1;s2=s2+query*k2;s3=s3+query*k3;
+    }
+    for(int lane=0;lane<4&&key+lane<total;lane++)out[key+lane]=s0[lane]*w->scale;
+    for(int lane=0;lane<4&&key+4+lane<total;lane++)out[key+4+lane]=s1[lane]*w->scale;
+    for(int lane=0;lane<4&&key+8+lane<total;lane++)out[key+8+lane]=s2[lane]*w->scale;
+    for(int lane=0;lane<4&&key+12+lane<total;lane++)out[key+12+lane]=s3[lane]*w->scale;
+  }
+}
+static void mla_qk_part_hb(MLAWork *w,int group,int groups) {
+  const int HB=MLA_HB;const int total=w->start+w->rows;const int pstride=((w->context+15)&~15)+4;
+  const int nblocks=(w->heads+HB-1)/HB;
+  for(int blk=group;blk<nblocks;blk+=groups) {
+    int hb=blk*HB,nh=w->heads-hb;if(nh>HB)nh=HB;
+    if(nh<HB){for(int h=0;h<nh;h++)mla_qk_single(w,hb+h);continue;}
+    const size_t hstep=(size_t)w->capacity*w->nope;
+    const float *q0=w->input+(size_t)hb*hstep;
+    const float *q1=q0+w->nope,*q2=q1+w->nope,*q3=q2+w->nope;
+    const size_t rstep=(size_t)w->capacity*w->rope;
+    const float *r0=w->rope?w->input_rope+(size_t)hb*rstep:q0;
+    const float *r1=w->rope?r0+w->rope:q1,*r2=w->rope?r1+w->rope:q2,*r3=w->rope?r2+w->rope:q3;
+    float *o0=w->out+(size_t)hb*w->stride;
+    float *o1=o0+w->stride,*o2=o1+w->stride,*o3=o2+w->stride;
+    for(int key=0;key<total;key+=16) {
+      M4 a00={0,0,0,0},a01={0,0,0,0},a02={0,0,0,0},a03={0,0,0,0};
+      M4 a10={0,0,0,0},a11={0,0,0,0},a12={0,0,0,0},a13={0,0,0,0};
+      M4 a20={0,0,0,0},a21={0,0,0,0},a22={0,0,0,0},a23={0,0,0,0};
+      M4 a30={0,0,0,0},a31={0,0,0,0},a32={0,0,0,0},a33={0,0,0,0};
+      for(int c=0;c<w->nope;c++) {
+        const float *base=w->packed+(size_t)c*pstride+key;
+        M4 k0=*(const M4*)(base),k1=*(const M4*)(base+4),k2=*(const M4*)(base+8),k3=*(const M4*)(base+12);
+        float v;M4 b;
+        v=q0[c];b=(M4){v,v,v,v};a00=a00+b*k0;a01=a01+b*k1;a02=a02+b*k2;a03=a03+b*k3;
+        v=q1[c];b=(M4){v,v,v,v};a10=a10+b*k0;a11=a11+b*k1;a12=a12+b*k2;a13=a13+b*k3;
+        v=q2[c];b=(M4){v,v,v,v};a20=a20+b*k0;a21=a21+b*k1;a22=a22+b*k2;a23=a23+b*k3;
+        v=q3[c];b=(M4){v,v,v,v};a30=a30+b*k0;a31=a31+b*k1;a32=a32+b*k2;a33=a33+b*k3;
+      }
+      for(int c=0;c<w->rope;c++) {
+        const float *base=w->packed+(size_t)(c+w->nope)*pstride+key;
+        M4 k0=*(const M4*)(base),k1=*(const M4*)(base+4),k2=*(const M4*)(base+8),k3=*(const M4*)(base+12);
+        float v;M4 b;
+        v=r0[c];b=(M4){v,v,v,v};a00=a00+b*k0;a01=a01+b*k1;a02=a02+b*k2;a03=a03+b*k3;
+        v=r1[c];b=(M4){v,v,v,v};a10=a10+b*k0;a11=a11+b*k1;a12=a12+b*k2;a13=a13+b*k3;
+        v=r2[c];b=(M4){v,v,v,v};a20=a20+b*k0;a21=a21+b*k1;a22=a22+b*k2;a23=a23+b*k3;
+        v=r3[c];b=(M4){v,v,v,v};a30=a30+b*k0;a31=a31+b*k1;a32=a32+b*k2;a33=a33+b*k3;
+      }
+      for(int lane=0;lane<4&&key+lane<total;lane++){o0[key+lane]=a00[lane]*w->scale;o1[key+lane]=a10[lane]*w->scale;o2[key+lane]=a20[lane]*w->scale;o3[key+lane]=a30[lane]*w->scale;}
+      for(int lane=0;lane<4&&key+4+lane<total;lane++){o0[key+4+lane]=a01[lane]*w->scale;o1[key+4+lane]=a11[lane]*w->scale;o2[key+4+lane]=a21[lane]*w->scale;o3[key+4+lane]=a31[lane]*w->scale;}
+      for(int lane=0;lane<4&&key+8+lane<total;lane++){o0[key+8+lane]=a02[lane]*w->scale;o1[key+8+lane]=a12[lane]*w->scale;o2[key+8+lane]=a22[lane]*w->scale;o3[key+8+lane]=a32[lane]*w->scale;}
+      for(int lane=0;lane<4&&key+12+lane<total;lane++){o0[key+12+lane]=a03[lane]*w->scale;o1[key+12+lane]=a13[lane]*w->scale;o2[key+12+lane]=a23[lane]*w->scale;o3[key+12+lane]=a33[lane]*w->scale;}
+    }
+  }
+}
+static void mla_pv_single(MLAWork *w,int head) {
+  const int total=w->start+w->rows;
+  const float *p0=w->input+((size_t)head*w->capacity)*w->stride;
+  float *out=w->out+((size_t)head*w->capacity)*w->values;
+  for(int c=0;c<w->values;c+=4) {
+    M4 a={0,0,0,0};
+    for(int key=0;key<total;key++) {
+      M4 value=*(const M4*)(w->cache+(size_t)key*w->width+c);
+      float p=p0[key];a=a+(M4){p,p,p,p}*value;
+    }
+    *(M4*)(out+c)=a;
+  }
+}
+static void mla_pv_part_hb(MLAWork *w,int group,int groups) {
+  const int HB=MLA_HB;const int total=w->start+w->rows;const int nblocks=(w->heads+HB-1)/HB;
+  for(int blk=group;blk<nblocks;blk+=groups) {
+    int hb=blk*HB,nh=w->heads-hb;if(nh>HB)nh=HB;
+    if(nh<HB){for(int h=0;h<nh;h++)mla_pv_single(w,hb+h);continue;}
+    const float *p0=w->input+(size_t)hb*w->capacity*w->stride;
+    const float *p1=p0+w->stride,*p2=p1+w->stride,*p3=p2+w->stride;
+    float *o0=w->out+(size_t)hb*w->capacity*w->values;
+    float *o1=o0+w->values,*o2=o1+w->values,*o3=o2+w->values;
+    int c=0;
+    for(;c+8<=w->values;c+=8) {
+      M4 a00={0,0,0,0},a01={0,0,0,0},a10={0,0,0,0},a11={0,0,0,0};
+      M4 a20={0,0,0,0},a21={0,0,0,0},a30={0,0,0,0},a31={0,0,0,0};
+      for(int key=0;key<total;key++) {
+        const float *cv=w->cache+(size_t)key*w->width+c;
+        M4 v0=*(const M4*)cv,v1=*(const M4*)(cv+4);
+        float p;M4 b;
+        p=p0[key];b=(M4){p,p,p,p};a00=a00+b*v0;a01=a01+b*v1;
+        p=p1[key];b=(M4){p,p,p,p};a10=a10+b*v0;a11=a11+b*v1;
+        p=p2[key];b=(M4){p,p,p,p};a20=a20+b*v0;a21=a21+b*v1;
+        p=p3[key];b=(M4){p,p,p,p};a30=a30+b*v0;a31=a31+b*v1;
+      }
+      *(M4*)(o0+c)=a00;*(M4*)(o0+c+4)=a01;
+      *(M4*)(o1+c)=a10;*(M4*)(o1+c+4)=a11;
+      *(M4*)(o2+c)=a20;*(M4*)(o2+c+4)=a21;
+      *(M4*)(o3+c)=a30;*(M4*)(o3+c+4)=a31;
+    }
+    for(;c<w->values;c+=4) {
+      M4 a0={0,0,0,0},a1={0,0,0,0},a2={0,0,0,0},a3={0,0,0,0};
+      for(int key=0;key<total;key++) {
+        M4 value=*(const M4*)(w->cache+(size_t)key*w->width+c);
+        float p;
+        p=p0[key];a0=a0+(M4){p,p,p,p}*value;
+        p=p1[key];a1=a1+(M4){p,p,p,p}*value;
+        p=p2[key];a2=a2+(M4){p,p,p,p}*value;
+        p=p3[key];a3=a3+(M4){p,p,p,p}*value;
+      }
+      *(M4*)(o0+c)=a0;*(M4*)(o1+c)=a1;*(M4*)(o2+c)=a2;*(M4*)(o3+c)=a3;
+    }
+  }
+}
+#endif
 static void mla_qk_worker(void **args,int unused,int group) {
   (void)unused;MLAWork *w=args[0];if(group<0||group>=4)return;
+#if MLA_HEAD_BLOCK > 1
+  if(w->capacity==1&&w->rows==1)mla_qk_part_hb(w,group,4);else
+#endif
   mla_qk_part(w,group,4);w->done[group]=1;
 }
 static void mla_pv_worker(void **args,int unused,int group) {
   (void)unused;MLAWork *w=args[0];if(group<0||group>=4)return;
+#if MLA_HEAD_BLOCK > 1 && !MLA_FP16
+  if(w->capacity==1&&w->rows==1)mla_pv_part_hb(w,group,4);else
+#endif
   mla_pv_part(w,group,4);w->done[group]=1;
 }
 static void mla_execute(MLAWork *w,mla_parallel_fn parallel,int qk) {
@@ -152,7 +291,11 @@ static void mla_execute(MLAWork *w,mla_parallel_fn parallel,int qk) {
   /* Single-row decode keeps its existing work and avoids the safety scan. */
   w->causal_safe=MLA_CAUSAL_WORK&&w->capacity>1&&w->scale>0.0f&&w->scale<=1024.0f&&
     mla_causal_safe_values(w->cache,(size_t)(w->start+w->rows)*w->width);
-  if(!parallel){if(qk)mla_qk_part(w,0,1);else mla_pv_part(w,0,1);return;}
+  if(!parallel){
+#if MLA_HEAD_BLOCK > 1
+    if(w->capacity==1&&w->rows==1){if(qk)mla_qk_part_hb(w,0,1);else mla_pv_part_hb(w,0,1);return;}
+#endif
+    if(qk)mla_qk_part(w,0,1);else mla_pv_part(w,0,1);return;}
   void *args[4]={w,0,0,0};
   if(parallel(qk?mla_qk_worker:mla_pv_worker,args,0))__builtin_trap();
   for(int i=0;i<4;i++)if(!w->done[i])__builtin_trap();
