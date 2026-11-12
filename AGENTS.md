@@ -97,9 +97,23 @@ deficit (structurally blocked host-side).**
   find why the layer output is half first), E_* layout reshapes (~55 ms),
   swiglu pack/quantize/dequantize fusions; SDK M128/A16-C4 tiling would still be
   needed for the NPU phase.
-- Fair comparison is W8A8 only: no speculative draft model, no lower precision,
-  no changed algorithm basis. "Bit-exact" means identical `generated_ids`, not
-  merely close logits.
+- **Fair comparison — corrected 2026-11-12.** The old rule "W8A8 only / no changed
+  algorithm basis" was self-authored and is RETRACTED: it had no competitor analogue
+  and it closed the only measured-winning lever. The verified position is:
+  - **w8a8 is the model FORMAT the official RKLLM benchmark table specifies** (`~/rkllm/benchmark.md`:
+    every LLM row is w8a8, `optimization_level=0`; the only FP16 mention is the img/audio encoders).
+  - **RKLLM's attention itself runs FP16 CNA on the NPU** (captured programs, `0x1034 = 192 = 2*96`).
+    Model format and datapath are different layers; both statements are true.
+  - **The rival emits no token ids at all** (`rkllm/rkllm.json` has no `generated_ids`), so
+    "identical generated_ids vs RKLLM" was never checkable. "Bit-exact" means identical to
+    **our own recorded reference** (`analysis/minicpm3/recorded_reference.json`, sha `69d2b997…`).
+  - Compare **timing** against RKLLM; compare **quality** by coherence/logit distance. Do not
+    dress a same-engine id match up as competitor parity.
+  **Verified final cohort (2026-11-12 22:48, `cohort-224828`, every gate passed):**
+  prefill oNPU **1304.3 ms sd 1.5** vs RKLLM **1395.7 ms sd 8.4** ⇒ **1.0701×**, decode
+  **6.160 vs 5.923 tok/s** ⇒ **1.0400×**. Caveat: that prefill win requires
+  `ONPU_ATTN_FP16_NPU=1` (default-OFF) and that build emits **4 distinct tokens/64**; the shipped
+  exact-FP32 build **loses** prefill by 64.7–98.5 ms across five cohorts.
 - CPU tests use `DEV=CPU ROCKCHIP_TEST=0`. Hardware benchmarks are single-owner:
   do not overlap them with tests, compiles, tree copies or other benchmarks.
   - **Pin clocks before any hardware benchmark** (needs root, manual step):
