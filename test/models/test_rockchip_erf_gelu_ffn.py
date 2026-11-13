@@ -138,3 +138,28 @@ def test_cli_erf_ffn_flags_reject_unsupported_phases_before_checkpoint_io(monkey
         '--report',str(tmp_path/'report.json'),*flags]
   monkeypatch.setattr(sys,'argv',argv)
   with pytest.raises(ValueError,match='erf GELU'): benchmark_inference.main()
+
+
+@pytest.mark.parametrize('rows,depth,columns,activation,enabled,expected',[
+  (128,2048,13312,'gelu',True,True),
+  (128,2048,13312,'gelu',False,False),
+  (64,2048,13312,'gelu',True,False),
+  (17,2048,13312,'gelu',True,False),
+  (128,1536,13312,'gelu',True,False),
+  (128,2048,12288,'gelu',True,False),
+  (128,2048,13312,'gelu_tanh',True,False),
+])
+def test_sdk_erf_input_layout_is_limited_to_captured_geometry(monkeypatch,rows,depth,columns,activation,enabled,expected):
+  from tinygrad.llm.kernels import rockchip_gelu_ffn as gelu
+  class LayoutSelected(Exception):pass
+  def quantize(*args,**kwargs):raise LayoutSelected(kwargs['sdk_prefill'])
+  monkeypatch.setattr(gelu,'quantize',quantize)
+  monkeypatch.setattr(gelu,'getenv',lambda key,default=0:int(enabled) if key=='ONPU_INT8_SDK_PREFILL' else default)
+  joint=object.__new__(RockchipInt8Linear)
+  joint.depth,joint.columns,joint.input_scale=depth,columns,None
+  joint.packed=[Tensor.empty(1,depth//32,32,32,device='CPU',dtype=dtypes.int8)]
+  kernel=object.__new__(RockchipInt8ErfGeluFeedForward)
+  kernel.activation=activation
+  kernel.projections=SimpleNamespace(joint=joint)
+  with pytest.raises(LayoutSelected) as exc:kernel(Tensor.empty(1,rows,depth,device='CPU'))
+  assert exc.value.args==(expected,)

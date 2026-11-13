@@ -1,0 +1,9 @@
+# Frozen source snapshot
+freeze_date=2026-11-13
+source_tree=/home/orangepi/tg-decode-all
+snapshot_parent=3a1b2e1c94ffdfee791b98434849af2a34ee7fc8
+freeze_branch=codex/freeze-tg-decode-all-20261113
+
+This is the frozen benchmark tree used for the retime runs. Its 14 recorded PROVENANCE fingerprints matched 14/14 at freeze. No tests or hardware benchmarks were run during freezing.
+
+The two codex-session-*.md conversation dumps in some source directories were excluded from Git; they remain untouched in the original directories. Runtime code, tests, fixtures, and supporting scripts were staged from the source snapshot.

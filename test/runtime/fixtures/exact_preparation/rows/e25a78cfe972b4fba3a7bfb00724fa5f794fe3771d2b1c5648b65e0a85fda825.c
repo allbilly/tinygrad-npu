@@ -1,0 +1,63 @@
+typedef float float4 __attribute__((aligned(16),ext_vector_type(4)));
+void E_32_512_3_4(float* restrict data0_196608, float* restrict data1_196608, float* restrict data2_196608, float* restrict data3_128, __fp16* restrict data4_1536) {
+  for (int Lidx0 = 0; Lidx0 < 32; Lidx0++) {
+    float4 val0 = (*((float4*)((data3_128+(Lidx0<<2)))));
+    for (int Lidx1 = 0; Lidx1 < 512; Lidx1++) {
+      int alu0 = (Lidx1*3);
+      __fp16 val1 = (*(data4_1536+(alu0+1)));
+      __fp16 val2 = (*(data4_1536+(alu0+2)));
+      __fp16 val3 = (*(data4_1536+alu0));
+      int alu1 = ((Lidx0*6144)+alu0);
+      int alu2 = (alu1+1);
+      float val4 = (*(data1_196608+alu2));
+      int alu3 = (alu1+1536);
+      float val5 = (*(data1_196608+alu3));
+      int alu4 = (alu1+1537);
+      float val6 = (*(data1_196608+alu4));
+      int alu5 = (alu1+1538);
+      float val7 = (*(data1_196608+alu5));
+      int alu6 = (alu1+2);
+      float val8 = (*(data1_196608+alu6));
+      int alu7 = (alu1+3072);
+      float val9 = (*(data1_196608+alu7));
+      int alu8 = (alu1+3073);
+      float val10 = (*(data1_196608+alu8));
+      int alu9 = (alu1+3074);
+      float val11 = (*(data1_196608+alu9));
+      int alu10 = (alu1+4608);
+      float val12 = (*(data1_196608+alu10));
+      int alu11 = (alu1+4609);
+      float val13 = (*(data1_196608+alu11));
+      int alu12 = (alu1+4610);
+      float val14 = (*(data1_196608+alu12));
+      float val15 = (*(data1_196608+alu1));
+      float val16 = (*(data2_196608+alu2));
+      float val17 = (*(data2_196608+alu3));
+      float val18 = (*(data2_196608+alu4));
+      float val19 = (*(data2_196608+alu5));
+      float val20 = (*(data2_196608+alu6));
+      float val21 = (*(data2_196608+alu7));
+      float val22 = (*(data2_196608+alu8));
+      float val23 = (*(data2_196608+alu9));
+      float val24 = (*(data2_196608+alu10));
+      float val25 = (*(data2_196608+alu11));
+      float val26 = (*(data2_196608+alu12));
+      float val27 = (*(data2_196608+alu1));
+      float cast0 = ((float)(val1));
+      float cast1 = ((float)(val2));
+      float cast2 = ((float)(val3));
+      *(data0_196608+alu2) = (val4+((val16/val0[0])*cast0));
+      *(data0_196608+alu3) = (val5+((val17/val0[1])*cast2));
+      *(data0_196608+alu4) = (val6+((val18/val0[1])*cast0));
+      *(data0_196608+alu5) = (val7+((val19/val0[1])*cast1));
+      *(data0_196608+alu6) = (val8+((val20/val0[0])*cast1));
+      *(data0_196608+alu7) = (val9+((val21/val0[2])*cast2));
+      *(data0_196608+alu8) = (val10+((val22/val0[2])*cast0));
+      *(data0_196608+alu9) = (val11+((val23/val0[2])*cast1));
+      *(data0_196608+alu10) = (val12+((val24/val0[3])*cast2));
+      *(data0_196608+alu11) = (val13+((val25/val0[3])*cast0));
+      *(data0_196608+alu12) = (val14+((val26/val0[3])*cast1));
+      *(data0_196608+alu1) = (val15+((val27/val0[0])*cast2));
+    }
+  }
+}

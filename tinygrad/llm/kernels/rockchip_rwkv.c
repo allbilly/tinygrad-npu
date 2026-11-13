@@ -3,6 +3,9 @@
 #ifndef RWKV_ORDERED_NORMALIZATION
 #define RWKV_ORDERED_NORMALIZATION 0
 #endif
+#ifndef RWKV_SCAN_WIDTH
+#define RWKV_SCAN_WIDTH 0
+#endif
 typedef float F4 __attribute__((vector_size(16), aligned(1)));
 
 static F4 load_values(const float *p,int count) {
@@ -22,7 +25,7 @@ typedef struct {
 } RWKVWork;
 
 static void rwkv_scan_part(RWKVWork *w,int group,int groups) {
-  const int width=w->width;
+  const int width=RWKV_SCAN_WIDTH?RWKV_SCAN_WIDTH:w->width;
   float columns[256*256] __attribute__((aligned(16)));
   for(int bh=group;bh<w->batch*w->heads;bh+=groups) {
     const int batch=bh/w->heads,head=bh%w->heads;
@@ -33,6 +36,52 @@ static void rwkv_scan_part(RWKVWork *w,int group,int groups) {
       const size_t step=((size_t)batch*w->capacity*w->heads+t*w->heads+head)*width;
       const float *r=w->r+step,*k=w->k+step,*v=w->v+step;
       const float *decay=w->decay+step,*rate=w->rate+step,*unit=w->unit+step;
+#if RWKV_SCAN_WIDTH == 64
+      for(int j=0;j<width;j+=16) {
+        F4 predicted[4]={(F4){0},(F4){0},(F4){0},(F4){0}};
+        const int parts=(width-j+3)/4<4?(width-j+3)/4:4;
+        for(int c=0;c<width;c++) {
+          const float factor=RWKV_ORDERED_NORMALIZATION?w->unit_weight[head*width+c]:1;
+          #pragma clang loop unroll(full)
+          for(int q=0;q<4;q++)if(q<parts) {
+            const int offset=j+4*q,count=width-offset<4?width-offset:4;
+            F4 old=load_values(columns+c*width+offset,count);
+            if(RWKV_ORDERED_NORMALIZATION)
+              predicted[q]=predicted[q]+(old*(F4){unit[c],unit[c],unit[c],unit[c]})*(F4){factor,factor,factor,factor};
+            else predicted[q]=predicted[q]+old*(F4){unit[c],unit[c],unit[c],unit[c]};
+          }
+        }
+        if(RWKV_ORDERED_NORMALIZATION) {
+          float norm=w->unit_norm[((size_t)batch*w->capacity+t)*w->heads+head];
+          #pragma clang loop unroll(full)
+          for(int q=0;q<4;q++)predicted[q]=predicted[q]/(F4){norm,norm,norm,norm};
+        }
+        F4 value[4],result[4]={(F4){0},(F4){0},(F4){0},(F4){0}};
+        #pragma clang loop unroll(full)
+        for(int q=0;q<4;q++)if(q<parts) {
+          const int offset=j+4*q,count=width-offset<4?width-offset:4;
+          value[q]=load_values(v+offset,count);
+        }
+        for(int c=0;c<width;c++) {
+          const float correction=RWKV_ORDERED_NORMALIZATION?rate[c]:unit[c]*rate[c];
+          #pragma clang loop unroll(full)
+          for(int q=0;q<4;q++)if(q<parts) {
+            const int offset=j+4*q,count=width-offset<4?width-offset:4;
+            float *p=columns+c*width+offset;
+            F4 old=load_values(p,count);
+            F4 updated=(old*(F4){decay[c],decay[c],decay[c],decay[c]}-
+              predicted[q]*(F4){correction,correction,correction,correction})+value[q]*(F4){k[c],k[c],k[c],k[c]};
+            store_values(p,updated,count);
+            result[q]=result[q]+updated*(F4){r[c],r[c],r[c],r[c]};
+          }
+        }
+        #pragma clang loop unroll(full)
+        for(int q=0;q<4;q++)if(q<parts) {
+          const int offset=j+4*q,count=width-offset<4?width-offset:4;
+          store_values(w->out+step+offset,result[q],count);
+        }
+      }
+#else
       for(int j=0;j<width;j+=4) {
         const int count=width-j<4?width-j:4;
         F4 predicted=(F4){0,0,0,0};
@@ -60,6 +109,7 @@ static void rwkv_scan_part(RWKVWork *w,int group,int groups) {
         }
         store_values(w->out+step+j,result,count);
       }
+#endif
     }
     for(int j=0;j<width;j++)for(int c=0;c<width;c++)state[j*width+c]=columns[c*width+j];
     for(int t=w->rows;t<w->capacity;t++) {

@@ -3,8 +3,11 @@ from __future__ import annotations
 import functools, math
 from dataclasses import replace
 from tinygrad import Tensor, dtypes
+from tinygrad.helpers import ContextVar
 from tinygrad.llm.kernels.rockchip_cpu import _renderer, _vector_exp2_source
 from tinygrad.uop.ops import KernelInfo, Ops, ProgramInfo, UOp
+
+ONPU_CPU_SMALL_GELU_PREFILL = ContextVar('ONPU_CPU_SMALL_GELU_PREFILL',0)
 
 
 @functools.cache
@@ -47,8 +50,9 @@ def gated_gelu(gate:Tensor, up:Tensor) -> Tensor:
   if gate.ndim<2:return gate.gelu(approximate='tanh')*up
   rows = math.prod(gate.shape[:-1])
   capacity,depth = math.prod(gate.max_shape[:-1]),gate.max_shape[-1]
+  small_prefill = bool(ONPU_CPU_SMALL_GELU_PREFILL) and gate.max_shape==(1,128,256)
   if (gate.device!='CPU' or up.device!='CPU' or gate.dtype is not dtypes.float or up.dtype is not dtypes.float
-      or gate.shape!=up.shape or not 16<=capacity<=256 or not 512<=depth<=32768 or depth%4
+      or gate.shape!=up.shape or not 1<=capacity<=256 or not (512<=depth<=32768 or small_prefill) or depth%4
       or isinstance(rows,int) and rows<1 or isinstance(rows,UOp) and rows.vmin<1):
     return gate.gelu(approximate='tanh')*up
   count = Tensor(rows,device='CPU',dtype=dtypes.int).reshape(1).clone()

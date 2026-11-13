@@ -41,6 +41,8 @@ class Gemma3nBlock(Gemma4Block):
     return (predictions+(activated-predictions[self.active]).unsqueeze(0)*coefficients).contiguous()
 
   def _sparse_ffn(self,x:Tensor) -> Tensor:
+    fused=getattr(self,'fused_gelu_ffn',None)
+    if not math.isfinite(self.sparsity) and fused is not None and fused.enabled(x):return fused(x)
     gate,up = joint(x) if (joint:=getattr(self,'ffn_gate_up',None)) is not None else (self.ffn_gate(x),self.ffn_up(x))
     if math.isfinite(self.sparsity):
       mean = gate.mean(-1,keepdim=True)

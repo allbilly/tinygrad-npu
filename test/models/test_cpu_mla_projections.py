@@ -109,6 +109,45 @@ def test_cpu_mla_projection_configure_is_atomic_and_disable_removes_hook():
     configure(_model(), enabled=1)
 
 
+def test_configured_pool_dispatches_and_parks_when_graph_is_built_outside_scope():
+  from test.runtime.test_rockchip_shared_pool import _needs_pool, _pool_test_lock
+  from tinygrad.llm.kernels.rockchip_pool import AttentionPool
+  _needs_pool()
+  with _pool_test_lock():
+    pool=AttentionPool()
+    try:
+      model=_model()
+      assert configure(model,pool=pool)==1
+      hook=model.blk[0].cpu_mla_projections
+      assert hook._pool() is pool
+      x=Tensor.randn(1,4,17,64,device='CPU').realize()
+      output=hook.query(x)
+      before=pool.lib.pool_calls()
+      _assert_float_bits(output.numpy(),_reference(x,hook._sources()[0]).numpy())
+      assert pool.lib.pool_calls()>before
+      assert not pool.active and pool.lib.pool_parked()
+    finally:pool.close()
+
+
+def test_configured_prefill_pool_keeps_single_row_decode_serial():
+  from test.runtime.test_rockchip_shared_pool import _needs_pool, _pool_test_lock
+  from tinygrad.llm.kernels.rockchip_pool import AttentionPool
+  _needs_pool()
+  with _pool_test_lock():
+    pool=AttentionPool()
+    try:
+      key,value=_tables(heads=40,key_columns=256,key_depth=64,value_columns=64,value_depth=256)
+      hook=CPUMLAProjections(key,value,pool=pool)
+      hook.prepare()
+      for method,weight in ((hook.query,key),(hook.value,value)):
+        x=Tensor.randn(1,40,1,int(weight.shape[-1]),device='CPU').realize()
+        before=pool.lib.pool_calls()
+        _assert_float_bits(method(x).numpy(),_reference(x,weight).numpy())
+        assert pool.lib.pool_calls()==before
+      assert not pool.active and pool.lib.pool_parked()
+    finally:pool.close()
+
+
 def test_cpu_mla_projection_full_model_matches_serial_prefill_decode_reset_and_generation():
   serial = _model(seed=41)
   prepared = _model(seed=41)
