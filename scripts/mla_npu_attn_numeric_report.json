@@ -1,0 +1,39 @@
+{
+  "schema": "mla-npu-attn-numeric-v1",
+  "NPU_used": false,
+  "geometry": {
+    "layers": 62,
+    "heads": 40,
+    "rows": 128,
+    "ctx": 128,
+    "latent": 256,
+    "nope": 64,
+    "rope": 32,
+    "v_dim": 64
+  },
+  "scope": "Synthetic activations at real shapes; FP16 operands + FP32 accumulation + exact-order CPU softmax + FP16 probability operand vs the shipped absorbed FP32 CPU reference. No model/quality claim; GGUF weights unavailable offline.",
+  "reports": [
+    {
+      "weight_scale": 0.25,
+      "ref_absmax": 17.207935333251953,
+      "max_abs_error": 0.02340555191040039,
+      "max_rel_error": 258.7634582519531,
+      "rel_rms": 0.0007822498446330428,
+      "int8_codes": 327680,
+      "int8_codes_changed": 5744,
+      "int8_codes_changed_pct": 1.7529296875,
+      "int8_max_abs_delta": 1
+    },
+    {
+      "weight_scale": 0.0625,
+      "ref_absmax": 3.364227771759033,
+      "max_abs_error": 0.0022383928298950195,
+      "max_rel_error": 263.6708068847656,
+      "rel_rms": 0.0005055463989265263,
+      "int8_codes": 327680,
+      "int8_codes_changed": 4594,
+      "int8_codes_changed_pct": 1.4019775390625,
+      "int8_max_abs_delta": 1
+    }
+  ]
+}

@@ -22,6 +22,18 @@ ONPU_EXP2_FAST_PATH = ContextVar('ONPU_EXP2_FAST_PATH',0)
 ONPU_EXP2_SCALE_BITS = ContextVar('ONPU_EXP2_SCALE_BITS',1)
 ONPU_CPU_GQA_PREFILL = ContextVar('ONPU_CPU_GQA_PREFILL',0)
 ONPU_NORM_QUANT = ContextVar('ONPU_NORM_QUANT',0)
+# Decode-only RMSNorm+quantize fusion. The decode graph runs the exact RMSNorm kernel
+# and then immediately quantizes its result for an INT8 projection (qkv, gate/up or the
+# lm head): one launch and one 16 KB fp32 round trip are pure overhead. This opt-in
+# fuses them into one single-row kernel built from the exact source text of both kernels.
+# Default off; the older shared-pool `ONPU_NORM_QUANT` path stays untouched.
+ONPU_NORM_QUANT_DECODE = ContextVar('ONPU_NORM_QUANT_DECODE',0)
+# Materialise a deferred/mapped RMSNorm weight once when the CPU norm is installed.
+# Under --defer-weight-realization/--file-backed-cpu-weights (and HALF=1 casting every
+# GGUF tensor) the weight arrives as a lazy cast chain; consuming it inside the captured
+# decode graph re-runs that 4096-element cast on EVERY token: 57 weight-only kernels at
+# the graph head, measured as 0.155 ms/token under the CPU:E_1024_4 label.
+ONPU_HOST_REALIZE_NORM_WEIGHTS = ContextVar('ONPU_HOST_REALIZE_NORM_WEIGHTS',0)
 
 
 def head_gate(attention:Tensor, gate:Tensor) -> Tensor:
@@ -486,7 +498,7 @@ def unpack_tiles(parts:list[Tensor], split:bool=False) -> Tensor:
 @shared_program
 @functools.cache
 def _rms_norm(out:UOp, source:UOp, weight:UOp, rows:int, width:int, eps:float, parallel:bool|None=None,
-              active:UOp|None=None) -> UOp:
+              active:UOp|None=None, exact:bool=False) -> UOp:
   dtype = '__fp16' if weight.dtype is dtypes.half else 'float'
   load = '__builtin_convertvector(*(const half4*)(weight+c),float4)' if dtype=='__fp16' else '*(const float4*)(weight+c)'
   if parallel is None: parallel = rows*width>=131072
@@ -504,6 +516,31 @@ def _rms_norm(out:UOp, source:UOp, weight:UOp, rows:int, width:int, eps:float, p
   worker = '''static void *norm_worker(void *opaque) {
     Work *w=(Work*)opaque;norm_part(w->out,w->src,w->weight,w->begin,w->end);return (void*)0;
   }''' if parallel else ''
+  # Two arithmetic variants, chosen by `exact`. The exact one reproduces tinygrad's
+  # generic elementwise decomposition bit for bit, which is the reference the model
+  # uses when this kernel is not selected. Two verified differences from the shipped
+  # variant:
+  #   1. the variance reduces through ONE scalar accumulator with the square multiply
+  #      contracted into an FMA (acc = fma(v,v,acc)). A float4-lane accumulator rounds
+  #      the square separately and drifts 1 ulp on ~25% of rows.
+  #   2. .rsqrt() lowers to a DIVISION (x/sqrt(t)), not x*(1/sqrt(t)). The reciprocal
+  #      rounds twice and differs on ~28% of elements.
+  inv_w, eps_lit = f'{1/width:.17g}f', f'{eps:.17g}f'
+  if exact:
+    body = f'''float acc=0.0f;
+      for(int c=0;c<{width};c+=4) {{float4 v=*(const float4*)(src+r*{width}+c);
+        acc=__builtin_fmaf(v[0],v[0],acc); acc=__builtin_fmaf(v[1],v[1],acc);
+        acc=__builtin_fmaf(v[2],v[2],acc); acc=__builtin_fmaf(v[3],v[3],acc);}}
+      float denominator=__builtin_sqrtf(acc*{inv_w}+{eps_lit});
+      for(int c=0;c<{width};c+=4) {{float4 value=*(const float4*)(src+r*{width}+c),gamma={load};
+        *(float4*)(out+r*{width}+c)=((value/(float4)denominator))*gamma;}}'''
+  else:
+    body = f'''float4 acc=(float4)0;
+      for(int c=0;c<{width};c+=4) {{float4 value=*(const float4*)(src+r*{width}+c);acc=acc+value*value;}}
+      float sum=((acc[0]+acc[1])+acc[2])+acc[3];
+      float inverse=1.0f/__builtin_sqrtf(sum*{inv_w}+{eps_lit});
+      for(int c=0;c<{width};c+=4) {{float4 value=*(const float4*)(src+r*{width}+c),gamma={load};
+        *(float4*)(out+r*{width}+c)=(value*(float4)inverse)*gamma;}}'''
   text = f'''typedef float float4 __attribute__((aligned(16),ext_vector_type(4)));
   typedef __fp16 half4 __attribute__((aligned(8),ext_vector_type(4)));
   static void norm_part(float*,const float*,const {dtype}*,int,int);
@@ -514,12 +551,7 @@ def _rms_norm(out:UOp, source:UOp, weight:UOp, rows:int, width:int, eps:float, p
   }}
   static void norm_part(float *out,const float *src,const {dtype} *weight,int begin,int end) {{
     for(int r=begin;r<end;r++) {{
-      float4 acc=(float4)0;
-      for(int c=0;c<{width};c+=4) {{float4 value=*(const float4*)(src+r*{width}+c);acc=acc+value*value;}}
-      float sum=((acc[0]+acc[1])+acc[2])+acc[3];
-      float inverse=1.0f/__builtin_sqrtf(sum*{1/width:.17g}f+{eps:.17g}f);
-      for(int c=0;c<{width};c+=4) {{float4 value=*(const float4*)(src+r*{width}+c),gamma={load};
-        *(float4*)(out+r*{width}+c)=(value*(float4)inverse)*gamma;}}
+      {body}
     }}
   }}
   {worker}'''
@@ -541,9 +573,13 @@ def rms_norm(x:Tensor, weight:Tensor, eps:float) -> Tensor:
   active = (Tensor([count] if isinstance(count,int) else count,device='CPU',dtype=dtypes.int).reshape(1),) if zero_tail else ()
   out = Tensor.empty(*x.max_shape,device='CPU',dtype=dtypes.float).custom_kernel(
     x.pad_to(x.max_shape).contiguous(),weight.contiguous(),*active,
-    fxn=lambda o,a,w,*n:_rms_norm(o,a,w,rows,width,eps,active=n[0] if n else None))[0]
+    fxn=lambda o,a,w,*n:_rms_norm(o,a,w,rows,width,eps,active=n[0] if n else None,
+                                  # Only the decode geometry takes the exact path: prefill already
+                                  # used this kernel before the fix, so changing it there would alter
+                                  # numerics the reference soak was measured on.
+                                  exact=rows<16))[0]
   logical = out.shrink(tuple((0,s) for s in x.shape))
-  if ONPU_NORM_QUANT:
+  if ONPU_NORM_QUANT or ONPU_NORM_QUANT_DECODE:
     from tinygrad.llm.kernels.rockchip_norm_quant import register_norm
     logical = register_norm(logical,x,weight,eps)
   return mark_zero_tail(logical,out,'rms_norm') if zero_tail else logical

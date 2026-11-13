@@ -5,16 +5,20 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 from tinygrad import Tensor, dtypes
+from tinygrad.helpers import ContextVar
 from tinygrad.llm.kernels.rockchip_cpu import _renderer
 from tinygrad.uop.ops import KernelInfo, Ops, ProgramInfo, UOp
 if TYPE_CHECKING:
   from tinygrad.llm.kernels.rockchip_pool import AttentionPool
 
+ONPU_GDN_DECODE_SPIN = ContextVar('ONPU_GDN_DECODE_SPIN',0)
+ONPU_GDN_DIRECT_DECODE = ContextVar('ONPU_GDN_DIRECT_DECODE',0)
+
 
 @functools.cache
 def _scan(out:UOp, q:UOp, k:UOp, v:UOp, beta:UOp, alpha:UOp, state:UOp, start:UOp, rows:UOp,
           batch:int, heads:int, capacity:int, key_dim:int, value_dim:int, alpha_dim:int, history:UOp|None=None,
-          pool:int|None=None) -> UOp:
+          pool:int|None=None, direct_decode:bool=False) -> UOp:
   body = Path(__file__).with_suffix('.c').read_text().replace('int cpu_gated_delta_scan(', 'static int cpu_gated_delta_scan(').replace(
     'int cpu_gated_delta_scan_pooled(', 'static int cpu_gated_delta_scan_pooled(')
   arguments = f'out,q,k,v,beta,alpha,state,*start,*rows,{batch},{heads},{capacity},{key_dim},{value_dim},{alpha_dim},' + \
@@ -23,7 +27,7 @@ def _scan(out:UOp, q:UOp, k:UOp, v:UOp, beta:UOp, alpha:UOp, state:UOp, start:UO
   # rather than consume a partially computed result after an internal pool fault.
   call = f'if(cpu_gated_delta_scan_pooled({arguments},(scan_parallel_fn){pool}ULL,NULL))__builtin_trap();' if pool is not None else \
     f'cpu_gated_delta_scan({arguments});'
-  source = body + f'''
+  source = f'#define ONPU_GDN_DIRECT_DECODE {int(direct_decode)}\n' + body + f'''
 void rockchip_cpu_gated_delta_scan(float *out, const float *q, const float *k, const float *v,
     const float *beta, const float *alpha, float *state, const int *start, const int *rows
     {', float *history' if history is not None else ''}) {{
@@ -101,9 +105,11 @@ def gated_delta_scan(q:Tensor, k:Tensor, v:Tensor, beta:Tensor, alpha:Tensor, st
   start = Tensor(start_pos,device='CPU',dtype=dtypes.int).reshape(1).clone()
   count = Tensor(rows,device='CPU',dtype=dtypes.int).reshape(1).clone()
   out = Tensor.empty(batch,heads,capacity,value_dim,device='CPU',dtype=dtypes.float)
-  address = pool.prefill_address if pool is not None and pool.active and batch*heads>=4 else None
+  address = ((pool.address if capacity==1 and ONPU_GDN_DECODE_SPIN else pool.prefill_address)
+             if pool is not None and pool.active and batch*heads>=4 else None)
+  direct=bool(ONPU_GDN_DIRECT_DECODE)
   if history is not None:
     return out.custom_kernel(q.contiguous(),k.contiguous(),v.contiguous(),beta.contiguous(),alpha.contiguous(),state,start,count,history,
-      fxn=lambda o,a,b,c,d,e,s,p,r,h:_scan(o,a,b,c,d,e,s,p,r,batch,heads,capacity,key_dim,value_dim,alpha_dim,h,address))[0]
+      fxn=lambda o,a,b,c,d,e,s,p,r,h:_scan(o,a,b,c,d,e,s,p,r,batch,heads,capacity,key_dim,value_dim,alpha_dim,h,address,direct_decode=direct))[0]
   return out.custom_kernel(q.contiguous(),k.contiguous(),v.contiguous(),beta.contiguous(),alpha.contiguous(),state,start,count,
-    fxn=lambda o,a,b,c,d,e,s,p,r:_scan(o,a,b,c,d,e,s,p,r,batch,heads,capacity,key_dim,value_dim,alpha_dim,pool=address))[0]
+    fxn=lambda o,a,b,c,d,e,s,p,r:_scan(o,a,b,c,d,e,s,p,r,batch,heads,capacity,key_dim,value_dim,alpha_dim,pool=address,direct_decode=direct))[0]

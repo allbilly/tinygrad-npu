@@ -5,7 +5,7 @@ import numpy as np
 from tinygrad import Tensor, TinyJit
 from tinygrad.helpers import ceildiv, round_up
 from tinygrad.llm.kernels.rockchip_int8 import quantize, dequantize_tiles, raw_int8_matmul
-from tinygrad.runtime.support.rockchip_int8 import SDK_PREFILL_SHAPES, int8_sdk_body, sdk_prefill_supported
+from tinygrad.runtime.support.rockchip_int8 import SDK_PREFILL_SHAPES, int8_sdk_body, int8_sdk_bodies, sdk_prefill_supported
 
 
 def unpack(raw,rows,columns):
@@ -18,6 +18,74 @@ def unpack(raw,rows,columns):
 
 
 class TestSDKPrefill(unittest.TestCase):
+  def test_lfm_k512_commands_match_every_ordered_capture_word(self):
+    import json
+    from pathlib import Path
+    from tinygrad.runtime.support.rockchip_int8 import int8_sdk_bodies,sdk_prefill_supported
+    fixture=json.loads((Path(__file__).parent/'fixtures/lfm_k512_sdk_prefill.json').read_text())
+    addresses=fixture['addresses']
+    self.assertTrue(sdk_prefill_supported(128,1024,512))
+    for columns,expected in fixture['cases'].items():
+      width=int(columns)
+      self.assertEqual(int8_sdk_bodies(128,width,512,addresses['lhs'],addresses['rhs'],addresses['dst'],width),
+                       (tuple(expected),))
+    for width,stride in ((384,384),(352,320)):
+      with self.assertRaises(ValueError):int8_sdk_bodies(128,width,512,0,0,0,stride)
+
+  def test_sdk_quantizer_overwrites_every_byte_before_opt_in_copy_alias(self):
+    from tinygrad import Device,UOp,dtypes
+    from tinygrad.device import TinyELF
+    from tinygrad.helpers import Context
+    from tinygrad.uop.ops import Ops
+    from tinygrad.runtime.ops_cpu import CPUProgram
+    from tinygrad.llm.kernels.rockchip_cpu import _renderer
+    from tinygrad.llm.kernels.rockchip_int8 import _quantize
+    from tinygrad.llm.kernels.rockchip_replay import _full_write
+    for sdk in (False,True):
+      for rows,depth,padded in ((1,1024,1024),(128,1024,1024),(128,2048,2048),(17,65,512)):
+        with self.subTest(sdk=sdk,rows=rows,depth=depth,padded=padded):
+          values=np.random.default_rng(rows+depth).normal(size=(rows,depth)).astype(np.float32)
+          values[0]=0
+          if rows>1:values[1,0]=np.inf
+          x=Tensor(values,device='CPU').realize()
+          expected=quantize(x,padded,sdk_prefill=sdk)
+          expected_bytes=expected[0].numpy().copy()
+          expected_scales=expected[1].numpy().view(np.uint32).copy()
+          size=len(expected_bytes)
+          params=[UOp.param(i,dt,shape,device='CPU') for i,(dt,shape) in enumerate(
+            ((dtypes.uint8,(size,)),(dtypes.float,(rows,depth)),(dtypes.float,(rows,))))]
+          program=_quantize(*params,rows,depth,padded,sdk)
+          binary=next(x.arg for x in program.src if x.op is Ops.BINARY)
+          runtime=CPUProgram(Device['CPU'],TinyELF(binary,program.src[0].arg.function_name,_renderer().target,()))
+          for poison in (0xa5,0x5a):
+            packet=np.full(size,poison,np.uint8)
+            scales=np.full(rows,poison*0x01010101,np.uint32)
+            runtime(packet.ctypes.data,values.ctypes.data,scales.ctypes.data)
+            np.testing.assert_array_equal(packet,expected_bytes)
+            np.testing.assert_array_equal(scales,expected_scales)
+          call=program.call(UOp.new_buffer('CPU',size,dtypes.uint8),UOp.new_buffer('CPU',rows*depth,dtypes.float),
+                            UOp.new_buffer('CPU',rows,dtypes.float))
+          with Context(ONPU_REPLAY_EXTRA_PACK_ALIAS=0):self.assertEqual(_full_write(call,0,size),not sdk)
+          with Context(ONPU_REPLAY_EXTRA_PACK_ALIAS=1):
+            self.assertTrue(_full_write(call,0,size))
+            self.assertFalse(_full_write(call,0,size+64))
+            self.assertFalse(_full_write(call,1,values.nbytes))
+
+  def test_spark_half_row_commands_match_every_ordered_sdk_capture_word(self):
+    import json
+    from pathlib import Path
+    fixture=json.loads((Path(__file__).parent/'fixtures/spark_m64_k2048_sdk_prefill.json').read_text())
+    addresses={(0x201,0x1070):0x100000,(0x201,0x1110):0x200000,(0x1001,0x4020):0x800000}
+    for columns,words in fixture['cases'].items():
+      width=int(columns)
+      with self.subTest(columns=width):
+        expected=tuple((target<<48)|(addresses.get((target,address),value)<<16)|address for target,address,value in words)
+        bodies=int8_sdk_bodies(64,width,2048,0x100000,0x200000,0x800000,width)
+        self.assertEqual(len(bodies),1)
+        self.assertEqual(len(bodies[0]),108)
+        self.assertEqual(bodies[0],expected)
+        with self.assertRaises(ValueError):int8_sdk_bodies(64,width,2048,0,0,0,width+32)
+
   def test_quantization_writes_blocked_codes_without_changing_scales_or_tails(self):
     rng=np.random.default_rng(64016)
     for rows,depth,padded in ((64,1024,1024),(128,1023,1024),(64,1031,2048),(17,65,512),(5,17,512)):
@@ -76,21 +144,37 @@ class TestSDKPrefill(unittest.TestCase):
       plan=RockchipMatmul(SimpleNamespace(programs=set()),SimpleNamespace(lib=struct.pack('<9I',m,n,k,3,0,round_up(m*4,64),0,1,1)))
       self.assertEqual(plan.sdk_prefill,1)
       for _,width in plan.parts:
-        words=int8_sdk_body(m,width,k,0,0,0,width)
-        values={(w>>48,w&0xffff):(w>>16)&0xffffffff for w in words}
-        self.assertEqual(values[0x201,0x1010],32)
-        self.assertEqual(values[0x201,0x1020],(m<<16)|1)
-        self.assertEqual(values[0x1001,0x4024],m*16)
-        if k==896:
-          self.assertEqual(values[0x201,0x107c],m*4)
-          self.assertEqual(values[0x801,0x3014],m-1)
-          self.assertEqual(values[0x1001,0x405c],m-1)
-    for shape in ((64,6144,4096),(128,3072,2048),(64,2048,1024),(1,3072,1024)):
+        bodies=int8_sdk_bodies(m,width,k,0,0,0,width)
+        split=m==128 and k in (1536,2048)
+        self.assertEqual(len(bodies),2 if split else 1)
+        for index,words in enumerate(bodies):
+          rows=(44 if index==0 else 84) if k==1536 else 64 if split else m
+          values={(w>>48,w&0xffff):(w>>16)&0xffffffff for w in words}
+          self.assertEqual(values[0x201,0x1010],32)
+          self.assertEqual(values[0x201,0x1020],(rows<<16)|1)
+          self.assertEqual(values[0x1001,0x4024],m*16)
+          if k==896 or (m,width,k) in ((128,2048,1024),(128,2752,1024),(128,2688,1024),(128,3072,1024)) or split:
+            self.assertEqual(values[0x201,0x107c],m if split else m*4)
+            self.assertEqual(values[0x801,0x3014],rows-1)
+            self.assertEqual(values[0x1001,0x405c],rows-1)
+    for shape in ((64,6144,4096),(128,4096,2048),(64,2048,1024),(1,3072,1024)):
       self.assertFalse(sdk_prefill_supported(*shape))
       m,n,k=shape
       with self.assertRaises(ValueError):
         RockchipMatmul(SimpleNamespace(programs=set()),SimpleNamespace(lib=struct.pack('<9I',m,n,k,3,0,round_up(m*4,64),0,1,1)))
     with self.assertRaises(ValueError):int8_sdk_body(64,640,1024,0,0,0,640)
+
+  def test_minicpm4_native_commands_match_every_ordered_capture_word(self):
+    import json
+    from pathlib import Path
+    fixture=json.loads((Path(__file__).parent/'fixtures/minicpm4_sdk_prefill.json').read_text())
+    for case in fixture['cases']:
+      m,n,k=case['shape']
+      registers=case['registers']
+      values={(r['target'],r['address']):r['value'] for r in registers}
+      words=int8_sdk_body(m,n,k,values[0x201,0x1070],values[0x201,0x1110],values[0x1001,0x4020],n)
+      actual=[{'target':w>>48,'address':w&0xffff,'value':(w>>16)&0xffffffff} for w in words]
+      self.assertEqual(actual,registers)
 
   def test_shared_payload_offset_is_bounded_aligned_and_locates_its_scale_header(self):
     from tinygrad import Device,dtypes

@@ -23,9 +23,41 @@ class TokenModel:
     def forward(tokens,pos,*args):
       return ((tokens.sum(axis=1,keepdim=True)+Tensor(pos,device='CPU',dtype=dtypes.int32))%1009).cast(dtypes.int32).realize()
     self.greedy_prefill_jit,self.greedy_rollout_jit = TinyJit(forward),TinyJit(forward)
+    self.greedy_uncached_jit = TinyJit(lambda ids:forward(ids,0))
     self.prefill_jit,self.rollout_jit = TinyJit(forward),TinyJit(forward)
 
   def prefill_chunk_size(self,requested):return requested
+
+
+@pytest.mark.parametrize('static',(0,1))
+@pytest.mark.parametrize('count',(17,128))
+def test_greedy_generation_needs_no_python_backed_temperature_buffer(static,count):
+  with Context(DEV='CPU',ONPU_CPU_TOKEN_INPUTS=1,ONPU_STATIC_PREFILL=static):
+    model=TokenModel()
+    prompt=list(range(1,count+1))
+    first=sum(prompt)%1009
+    expected=[first,(first+count)%1009]
+    with patch.object(UOp,'_frompy',side_effect=AssertionError('greedy generation allocated Python-backed storage')):
+      assert list(itertools.islice(model.generate(prompt.copy(),chunk_size=128),2))==expected
+    assert not model._greedy_generation
+
+
+def test_sampling_keeps_the_temperature_tensor_contract():
+  with Context(DEV='CPU',ONPU_CPU_TOKEN_INPUTS=1):
+    model=TokenModel()
+    original=model.prefill_jit
+    seen=[]
+    def checked(tokens,pos,temp):
+      assert temp.shape==(1,) and temp.dtype is dtypes.float32
+      seen.append(float(temp.item()))
+      return original(tokens,pos,temp)
+    model.prefill_jit=checked
+    gen=model.generate(list(range(1,18)),chunk_size=128,temperature=.6)
+    next(gen)
+    gen.close()
+    assert len(seen)==1 and abs(seen[0]-.6)<1e-7 and not model._greedy_generation
+    with pytest.raises(ValueError,match='temperature tensor'):
+      model(Tensor.zeros(1,1,device='CPU',dtype=dtypes.int32).realize(),0,None)
 
 
 def test_ready_prefix_view_does_not_schedule_an_input_copy():
@@ -84,3 +116,30 @@ def test_one_token_cached_prompt_keeps_the_decode_jit_input_contract():
         list(itertools.islice(model.generate(prompt.copy(),chunk_size=64),5))
       results.append(list(itertools.islice(model.generate(prompt.copy(),chunk_size=1),3)))
   assert results[0]==results[1]
+
+
+@pytest.mark.parametrize('temperature',(0.0,0.6))
+@pytest.mark.parametrize('chunk',(32,64,128))
+def test_static_first_chunk_matches_partial_cached_and_sampled_generation(temperature,chunk):
+  outputs=[]
+  for enabled in (0,1):
+    with Context(DEV='CPU',ONPU_CPU_TOKEN_INPUTS=1,ONPU_STATIC_PREFILL=enabled):
+      model=TokenModel()
+      calls=[]
+      static=model.greedy_uncached_jit
+      def checked(ids):
+        assert ids.shape==(1,chunk) and not ids.uop.variables()
+        calls.append(1)
+        return static(ids)
+      model.greedy_uncached_jit=checked
+      results=[]
+      for count in (32,33,64,65,128,129):
+        prompt=list(range(1,count+1))
+        model._cached_tokens=[]
+        generated=list(itertools.islice(model.generate(prompt.copy(),chunk_size=chunk,temperature=temperature),4))
+        results.append(generated)
+        results.append(list(itertools.islice(model.generate(prompt+generated+[7,8],chunk_size=chunk,temperature=temperature),3)))
+      if enabled and temperature==0:assert calls
+      else:assert not calls
+      outputs.append(results)
+  assert outputs[0]==outputs[1]

@@ -1,6 +1,6 @@
 """Native replay of prepared CPU/Rockchip inference calls, with guarded fallback."""
 from __future__ import annotations
-import ctypes, functools, itertools, json, os, subprocess, time
+import ctypes, functools, itertools, json, os, subprocess, time, weakref
 from collections import Counter
 from dataclasses import replace
 from typing import Any, Callable, cast
@@ -9,14 +9,247 @@ from tinygrad.device import Buffer, BufferStorage, TinyELF
 from tinygrad.dtype import AddrSpace, dtypes
 from tinygrad.engine.jit import CapturedJit, _copy_input
 from tinygrad.engine.realize import _resolve, estimate_uop, get_runtime, get_call_arg_uops, get_call_outs_ins
-from tinygrad.helpers import DEBUG, PROFILE, ContextVar, GlobalCounters, getenv, unwrap
+from tinygrad.helpers import DEBUG, PROFILE, ContextVar, GlobalCounters, ceildiv, getenv, unwrap
 from tinygrad.renderer import Estimates
 from tinygrad.renderer.cstyle import ClangRenderer
 from tinygrad.runtime.ops_cpu import CPUProgram
-from tinygrad.runtime.ops_rockchip import (RockchipBuffer, RockchipDevice, RockchipProgram, RockchipRoutedMatmul,
-                                         RockchipBucketedMatmul, _FINITE_HALF_SOURCE)
+from tinygrad.runtime.ops_rockchip import (RockchipBuffer, RockchipDevice, RockchipProgram, RockchipMatmul,
+                                         RockchipGroupedMatmul, RockchipBatchedMatmul, RockchipRoutedMatmul,
+                                         RockchipBucketedMatmul, _cmd, _FINITE_HALF_SOURCE)
 from tinygrad.runtime.autogen import rockchip as rk
 from tinygrad.uop.ops import Ops, UOp, sym_infer
+
+
+# ---------------------------------------------------------------------------
+# Adjacent-submit merging (opt-in: ONPU_MERGE_SUBMITS=1 pairs, =2 pairs+triple).
+#
+# The decode graph issues two NPU submits back-to-back with no CPU call between
+# them for gate+up (24576 main tile then the 2816 tail) and for ffn_down (the
+# grouped 3-group k-chain then its 1536 k-tail); the lm_head issues three
+# back-to-back shards. Every one of those submits owns exactly three one-per-
+# core tasks and the same core mask/domain, so they can share ONE ioctl (and
+# pay its fixed cost once) while keeping all their tasks.
+#
+# Mechanism (hardware-proven, scripts/probe_merged_submit.py in oNPU): the
+# earlier plan's per-core terminating tail is patched in place into a PC jump
+# to the later plan's body for the same core; a combined task array lists the
+# descriptors core-major [A0,B0,A1,B1,A2,B2]; one ioctl submits all of them.
+# The command bodies and all arithmetic are unchanged, so results are
+# bit-identical; the group's bodies write disjoint output ranges, so a core may
+# start body 2 while another core is still on body 1.
+#
+# The patch mutates the prepared plan, so every patched word is recorded and
+# _restore_merged_tails() puts them back if the replay falls back to the
+# ordinary executor. Thin plans/cross-domain groups are refused and fall back
+# to one ioctl per plan.
+# ---------------------------------------------------------------------------
+ONPU_MERGE_BODY_LIMIT = 1024
+# (id(plan), tail word offset) -> (plan, offset, FIRST recorded original tail words).
+# A replay may be rebuilt for the same prepared plans; without recording the first
+# original, a second build would record the jump words as "original" and a restore
+# would leave the chain linked.
+_MERGED_TAIL_ORIGINALS: dict[tuple[int,int],tuple[Any,int,list[int]]] = {}
+
+
+def _restore_merged_tails() -> None:
+  """Undo every in-place tail patch (executor fallback, or before a replay rebuild)."""
+  for plan,offset,words in reversed(list(_MERGED_TAIL_ORIGINALS.values())):
+    try:
+      _write_words(plan.cmd,offset,words)
+      plan.dev.sync(plan.cmd, rk.RKNPU_MEM_SYNC_TO_DEVICE)
+    except Exception:
+      pass
+  _MERGED_TAIL_ORIGINALS.clear()
+
+
+def _write_words(cmd:RockchipBuffer, offset:int, words:list[int]) -> None:
+  if not 0<=offset<=cmd.size//8-len(words): raise ValueError('word patch outside command buffer')
+  for i,word in enumerate(words):
+    ctypes.c_uint64.from_address(cmd.addr+(offset+i)*8).value = word
+
+
+def _plan_merge_tails(plan:Any) -> list[tuple[int,int]]:
+  """(body start word, body word count) of each of a plan's three one-per-core tasks."""
+  if plan.tasks!=3 or plan.core_mask!=7: raise ValueError('merge requires three one-per-core tasks')
+  descs=(rk.struct_rknpu_task*3).from_address(plan.task.addr)
+  tails=[]
+  for core in range(3):
+    desc=descs[core]
+    body=desc.regcfg_amount
+    start=(desc.regcmd_addr-plan.cmd.dma)//8
+    if not 1<=body<=ONPU_MERGE_BODY_LIMIT: raise ValueError('unexpected command body length')
+    if desc.regcmd_addr%8 or start<0 or start+body+4>plan.cmd.size//8: raise ValueError('descriptor outside its command buffer')
+    tails.append((start,body))
+  return tails
+
+
+def build_merged_submit(plans:list[Any]) -> tuple[dict,list[Any]]:
+  """One combined PC submit for 2-3 plans, each owning three one-per-core tasks.
+
+  Returns (submit descriptor for the statement, buffers that must stay alive).
+  Patches the earlier plans' terminating command tails to jump to the next
+  plan's body; on any failure the patches are restored before raising.
+  """
+  if not 2<=len(plans)<=3: raise ValueError('merge group must hold 2 or 3 plans')
+  domain=plans[0].dev.domain
+  if any(plan.dev.domain!=domain for plan in plans): raise ValueError('merge group crosses memory domains')
+  tails=[_plan_merge_tails(plan) for plan in plans]
+  group=len(plans)
+  dev=plans[0].dev
+  task=dev.allocate(max(4096,3*group*ctypes.sizeof(rk.struct_rknpu_task)),rk.RKNPU_MEM_KERNEL_MAPPING)
+  patches: list[tuple[Any,int,list[int],bool]] = []  # (plan, offset, words before this build, newly tracked)
+  try:
+    # Combined task array: descriptors unchanged, interleaved core-major.
+    for core in range(3):
+      for position,plan in enumerate(plans):
+        source=(rk.struct_rknpu_task*3).from_address(plan.task.addr)[core]
+        ctypes.memmove(task.addr+(core*group+position)*ctypes.sizeof(rk.struct_rknpu_task),
+                       ctypes.addressof(source),ctypes.sizeof(source))
+    dev.sync(task, rk.RKNPU_MEM_SYNC_TO_DEVICE)
+    # Patch every plan's tail but the last one into a jump to the next plan's body.
+    for position,plan in enumerate(plans[:-1]):
+      following=plans[position+1]
+      for core in range(3):
+        start,body=tails[position][core]
+        next_start,next_body=tails[position+1][core]
+        offset=start+body
+        key=(id(plan),offset)
+        previous=[ctypes.c_uint64.from_address(plan.cmd.addr+(offset+i)*8).value for i in range(2)]
+        tracked=key not in _MERGED_TAIL_ORIGINALS
+        if tracked: _MERGED_TAIL_ORIGINALS[key]=(plan,offset,previous)
+        try:
+          _write_words(plan.cmd,offset,
+                       [_cmd(rk.TARGET_PC_REG,rk.REG_PC_BASE_ADDRESS,(following.cmd.dma+next_start*8)&0xfffffff0),
+                        _cmd(rk.TARGET_PC_REG,rk.REG_PC_REGISTER_AMOUNTS,ceildiv(next_body,2)+1)])
+        except BaseException:
+          _write_words(plan.cmd,offset,previous)
+          if tracked: _MERGED_TAIL_ORIGINALS.pop(key,None)
+          raise
+        patches.append((plan,offset,previous,tracked))
+      plan.dev.sync(plan.cmd, rk.RKNPU_MEM_SYNC_TO_DEVICE)
+  except BaseException:
+    for plan,offset,previous,tracked in reversed(patches):
+      try:
+        _write_words(plan.cmd,offset,previous)
+        plan.dev.sync(plan.cmd, rk.RKNPU_MEM_SYNC_TO_DEVICE)
+      except Exception: pass
+      if tracked: _MERGED_TAIL_ORIGINALS.pop((id(plan),offset),None)
+    dev.free(task)
+    raise
+  return ({'tasks':3*group,'domain':domain,'obj_addr':int(task.meta.obj_addr),'core_mask':7,
+           'subcores':((0,0),(0,0),(0,group),(group,group),(2*group,group))},[task])
+
+
+def mergeable_plan(plan:Any) -> bool:
+  """Only the verified decode geometry: single-row INT8, three one-per-core tasks, one domain."""
+  return (isinstance(plan,(RockchipMatmul,RockchipGroupedMatmul))
+          and not isinstance(plan,(RockchipBatchedMatmul,RockchipRoutedMatmul,RockchipBucketedMatmul))
+          and plan.m==1 and bool(plan.int8) and not plan.dynamic_weights
+          and not getattr(plan,'sdk_prefill',0)  # SDK prefill bodies use a different PC layout
+          and plan.tasks==3 and plan.core_mask==7
+          and tuple(plan.subcores)==((0,0),(0,0),(0,1),(1,1),(2,1)))
+
+
+# ---------------------------------------------------------------------------
+# Fast validity path (opt-in: ONPU_REPLAY_FAST_VALID=1; debug: ONPU_REPLAY_FAST_VALID_DEBUG=1).
+#
+# RockchipCapturedJit.__call__ runs NativeReplay.valid() for every decoded token.
+# The authoritative check costs ~0.43 ms/token on ChatGLM3-6B decode: it walks
+# every input size, every guarded intermediate storage, every weight version,
+# every attention program and all ~171 plans. None of that state can change
+# unless one of a handful of mutating operations runs, so the fast path caches
+# the last success verdict against a global epoch and only re-runs the
+# authoritative check when the epoch moves.
+#
+# Watched, not global: the epoch is bumped by
+#   * prepare/close of the plan classes and RockchipAttentionProgram
+#       -> plan.owned / plan.bufs identity / program liveness   (rare, global)
+#   * Buffer.allocate/.deallocate of a *watched* guarded CPU buffer
+#       -> the baked non-root CPU addresses used by the replay C  (guards check)
+#   * RockchipAllocator._copyin into a *watched* NPU meta
+#       -> weight meta.version / output cpu_clean_version checks
+# plus same-file lifecycle points (new NativeReplay, free_intermediates,
+# executor fallback). Unrelated per-token Buffer allocations do NOT bump the
+# epoch, so steady-state decode keeps using the cached verdict.
+#
+# The per-input shape/device/size check is NEVER skipped: the replay C function
+# reads through pointers passed on every call, so an input shape change must be
+# caught even inside the epoch window. With the flag off, valid() is the
+# original code unchanged and no hooks are installed. With _DEBUG=1 the
+# authoritative check still runs on EVERY token and a disagreement with the fast
+# verdict raises AssertionError (that is how an uncovered invalidation is found).
+# ---------------------------------------------------------------------------
+_FAST_VALID_EPOCH = 0
+_FAST_VALID_HOOKS_INSTALLED = False
+# Guarded CPU Buffer objects whose storage address is baked into the replay C.
+_FAST_VALID_WATCHED_BUFFERS: "weakref.WeakSet[Any]" = weakref.WeakSet()
+# id() of RockchipBuffer.meta objects whose version feeds a validity guard.
+_FAST_VALID_WATCHED_META_IDS: set[int] = set()
+
+
+def _bump_fast_valid_epoch() -> None:
+  global _FAST_VALID_EPOCH
+  _FAST_VALID_EPOCH += 1
+
+
+def _register_fast_valid_watch(replay:Any) -> None:
+  """Watch exactly the state this replay's validity depends on (called once per build)."""
+  _FAST_VALID_WATCHED_BUFFERS.update(replay.guards.keys())
+  _FAST_VALID_WATCHED_META_IDS.update(replay.weight_guards.keys())
+  _FAST_VALID_WATCHED_META_IDS.update(id(meta) for meta in replay._output_guards)
+
+
+def _install_fast_valid_hooks() -> bool:
+  """Wrap every mutator that can invalidate a NativeReplay. Idempotent."""
+  global _FAST_VALID_HOOKS_INSTALLED
+  if _FAST_VALID_HOOKS_INSTALLED: return True
+  import sys
+  from tinygrad.runtime.ops_rockchip import (RockchipMatmul, RockchipBatchedMatmul, RockchipGroupedMatmul,
+                                            RockchipRoutedMatmul, RockchipBucketedMatmul, RockchipAllocator)
+  from tinygrad.runtime.support.rockchip_attention import RockchipAttentionProgram
+
+  def hook_name(function:Any, name:str) -> Any:
+    function._onpu_fast_valid_hook = name  # type: ignore[attr-defined]
+    return function
+
+  def invalidating(original:Any, name:str) -> Any:
+    @functools.wraps(original)
+    def wrapper(*args:Any, **kwargs:Any) -> Any:
+      _bump_fast_valid_epoch()
+      return original(*args, **kwargs)
+    return hook_name(wrapper, name)
+
+  plan_classes:list[Any] = [RockchipMatmul, RockchipBatchedMatmul, RockchipGroupedMatmul,
+                            RockchipRoutedMatmul, RockchipBucketedMatmul, RockchipAttentionProgram]
+  gpu_module = sys.modules.get('tinygrad.runtime.support.rockchip_gpu')
+  if gpu_module is not None and (gpu_plan:=getattr(gpu_module,'RockchipGPUProgram',None)) is not None:
+    plan_classes.append(gpu_plan)
+  for cls in plan_classes:
+    for method in ('prepare', 'close'):
+      current = cls.__dict__.get(method)
+      if current is not None and not getattr(current, '_onpu_fast_valid_hook', None):
+        setattr(cls, method, invalidating(current, f'{cls.__name__}.{method}'))
+
+  # Only watched mutations matter for Buffer storage identity and meta versions.
+  def watched_buffer(original:Any, name:str) -> Any:
+    @functools.wraps(original)
+    def wrapper(self:Any, *args:Any, **kwargs:Any) -> Any:
+      if self in _FAST_VALID_WATCHED_BUFFERS: _bump_fast_valid_epoch()
+      return original(self, *args, **kwargs)
+    return hook_name(wrapper, name)
+
+  def watched_copyin(original:Any, name:str) -> Any:
+    @functools.wraps(original)
+    def wrapper(self:Any, dest:Any, src:Any) -> Any:
+      if id(dest.meta) in _FAST_VALID_WATCHED_META_IDS: _bump_fast_valid_epoch()
+      return original(self, dest, src)
+    return hook_name(wrapper, name)
+
+  for method in ('allocate', 'deallocate'):
+    setattr(Buffer, method, watched_buffer(getattr(Buffer, method), f'Buffer.{method}'))
+  RockchipAllocator._copyin = watched_copyin(RockchipAllocator._copyin, 'RockchipAllocator._copyin')
+  _FAST_VALID_HOOKS_INSTALLED = True
+  return True
 
 
 class UnsupportedReplay(Exception): pass
@@ -179,6 +412,22 @@ class NativeReplay:
     self.estimates = Estimates()
     self.submits = 0
     self.gpu_calls = 0
+    # ONPU_MERGE_SUBMITS: 0 off (default), 1 merge adjacent pairs, 2 pairs + the lm_head triple.
+    self._merge_level = int(getenv('ONPU_MERGE_SUBMITS',0) or 0)
+    self._merge_max_group = 2 if self._merge_level==1 else (3 if self._merge_level>=2 else 0)
+    self._merge_slots: list[dict[str,Any]] = []
+    self._merge_groups: list[list[int]] = []
+    self._merge_run: list[int] = []
+    self._last_merge_plan: Any = None
+    # ONPU_REPLAY_FAST_VALID: 0 off (default), 1 epoch-gated authoritative check.
+    # ONPU_REPLAY_FAST_VALID_DEBUG=1: run the authoritative check every token and assert agreement.
+    self._fast_valid_debug = bool(getenv('ONPU_REPLAY_FAST_VALID_DEBUG',0))
+    self._fast_valid = bool(getenv('ONPU_REPLAY_FAST_VALID',0)) or self._fast_valid_debug
+    if self._fast_valid: _install_fast_valid_hooks()
+    self._fast_valid_epoch: int|None = None
+    self._fast_valid_full_runs = 0
+    self._fast_valid_skips = 0
+    self._fast_valid_mismatch = 0
     for index,call in enumerate(self.calls):
       if call.op is not Ops.CALL: raise UnsupportedReplay('non-call graph entry')
       if call.body.op is Ops.PROGRAM and call.device!='ROCKCHIP': self.pending_npu_outputs.clear()
@@ -195,8 +444,21 @@ class NativeReplay:
       label = (f'{call.device}:{call.body.src[0].arg.function_name}' if call.body.op is Ops.PROGRAM else
                f'COPY:{call.src[2].device}->{call.src[1].device}')
       self.labels.append(label)
+      if dump_path := os.getenv('ONPU_REPLAY_DUMP_DTYPES'):
+        # Map opaque replay labels (E_*/r_*) back to their tensors: one JSONL row
+        # per captured call with its input dtypes/shapes/numels. Opt-in only.
+        info={'label':label,'ins':[]}
+        for u in call.src[1:]:
+          try:
+            ins=info['ins']
+            ins.append({'dtype':getattr(u.dtype,'name',str(u.dtype)),'shape':str(u.shape),
+                        'numel':u.numel() if hasattr(u,'numel') else None})
+          except Exception as exc: info['ins'].append({'err':str(exc)})
+        with open(dump_path,'a') as f:
+          f.write(json.dumps(info)+'\n')
       if self.profiling:
         self.statements[start:] = ['{U64 begin=now();']+self.statements[start:]+[f'stats[{index+2}]=now()-begin;}}']
+    self._finalize_merged_submits()
     if not self.submits: raise UnsupportedReplay('no prepared NPU work')
     if self.mutated.intersection(self.weight_guards): raise UnsupportedReplay('mutable matrix weights')
     self.estimates = self.estimates.simplify()
@@ -218,6 +480,11 @@ class NativeReplay:
     self.program = cast(Any,cpu.runtime(TinyELF(renderer.compiler.compile_cached(source),'replay',renderer.target,())))
     self.program.fxn.restype = ctypes.c_int
     self.source = source
+    if _FAST_VALID_HOOKS_INSTALLED:
+      # Build the output-guard tuple here (one-off, not on the first token) and watch
+      # exactly the state this replay's validity guards depend on.
+      _register_fast_valid_watch(self)
+      _bump_fast_valid_epoch()  # a new replay is new state for any other live replay
 
   def buffer(self, node:UOp) -> tuple[Buffer,Any,str]:
     # Symbolic views require their own pointer expression; leave them on the ordinary executor.
@@ -371,6 +638,7 @@ class NativeReplay:
     return aliases,uploads,downloads
 
   def copy(self, call:UOp, index:int):
+    self._last_merge_plan = getattr(self,'_last_merge_plan',None)
     nodes = get_call_arg_uops(call)
     if len(nodes)!=2: raise UnsupportedReplay('copy signature')
     dst,d,dp = self.buffer(nodes[0])
@@ -397,6 +665,9 @@ class NativeReplay:
     return typ,f'(({typ}){int(value)})'
 
   def kernel(self, call:UOp, index:int):
+    # getattr: tests call kernel() on NativeReplay.__new__ instances with no __init__.
+    previous_merge_plan = getattr(self,'_last_merge_plan',None)
+    self._last_merge_plan = None
     device = call.device
     if not isinstance(device,str) or device.split(':')[0] not in ('CPU','ROCKCHIP'): raise UnsupportedReplay('kernel device')
     runtime = get_runtime(device,call.body)
@@ -454,8 +725,20 @@ class NativeReplay:
     if (plan:=runtime.bindings.get(key)) is None: raise UnsupportedReplay('NPU binding not prepared')
     out,lhs,rhs = raw
     if out.meta.cpu_clean_version!=out.meta.version: raise UnsupportedReplay('dirty NPU output mapping')
-    if plan.weight_version!=(rhs.meta.obj_addr,rhs.meta.version): raise UnsupportedReplay('unverified matrix weights')
-    if plan.dynamic_weights:
+    # ABI 10 (dynamic row-major, trusted in-graph pack operands): the rhs buffer is produced by
+    # the pack kernels each call, so its identity/version is expected to change; the finiteness
+    # contract is documented and checked by ONPU_MLA_NPU_PACK_CHECK. Skip the identity gate.
+    trusted_dynamic = bool(getattr(plan,'row_major',False))  # ABI 9/10: immutable packed or in-graph pack operands
+    if not trusted_dynamic and plan.weight_version!=(rhs.meta.obj_addr,rhs.meta.version):
+      raise UnsupportedReplay('unverified matrix weights '
+        f'dyn={plan.dynamic_weights} skip={getattr(plan,"skip_finite_checks",False)} '
+        f'm={plan.m} n={plan.n} k={plan.k} groups={getattr(plan,"groups",None)} '
+        f'ver={plan.weight_version} want={(rhs.meta.obj_addr,rhs.meta.version)}')
+    if getattr(plan,'skip_finite_checks',False) or getattr(plan,'row_major',False):
+      # ABI 9: immutable packed weights (no per-replay weight validation by design).
+      # ABI 10: operands are produced by trusted in-graph pack kernels; skip both scans.
+      pass
+    elif plan.dynamic_weights:
       self.statements.append(f'if(!all_finite_half((const unsigned short*){rhs.addr+plan.rhs_offset}ULL,'
         f'{getattr(plan,"weight_groups",plan.groups)*plan.n*plan.k}UL))'
         f'return {5000000+index};')
@@ -468,9 +751,25 @@ class NativeReplay:
       scale_address=lhs.addr+getattr(plan,'scale_offset',0)
       self.statements.append(f'for(int r=0;r<{scale_rows};r++){{float s=((const float*){scale_address}ULL)[r];'
         f'unsigned b=((const unsigned*){scale_address}ULL)[r];if(!(s>0.0f) || (b&0x7f800000)==0x7f800000)return {1000000+index};}}')
-    else:
+    elif not getattr(plan,'skip_finite_checks',False):
       self.statements.append(f'if(!all_finite_half((const unsigned short*){lhs.addr+plan.lhs_offset}ULL,{plan.groups*plan.m*plan.k}UL))'
         f'return {1000000+index};')
+    if getattr(self,'_merge_max_group',0) and mergeable_plan(plan):
+      # Defer this ioctl: a following adjacent NPU plan with the same geometry can
+      # share it. The placeholder is replaced in _finalize_merged_submits().
+      slot = len(self._merge_slots)
+      token = f'/*MERGE-SLOT-{slot}-{index}*/'
+      self._merge_slots.append({'plan':plan,'index':index,'token':token})
+      self.statements.append(token)
+      if (previous_merge_plan is not None and len(self._merge_run)<self._merge_max_group
+          and mergeable_plan(previous_merge_plan) and previous_merge_plan.dev.domain==plan.dev.domain):
+        self._merge_run.append(slot)
+      else:
+        self._merge_run=[slot]
+        self._merge_groups.append(self._merge_run)
+      self._last_merge_plan = plan
+      self.npu_outputs[index] = (id(out.meta),out.addr,out.size)
+      return
     if isinstance(plan,RockchipRoutedMatmul):
       # Validate the entire routing header before changing any command address.
       self.statements.append(f'{{const int *ids=(const int*){lhs.addr+plan.selector_offset}ULL;'
@@ -506,6 +805,44 @@ class NativeReplay:
     self.submits += 1
     self.npu_outputs[index] = (id(out.meta),out.addr,out.size)
 
+  def _submit_code(self, tasks:Any, obj_addr:Any, domain:int, core_mask:Any, subcore_pairs:Any, index:int) -> str:
+    subcores = [value for pair in subcore_pairs for value in pair]
+    fields = [5,6000,0,tasks,0,0,f'{obj_addr}ULL',domain,0,0,core_mask,-1]
+    request = (3<<30)|(ctypes.sizeof(rk.struct_rknpu_submit)<<16)|(ord('d')<<8)|0x41
+    return ('{struct Submit submit={'+','.join(map(str,fields))+',{'+','.join(map(str,subcores))+'}};'
+      f'if({self.ioctl}({self.dev.fd.fd},{request}UL,&submit)!=0)return {2000000+index};'
+      f'stats[0]++;stats[1]+={tasks};}}')
+
+  def _single_submit_code(self, plan:Any, index:int) -> str:
+    pairs = (*plan.subcores,*((0,0),)*(5-len(plan.subcores)))
+    return self._submit_code(str(plan.tasks),plan.task.meta.obj_addr,plan.dev.domain,plan.core_mask,pairs,index)
+
+  def _finalize_merged_submits(self) -> None:
+    # Patches are left in place across replay rebuilds: a different JIT (prefill)
+    # may build its replay between two decode trials while these plans stay in
+    # use, so restoring here would unlink a live merged replay. _MERGED_TAIL_ORIGINALS
+    # keeps the first original of every patched word so a fallback restore is exact.
+    for group in self._merge_groups:
+      slots = [self._merge_slots[slot] for slot in group]
+      code: str|None = None
+      if len(slots)>1:
+        try:
+          info,keep = build_merged_submit([slot['plan'] for slot in slots])
+        except Exception:
+          info = None
+        else:
+          self.kept.extend(keep)
+          code = self._submit_code(info['tasks'],info['obj_addr'],info['domain'],info['core_mask'],info['subcores'],slots[-1]['index'])
+      if code is None:
+        # Unsupported group: fall back to one ioctl per plan, exactly as the default path.
+        for slot in slots:
+          self.statements[self.statements.index(slot['token'])] = self._single_submit_code(slot['plan'],slot['index'])
+          self.submits += 1
+        continue
+      for slot in slots[:-1]: self.statements[self.statements.index(slot['token'])] = ''
+      self.statements[self.statements.index(slots[-1]['token'])] = code
+      self.submits += 1
+
   @functools.cached_property
   def _output_guards(self) -> tuple[Any,...]:
     # Plans retain immutable binding tuples. Multiple output views can share
@@ -531,7 +868,14 @@ class NativeReplay:
       if meta.cpu_clean_version!=meta.version:return False
     return True
 
-  def valid(self, inputs:list[UOp]) -> bool:
+  def _valid_inputs(self, inputs:list[UOp]) -> bool:
+    """Authoritative input shape check: the replay reads through these pointers on every call."""
+    if len(inputs)!=len(self.roots):return False
+    for u,size in zip(inputs,self.input_sizes):
+      if not isinstance(buf:=u.buffer,Buffer) or buf.device!='CPU' or buf.nbytes!=size:return False
+    return True
+
+  def _valid_authoritative(self, inputs:list[UOp]) -> bool:
     if getenv('ONPU_REPLAY_DEDUP_GUARDS',1):return self._valid_deduplicated(inputs)
     return (len(inputs)==len(self.roots) and all(isinstance(u.buffer,Buffer) and u.buffer.device=='CPU'
       and u.buffer.nbytes==size for u,size in zip(inputs,self.input_sizes))
@@ -541,6 +885,40 @@ class NativeReplay:
       and all(all(buf.meta.cpu_clean_version==buf.meta.version for buf in
         ((plan.bufs[0],plan.bufs[4],plan.bufs[5]) if len(plan.bufs)==6 else (plan.bufs[0],))) for plan,_ in self.plans if plan.bufs)
       and all(plan.owned and plan.bufs==buffers for plan,buffers in self.plans))
+
+  def _valid_epoch_cached(self, inputs:list[UOp]) -> bool:
+    """Fast path: authoritative input-shape check, then reuse the last success until the epoch moves."""
+    if not self._valid_inputs(inputs):return False
+    epoch = _FAST_VALID_EPOCH
+    if epoch!=self._fast_valid_epoch:
+      self._fast_valid_full_runs += 1
+      if not self._valid_authoritative(inputs):return False
+      self._fast_valid_epoch = epoch
+      return True
+    self._fast_valid_skips += 1
+    return True
+
+  def valid(self, inputs:list[UOp]) -> bool:
+    if not self._fast_valid:
+      if getenv('ONPU_REPLAY_DEDUP_GUARDS',1):return self._valid_deduplicated(inputs)
+      return (len(inputs)==len(self.roots) and all(isinstance(u.buffer,Buffer) and u.buffer.device=='CPU'
+        and u.buffer.nbytes==size for u,size in zip(inputs,self.input_sizes))
+        and all(buf._storage is storage for buf,storage in self.guards.items())
+        and all(meta.version==version for meta,version in self.weight_guards.values())
+        and all(not program.closed and program.owned for program in self.attention_programs)
+        and all(all(buf.meta.cpu_clean_version==buf.meta.version for buf in
+          ((plan.bufs[0],plan.bufs[4],plan.bufs[5]) if len(plan.bufs)==6 else (plan.bufs[0],))) for plan,_ in self.plans if plan.bufs)
+        and all(plan.owned and plan.bufs==buffers for plan,buffers in self.plans))
+    fast = self._valid_epoch_cached(inputs)
+    if not self._fast_valid_debug:return fast
+    # Debug mode: the authoritative check runs on every token; a disagreement means
+    # an invalidation path is not covered by _install_fast_valid_hooks (or that the
+    # fast path is too strict, which is also a bug).
+    full = self._valid_authoritative(inputs)
+    if full==fast:return fast
+    self._fast_valid_mismatch += 1
+    raise AssertionError(f'ONPU_REPLAY_FAST_VALID_DEBUG mismatch on replay {id(self)}: '
+                         f'fast={fast} authoritative={full} (an invalidation path is unhooked)')
 
   def __call__(self, inputs:list[UOp], values:dict[str,int]):
     ops,mem = sym_infer(self.estimates.ops,values),sym_infer(self.estimates.mem,values)
@@ -577,6 +955,10 @@ class NativeReplay:
       # it can say a kernel averages X ms but not how its individual calls spread.
       # For a tile whose cost may depend on position in the layer (a tail tile
       # stalling behind a wide sibling) the distribution is the whole question.
+      if path := os.getenv('ONPU_REPLAY_PROFILE_OUT'):
+        with open(path,'a') as output:
+          output.write(json.dumps({'labels':self.labels,'ns':dict(self.profile_ns),'counts':dict(self.profile_counts),
+                                   'submits':stats[0],'tasks':stats[1]})+'\n')
       if path := os.getenv('ONPU_REPLAY_CALLS_OUT'):
         with open(path,'a') as output:
           output.write(json.dumps({'calls':[[label,stats[i+2]]
@@ -601,6 +983,7 @@ class RockchipCapturedJit(CapturedJit):
 
   def free_intermediates(self):
     self.native,self.warmed,self.reason = None,False,None
+    if _FAST_VALID_HOOKS_INSTALLED: _bump_fast_valid_epoch()
     super().free_intermediates()
 
   def __call__(self, input_uops:list[UOp], var_vals:dict[str,int]):
@@ -614,6 +997,10 @@ class RockchipCapturedJit(CapturedJit):
     if self.native is None:
       try: self.native = NativeReplay(self.linear,concrete,var_vals,self.cleaner)
       except (UnsupportedReplay,KeyError,AssertionError) as exc:
+        # A native replay that merged submits in place mutates prepared command tails;
+        # the ordinary executor must never inherit those links.
+        _restore_merged_tails()
+        if _FAST_VALID_HOOKS_INSTALLED: _bump_fast_valid_epoch()  # executor fallback: replay state left the native path
         self.reason = str(exc)
         return result if warming else super().__call__(input_uops,var_vals)
     # Preparing a replay does not execute it. Keep the warmup's state update and
@@ -624,3 +1011,8 @@ class RockchipCapturedJit(CapturedJit):
     for tensor,uop,values in self._symbolic_ret:
       tensor.uop = uop.substitute({v:v.bind(var_vals.get(v.expr,i)) for v,i in values.items()},walk=True)
     return self.ret
+
+
+# Install the mutator hooks at import when the fast validity path is requested
+# (env is set before the benchmark process starts, so import-time is the right place).
+if getenv('ONPU_REPLAY_FAST_VALID',0) or getenv('ONPU_REPLAY_FAST_VALID_DEBUG',0): _install_fast_valid_hooks()

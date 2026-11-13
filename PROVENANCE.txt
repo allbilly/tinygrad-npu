@@ -1,0 +1,9 @@
+# Frozen source snapshot
+freeze_date=2026-11-13
+source_tree=/home/orangepi/tg-exp-attnnpu
+snapshot_parent=3a1b2e1c94ffdfee791b98434849af2a34ee7fc8
+freeze_branch=codex/freeze-tg-exp-attnnpu-20261113
+
+This is the frozen opt-in FP16 NPU-attention candidate. The 12-file hardware-build manifest in oNPU/analysis/minicpm3/prefill/attn-npu/wiring/merged/MANIFEST.md matched 12/12 at freeze. This commit preserves the measured build only; it does not assert output quality. Current oNPU status: flag remains default-OFF and output divergence is unresolved.
+
+The two codex-session-*.md conversation dumps in some source directories were excluded from Git; they remain untouched in the original directories. Runtime code, tests, fixtures, and supporting scripts were staged from the source snapshot.

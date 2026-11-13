@@ -321,9 +321,11 @@ class TransformerBlock(FFNBlock):
     if not self.config.attn_logit_softcap and not self.config.attn_head_gate and not self.config.attn_output_gate and \
        (prepared:=getattr(self,'prepared_qkv',None)) is not None and prepared.enabled(x):
       q,assigned_kv = prepared(x,start_pos,self.cache_kv,self.freqs_cis)
-      attention = self.prefill_attention
-      assert attention is not None
       B,T,_ = x.shape
+      # The prepared graph also serves one-token decode, where the specialized
+      # decode attention kernel (worker pool + GQA head fusion) is required.
+      attention = self.decode_attention if resolve(T==1) else self.prefill_attention
+      assert attention is not None
       return self.attn_output(attention(q,assigned_kv,start_pos+T).transpose(1,2).reshape(B,T,-1))
     q,k,v = joint(x) if (joint:=getattr(self,'attn_qkv',None)) is not None else (self.attn_q(x),self.attn_k(x),self.attn_v(x))
     if self.config.qk_norm and self.config.qk_norm != self.config.head_dim: q, k = self.attn_q_norm(q), self.attn_k_norm(k)
@@ -449,11 +451,24 @@ class MLATransformerBlock(FFNBlock):
     B, T, _ = x.shape
     q_nope_head_dim = self.config.head_dim - self.config.rope_dim
     q_proj = self.attn_q_b(self.attn_q_a_norm(self.attn_q_a(x))) if self.config.q_lora_rank > 0 else self.attn_q(x)
-    q = q_proj.reshape(B, T, self.config.n_heads, self.config.head_dim).transpose(1, 2)
-    q_nope, q_rope = q[..., :q_nope_head_dim], q[..., q_nope_head_dim:]
-    if not self.config.ssm or not self.config.ssm.kda: q_rope = apply_rope(q_rope, self.freqs_cis[start_pos:start_pos+T])
+    mla_hint = getattr(self,'cpu_mla_attention',None)
+    fused_query = (mla_hint is not None and getattr(mla_hint,'fused_query',False)
+                   and int(q_proj.max_shape[1])>1 and not getenv('ONPU_MLA_LEGACY_Q',0)
+                   and (not self.config.ssm or not self.config.ssm.kda))
+    if fused_query:
+      q_nope, q_rope = mla_hint.split_query(q_proj, self.freqs_cis, start_pos)
+    else:
+      q = q_proj.reshape(B, T, self.config.n_heads, self.config.head_dim).transpose(1, 2)
+      q_nope, q_rope = q[..., :q_nope_head_dim], q[..., q_nope_head_dim:]
+      if not self.config.ssm or not self.config.ssm.kda: q_rope = apply_rope(q_rope, self.freqs_cis[start_pos:start_pos+T])
     projections=getattr(self,'npu_mla_projections',None) or getattr(self,'cpu_mla_projections',None)
-    q_nope = projections.query(q_nope) if projections is not None else q_nope @ self.attn_k_b["weight"].transpose(-1, -2)
+    # Opt-in prefill-only vendor-style FP16 NPU attention (ONPU_ATTN_FP16_NPU=1): it consumes the raw
+    # (unabsorbed) queries, so the absorbed projection is resolved after the hook decision below.
+    npu_prefill_attn=getattr(self,'npu_mla_prefill_attn',None)
+    npu_prefill=npu_prefill_attn is not None and int(q_nope.max_shape[2])>1
+    q_nope_raw,q_rope_raw=q_nope,q_rope
+    if not npu_prefill:
+      q_nope = projections.query(q_nope) if projections is not None else q_nope @ self.attn_k_b["weight"].transpose(-1, -2)
 
     kv_a = self.attn_kv_a_mqa(x)
     c_kv = self.attn_kv_a_norm(kv_a[..., :self.config.kv_lora_rank])
@@ -464,16 +479,30 @@ class MLATransformerBlock(FFNBlock):
     cache = Tensor(self.cache_k.uop.after(self.cache_k[:, :, start_pos:start_pos+T, :].uop.store(k_store.uop)))
     k = cache[:, :, 0:start_pos+T, :]
     v = k[..., :self.config.kv_lora_rank]
+    if npu_prefill:
+      npu_context = npu_prefill_attn(q_nope_raw,q_rope_raw,c_kv,k_rope,start_pos,T)
+      if npu_context is not None: return self.attn_output(npu_context)
+      # Geometry rejected at call time: fall back to the shipped absorbed projection path.
+      q_nope = projections.query(q_nope_raw) if projections is not None else q_nope_raw @ self.attn_k_b["weight"].transpose(-1, -2)
 
     mla = getattr(self,'cpu_mla_attention',None)
-    if mla is not None:
-      if getenv('ONPU_MLA_LEGACY_Q',0): attn = mla.query_key(q_nope.cat(q_rope,dim=-1),cache,start_pos)
-      else: attn = mla.query_key(q_nope,cache,start_pos,rope=q_rope)
+    fused_prefill = (mla is not None and int(q_nope.max_shape[2])>1 and not getenv('ONPU_MLA_LEGACY_Q',0))
+    fused_attn = fused_prefill and getattr(mla,'fused_attn',False)
+    fused_qk_softmax = fused_prefill and getattr(mla,'qk_softmax',False)
+    if fused_attn:
+      context = mla.query_key_softmax_value(q_nope,cache,start_pos,rope=q_rope)
     else:
-      attn = q_nope.cat(q_rope, dim=-1) @ k.transpose(-1, -2) * (1.0 / self.config.head_dim ** 0.5)
-      if (mask:=self._attn_mask(x, start_pos)) is not None: attn = attn + mask
-    attn = mla.softmax(attn,start_pos) if mla is not None else attn.softmax(-1)
-    context = mla.weighted_value(attn,cache,start_pos) if mla is not None else attn @ v
+      if mla is not None and fused_qk_softmax:
+        attn = mla.query_key_softmax(q_nope,cache,start_pos,rope=q_rope)
+      else:
+        if mla is not None:
+          if getenv('ONPU_MLA_LEGACY_Q',0): attn = mla.query_key(q_nope.cat(q_rope,dim=-1),cache,start_pos)
+          else: attn = mla.query_key(q_nope,cache,start_pos,rope=q_rope)
+        else:
+          attn = q_nope.cat(q_rope, dim=-1) @ k.transpose(-1, -2) * (1.0 / self.config.head_dim ** 0.5)
+          if (mask:=self._attn_mask(x, start_pos)) is not None: attn = attn + mask
+        attn = mla.softmax(attn,start_pos) if mla is not None else attn.softmax(-1)
+      context = mla.weighted_value(attn,cache,start_pos) if mla is not None else attn @ v
     attn = (projections.value(context) if projections is not None else context @ self.attn_v_b["weight"].transpose(-1, -2)).transpose(
       1, 2).reshape(B, T, -1)
     return self.attn_output(attn)

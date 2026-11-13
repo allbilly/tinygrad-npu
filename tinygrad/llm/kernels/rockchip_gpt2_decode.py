@@ -11,8 +11,11 @@ from tinygrad.uop.ops import sym_infer
 
 
 class DecodeLoop:
-  def __init__(self, phase, context:int, vocab:int):
+  def __init__(self, phase, context:int, vocab:int, stop_tokens:tuple[int,...]=()):
+    if len(stop_tokens)>16 or any(type(token) is not int or not 0<=token<vocab for token in stop_tokens):
+      raise ValueError('Invalid native decode stop tokens')
     self.phase,self.context,self.vocab = phase,context,vocab
+    self.stop_tokens=tuple(sorted(set(stop_tokens)))
     self.captured = phase.captured
     self.native = self.captured.native
     assert self.native is not None
@@ -32,6 +35,7 @@ class DecodeLoop:
         token=*((volatile int*){address}ULL);
         if(token<0 || token>={vocab})return 3000000;
         out[i]=token;(*done)++;
+        {'if('+ ' || '.join(f'token=={token}' for token in self.stop_tokens)+')break;' if self.stop_tokens else ''}
       }}
       return 0;
     }}'''
@@ -58,25 +62,29 @@ class DecodeLoop:
         if result:
           n.dev.poisoned = True
           raise RuntimeError(f'GPT-2 native decode failed at token {done.value}, code {result}')
+        executed=int(done.value)
+        if not 1<=executed<=count:
+          n.dev.poisoned=True
+          raise RuntimeError('Native decode returned an invalid completion count')
         for key,meta in n.writes.items():
-          meta.version += n.write_counts[key]*count
+          meta.version += n.write_counts[key]*executed
           meta.cpu_clean_version = meta.version
-    generated = list(out)
-    for i in range(count):
+    generated = list(out)[:executed]
+    for i in range(executed):
       values = {'start_pos':position+i,'tokens':token if i==0 else generated[i-1]}
       GlobalCounters.global_ops += sym_infer(n.estimates.ops,values)
       GlobalCounters.global_mem += sym_infer(n.estimates.mem,values)
-    GlobalCounters.kernel_count += len(n.calls)*count
+    GlobalCounters.kernel_count += len(n.calls)*executed
     if n.profiling:
       for i,label in enumerate(n.labels):
         n.profile_ns[label] += stats[i+2]
-        n.profile_counts[label] += count
-    values = {'start_pos':position+count-1,'tokens':token if count==1 else generated[-2]}
+        n.profile_counts[label] += executed
+    values = {'start_pos':position+executed-1,'tokens':token if executed==1 else generated[-2]}
     for tensor,uop,bindings in self.captured._symbolic_ret:
       tensor.uop = uop.substitute({v:v.bind(values.get(v.expr,i)) for v,i in bindings.items()},walk=True)
-    self.captured.native_runs += count
-    self.phase.jit.cnt += count
-    self.tokens += count
+    self.captured.native_runs += executed
+    self.phase.jit.cnt += executed
+    self.tokens += executed
     return generated
 
 
