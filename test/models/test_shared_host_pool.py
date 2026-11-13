@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+from dataclasses import replace
 from types import SimpleNamespace
 import weakref
 
@@ -35,6 +36,7 @@ class _FakeSharedState:
     self.pool = pool
     self.active = False
     self.scope_calls = 0
+    self.preparation_changes = []
 
   @contextmanager
   def scope(self):
@@ -128,6 +130,77 @@ def test_supported_dense_int8_prefill_is_admitted(monkeypatch):
   assert result["cpu_attention_blocks"] == result["npu_prefill_attention_blocks"] == 1
   assert result["prepared_qkv_blocks"] == result["fused_ffn_blocks"] == 1
   assert result["cpu_norms"] >= 2 * result["cpu_attention_blocks"]
+
+
+def test_decode_phase_reuses_an_existing_pool_scope(monkeypatch):
+  pool = _FakePool()
+  _mock_dense_placement(monkeypatch, pool)
+  states = []
+  monkeypatch.setattr(rockchip, "shared_host_pool", lambda p: states.append(_FakeSharedState(p)) or states[-1])
+  model = _model()
+  observed = []
+  model.greedy_scalar_jit = _ProbeJit(lambda: observed.append(pool.active))
+  with Context(DEV="CPU", ONPU_SHARED_HOST_POOL=1):
+    _configure(model)
+  with states[0].scope():
+    assert model.greedy_scalar_jit() == "ok"
+    assert pool.entries == 1 and pool.active
+  assert observed == [True] and not pool.active
+
+
+@pytest.mark.parametrize("missing", [None, "cpu_prefill_pool", "fused_gelu_ffn", "cpu_norm"])
+@pytest.mark.parametrize("score_softcap", [0.0, 50.0])
+def test_plain_gelu_pool_requires_prepared_cpu_graph(monkeypatch, missing, score_softcap):
+  pool = _FakePool()
+  _mock_dense_placement(monkeypatch, pool)
+  states = []
+  monkeypatch.setattr(rockchip, "shared_host_pool", lambda p: states.append(_FakeSharedState(p)) or states[-1])
+  with Context(DEV="CPU"):
+    model = Transformer(replace(_model().config, ffn_activation="gelu_tanh", final_logit_softcap=30.0,
+                                attn_logit_softcap=score_softcap))
+  options = {"cpu_prefill_pool": True, "fused_gelu_ffn": True, "cpu_gelu": True,
+             "cpu_softcap": True, "npu_prefill_attention": False}
+  if missing is not None:
+    options[missing] = False
+  with Context(DEV="CPU", ONPU_SHARED_HOST_POOL=1):
+    result = _configure(model, **options)
+  assert result["shared_host_pool"] is (missing is None)
+  if missing is None:
+    assert result["fused_gelu_ffn_blocks"] == 1
+    assert result["prepared_qkv_blocks"] == int(not score_softcap)
+    assert result["fused_swiglu_ffn_blocks"] == 0
+    assert model_shared_host_pool(model) is states[0]
+  else:
+    assert not states
+
+
+@pytest.mark.parametrize("missing", [None, "cpu_prefill_pool", "fused_swiglu_ffn", "cpu_norm", "context"])
+def test_short_convolution_pool_requires_fully_prepared_hybrid_graph(monkeypatch, missing):
+  pool = _FakePool()
+  _mock_dense_placement(monkeypatch, pool)
+  states = []
+  monkeypatch.setattr(rockchip, "shared_host_pool", lambda p: states.append(_FakeSharedState(p)) or states[-1])
+  context = 256 if missing == "context" else 512
+  with Context(DEV="CPU"):
+    config = TransformerConfig(2, 1024, 3072, 16, 8, 1e-6, 16, 64, 10000.0, 64, 64,
+                               max_context=context, qk_norm=64, conv_kernel=3, conv_layers=(True, False))
+    model = Transformer(config)
+  options = {"cpu_prefill_pool": True, "fused_swiglu_ffn": True, "npu_prefill_attention": False}
+  if missing in options:
+    options[missing] = False
+  if missing == "cpu_norm":
+    options["cpu_norm"] = False
+  observed = []
+  model.prefill_jit = _ProbeJit(lambda: observed.append(states[0].active))
+  with Context(DEV="CPU", ONPU_SHARED_HOST_POOL=1):
+    result = _configure(model, **options)
+  assert result["shared_host_pool"] is (missing is None)
+  if missing is None:
+    assert model_shared_host_pool(model) is states[0]
+    assert model.prefill_jit() == "ok" and observed == [True]
+    assert not states[0].active and not pool.active
+  else:
+    assert not states and model_shared_host_pool(model) is None
 
 
 @pytest.mark.parametrize(
@@ -285,3 +358,24 @@ def test_cpu_attention_with_prepared_qkv_and_raw_swiglu_is_fully_pooled(monkeypa
   assert result["npu_prefill_attention_blocks"] == 0
   assert result["prepared_qkv_blocks"] == result["fused_swiglu_ffn_blocks"] == 1
   assert model_shared_host_pool(model) is states[0]
+def test_erf_shared_pool_rejects_incomplete_unqualified_graphs():
+  from types import SimpleNamespace
+  from tinygrad.llm.model import TransformerBlock
+  from tinygrad.llm.kernels.rockchip_shared_pool import erf_pool_eligible
+  model=SimpleNamespace(max_context=512,blk=[TransformerBlock.__new__(TransformerBlock) for _ in range(2)])
+  counts=[2,2,2,2,2,0]
+  assert erf_pool_eligible(model,'on','on',*counts)
+  for index in range(5):
+    partial=counts.copy()
+    partial[index]-=1
+    assert not erf_pool_eligible(model,'on','on',*partial)
+  assert not erf_pool_eligible(model,'off','on',*counts)
+  assert not erf_pool_eligible(model,'on','off',*counts)
+  assert not erf_pool_eligible(model,'on','on',2,2,2,2,2,1)
+  model.max_context=1024
+  assert not erf_pool_eligible(model,'on','on',*counts)
+  model.max_context=512
+  model.blk[0]=SimpleNamespace()
+  assert not erf_pool_eligible(model,'on','on',*counts)
+  model.blk=[]
+  assert not erf_pool_eligible(model,'on','on',0,0,0,0,0,0)

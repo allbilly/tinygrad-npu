@@ -32,7 +32,8 @@ def _balanced_head_order(heads:int, kv_heads:int) -> tuple[int,...]:
 def _prepare(out:UOp, cache:UOp, projected:UOp|tuple[UOp,...], qnorm:UOp, knorm:UOp, freqs:UOp, start:UOp|None, rows:UOp|None,
              heads:int, kv_heads:int, dim:int, context:int, capacity:int, eps:float, static_start:int,
              raw_scales:tuple[UOp,...]=(), weight_scales:UOp|None=None, tile_rows:tuple[int,...]=(),
-             static_rows:int|None=None, normalize:bool=True, balance_heads:bool=False, bias:UOp|None=None, token_major:bool=False) -> UOp:
+             static_rows:int|None=None, normalize:bool=True, balance_heads:bool=False, bias:UOp|None=None, token_major:bool=False,
+             rope_dim:int=0) -> UOp:
   qtype,ktype = ('__fp16' if p.dtype is dtypes.half else 'float' for p in (qnorm,knorm))
   qload = '__builtin_convertvector(*(const half4*)(qn+c),float4)' if qtype=='__fp16' else '*(const float4*)(qn+c)'
   kload = '__builtin_convertvector(*(const half4*)(kn+c),float4)' if ktype=='__fp16' else '*(const float4*)(kn+c)'
@@ -100,6 +101,69 @@ def _prepare(out:UOp, cache:UOp, projected:UOp|tuple[UOp,...], qnorm:UOp, knorm:
       for(int c=0;c<{dim};c+=4) {{float4 v=*(const float4*)(normal+c),weight=h<{heads}?{qload}:{kload};
         *(float4*)(normal+c)=(v*(float4)inverse)*weight;}}''' if normalize else ''
   query_offset=f'(r*{heads}+h)*{dim}' if token_major else f'(h*{capacity}+r)*{dim}'
+  # Rotary prefix. `rope_dim==0` keeps the original full-head rotary (x1/x2 are the
+  # two halves of the head); a smaller `rope_dim` reproduces the model's
+  # `apply_rope(q[..., :rope_dim]).cat(q[..., rope_dim:])` path used by partial
+  # rotary models such as ChatGLM2/3 (rope_dim=head_dim//2).
+  #
+  # ROUNDING: the generic decode graph lowers `(x1*cos)-(x2*sin)` and
+  # `(x2*cos)+(x1*sin)` through clang -O2 (the tree passes no -ffp-contract flag, so
+  # C's default `on` applies) and each expression becomes ONE fused multiply-add:
+  #   left  = fma(x1, cos, -(x2*sin))     right = fma(x2, cos,  x1*sin)
+  # i.e. the second product is rounded to FP32 first and the first product is fused.
+  # Earlier work established this by disassembly, and an unfused variant is 1 ulp
+  # off (`docs/benchmark-chatglm-partial-qkv-cpu-20261106.json`: "non-fused arithmetic
+  # matches NumPy but differs from actual tinygrad"). Depending on the contraction
+  # heuristic for a different loop body is fragile, so the same fused rounding is
+  # emitted explicitly (FMLA on AArch64, `__builtin_fmaf` elsewhere) while the two
+  # standalone products are kept under `contract(off)`: no multiply/add pair is left
+  # for the compiler to fuse differently. Verified bit-identical to the generic path.
+  rotary = dim if rope_dim==0 else rope_dim
+  half = rotary//2
+  rope_open = '{\n#pragma clang fp contract(off)\n'
+  rope_fma = '''float4 left=-(b*sine),right=a*sine;
+#if defined(__aarch64__)
+        __asm__("fmla %0.4s, %1.4s, %2.4s":"+w"(left):"w"(a),"w"(cosine));
+        __asm__("fmla %0.4s, %1.4s, %2.4s":"+w"(right):"w"(b),"w"(cosine));
+#else
+        for(int lane=0;lane<4;lane++) {
+          left[lane]=__builtin_fmaf(a[lane],cosine[lane],left[lane]);
+          right[lane]=__builtin_fmaf(b[lane],cosine[lane],right[lane]);
+        }
+#endif'''
+  v_source = f'__builtin_convertvector(read_projected(src,r,(h+{kv_heads})*{dim}+c),half4)'
+  if rotary==dim:
+    rope_block = f'''{rope_open}for(int c=0;c<{half};c+=4) {{
+        float4 a=*(float4*)(normal+c),b=*(float4*)(normal+c+{half});
+        float4 cosine=*(const float4*)(freq+(first+r)*{rotary}+c),sine=*(const float4*)(freq+(first+r)*{rotary}+c+{half});
+        {rope_fma}
+        if(h<{heads}) {{*(float4*)(out+{query_offset}+c)=left;*(float4*)(out+{query_offset}+c+{half})=right;}}
+        else {{int target=((h-{heads})*{context}+first+r)*{dim}+c;
+          *(half4*)(cache+target)=__builtin_convertvector(left,half4);
+          *(half4*)(cache+target+{half})=__builtin_convertvector(right,half4);
+          *(half4*)(cache+target+{kv_heads*context*dim})={v_source};
+          *(half4*)(cache+target+{kv_heads*context*dim+half})=__builtin_convertvector(read_projected(src,r,(h+{kv_heads})*{dim}+c+{half}),half4);
+        }}
+      }}
+      }}'''
+  else:
+    rope_block = f'''{rope_open}for(int c=0;c<{half};c+=4) {{
+        float4 a=*(float4*)(normal+c),b=*(float4*)(normal+c+{half});
+        float4 cosine=*(const float4*)(freq+(first+r)*{rotary}+c),sine=*(const float4*)(freq+(first+r)*{rotary}+c+{half});
+        {rope_fma}
+        if(h<{heads}) {{*(float4*)(out+{query_offset}+c)=left;*(float4*)(out+{query_offset}+c+{half})=right;}}
+        else {{int target=((h-{heads})*{context}+first+r)*{dim}+c;
+          *(half4*)(cache+target)=__builtin_convertvector(left,half4);
+          *(half4*)(cache+target+{half})=__builtin_convertvector(right,half4);}}
+      }}
+      for(int c={rotary};c<{dim};c+=4) {{
+        float4 value=*(float4*)(normal+c);
+        if(h<{heads}) *(float4*)(out+{query_offset}+c)=value;
+        else {{int target=((h-{heads})*{context}+first+r)*{dim}+c;*(half4*)(cache+target)=__builtin_convertvector(value,half4);}}
+      }}
+      if(h>={heads}) for(int c=0;c<{dim};c+=4) {{int target=((h-{heads})*{context}+first+r)*{dim}+c;
+        *(half4*)(cache+target+{kv_heads*context*dim})={v_source};}}
+      }}'''
   source = f'''typedef float float4 __attribute__((aligned(16),ext_vector_type(4)));
   typedef __fp16 half4 __attribute__((aligned(8),ext_vector_type(4)));
   {definitions}
@@ -125,19 +189,7 @@ def _prepare(out:UOp, cache:UOp, projected:UOp|tuple[UOp,...], qnorm:UOp, knorm:
       for(int c=0;c<{dim};c+=4) {{float4 v=read_projected(src,r,h*{dim}+c);*(float4*)(normal+c)=v;{
         'acc=acc+v*v;' if normalize else ''}}}
       {normalization}
-      for(int c=0;c<{dim//2};c+=4) {{
-        float4 a=*(float4*)(normal+c),b=*(float4*)(normal+c+{dim//2});
-        float4 cosine=*(const float4*)(freq+(first+r)*{dim}+c),sine=*(const float4*)(freq+(first+r)*{dim}+c+{dim//2});
-        float4 left=a*cosine-b*sine,right=b*cosine+a*sine;
-        if(h<{heads}) {{*(float4*)(out+{query_offset}+c)=left;*(float4*)(out+{query_offset}+c+{dim//2})=right;}}
-        else {{int target=((h-{heads})*{context}+first+r)*{dim}+c;
-          *(half4*)(cache+target)=__builtin_convertvector(left,half4);
-          *(half4*)(cache+target+{dim//2})=__builtin_convertvector(right,half4);
-          *(half4*)(cache+target+{kv_heads*context*dim})=__builtin_convertvector(read_projected(src,r,(h+{kv_heads})*{dim}+c),half4);
-          *(half4*)(cache+target+{kv_heads*context*dim+dim//2})=__builtin_convertvector(
-            read_projected(src,r,(h+{kv_heads})*{dim}+c+{dim//2}),half4);
-        }}
-      }}
+      {rope_block}
     }}
   }}
   {worker}'''
@@ -150,18 +202,37 @@ def _prepare(out:UOp, cache:UOp, projected:UOp|tuple[UOp,...], qnorm:UOp, knorm:
                                      UOp(Ops.BINARY,arg=renderer.compiler.compile_cached(source))))
 
 
-def _normalizers(qnorm:Tensor|None, knorm:Tensor|None, dim:int) -> tuple[Tensor,Tensor,bool]:
+def _normalizers(qnorm:Tensor|None, knorm:Tensor|None, dim:int) -> tuple[Tensor|None,Tensor|None,bool]:
   if (qnorm is None)!=(knorm is None):raise ValueError('Q/K normalization weights must both be present or absent')
   normalize = qnorm is not None
-  # Retain the existing kernel ABI; these constant operands are never loaded
-  # when normalization is disabled in the generated source.
-  if qnorm is None:qnorm=knorm=Tensor.ones(dim,device='CPU',dtype=dtypes.float)
-  assert knorm is not None
   return qnorm,knorm,normalize
 
 
+def _normalizer_inputs(qnorm:Tensor|None, knorm:Tensor|None, freqs:Tensor) -> tuple[Tensor,Tensor]:
+  """Placeholder Q/K weight pointers for the unnormalized graph.
+
+  The generated kernel never loads these operands when normalization is off, so
+  any realized FP32 CPU tensor of the same element type works. Reusing `freqs`
+  keeps the kernel ABI without adding a graph node: an unresolved
+  `Tensor.ones(dim)` would be materialized once per replayed token.
+  """
+  if qnorm is None: return freqs,freqs
+  assert knorm is not None
+  return qnorm,knorm
+
+def _rope_width(dim:int, rope_dim:int, freqs:Tensor, context:int) -> int:
+  """Validate and resolve a rotary prefix width (0 means the full head)."""
+  if type(rope_dim) is not int or not 0<=rope_dim<=dim: raise ValueError('Rotary width must be inside the head')
+  rotary = dim if rope_dim==0 else rope_dim
+  # The kernel copies the first half and the rotated second half four lanes at a time.
+  if rotary%8 or dim%8: raise ValueError('Partial rotary must be a multiple of eight lanes')
+  if freqs.device!='CPU' or freqs.dtype is not dtypes.float or freqs.shape!=(context,rotary):
+    raise ValueError('Rotary tables must be FP32 CPU (context, rope_dim) rows')
+  return rope_dim
+
+
 def prepare_qkv(projected:Tensor, cache:Tensor, qnorm:Tensor|None, knorm:Tensor|None, freqs:Tensor, start:int|UOp,
-                heads:int, eps:float) -> tuple[Tensor,Tensor]:
+                heads:int, eps:float, rope_dim:int=0) -> tuple[Tensor,Tensor]:
   """Prepare rotary Q/K and cache V; absent Q/K weights skip normalization."""
   if (projected.device!='CPU' or projected.dtype is not dtypes.float or projected.ndim!=3 or projected.shape[0]!=1
       or cache.device!='CPU' or cache.dtype is not dtypes.half or cache.ndim!=5 or cache.shape[:2]!=(2,1)):
@@ -171,9 +242,10 @@ def prepare_qkv(projected:Tensor, cache:Tensor, qnorm:Tensor|None, knorm:Tensor|
   qnorm,knorm,normalize = _normalizers(qnorm,knorm,dim)
   if (not 1<=kv_heads<=heads<=128 or heads%kv_heads or not 8<=dim<=256 or dim%8 or not 1<=context<=4096
       or not 1<=capacity<=context or projected.shape[-1]!=(heads+2*kv_heads)*dim
-      or any(w.device!='CPU' or w.shape!=(dim,) or w.dtype not in (dtypes.float,dtypes.half) for w in (qnorm,knorm))
-      or freqs.device!='CPU' or freqs.dtype is not dtypes.float or freqs.shape!=(context,dim)):
+      or normalize and any(w.device!='CPU' or w.shape!=(dim,) or w.dtype not in (dtypes.float,dtypes.half) for w in (qnorm,knorm))):
     raise ValueError('Unsupported QKV preparation geometry')
+  rope_dim = _rope_width(dim,rope_dim,freqs,context)
+  qnorm,knorm = _normalizer_inputs(qnorm,knorm,freqs)
   position = (Tensor(start,device='CPU',dtype=dtypes.int).reshape(1),) if isinstance(start,UOp) else ()
   count = projected.shape[1]
   rows = (Tensor(count,device='CPU',dtype=dtypes.int).reshape(1),) if isinstance(count,UOp) else ()
@@ -181,12 +253,13 @@ def prepare_qkv(projected:Tensor, cache:Tensor, qnorm:Tensor|None, knorm:Tensor|
     cache,projected.pad_to(projected.max_shape).contiguous(),qnorm.contiguous(),knorm.contiguous(),freqs.contiguous(),*position,*rows,
     fxn=lambda o,k,p,qw,kw,f,*r:_prepare(o,k,p,qw,kw,f,r[0] if position else None,r[-1] if rows else None,
                                        heads,kv_heads,dim,context,capacity,eps,start if isinstance(start,int) else 0,
-                                       normalize=normalize,balance_heads=bool(ONPU_PREFILL_CPU_TUNING)))
+                                       normalize=normalize,balance_heads=bool(ONPU_PREFILL_CPU_TUNING),rope_dim=rope_dim))
   return mark_zero_tail(result[0][:,:,:count],result[0],'qkv'),result[1]
 
 
 def prepare_qkv_int8(raw:list[Tensor], sa:list[Tensor], sw:Tensor, sizes:list[int], cache:Tensor, qnorm:Tensor|None, knorm:Tensor|None,
-                     freqs:Tensor, start:int|UOp, heads:int, eps:float, count:int|UOp, *, bias:Tensor|None=None) -> tuple[Tensor,Tensor]:
+                     freqs:Tensor, start:int|UOp, heads:int, eps:float, count:int|UOp, *, bias:Tensor|None=None,
+                     rope_dim:int=0) -> tuple[Tensor,Tensor]:
   if cache.device!='CPU' or cache.dtype is not dtypes.half or cache.ndim!=5 or cache.shape[:2]!=(2,1):
     raise ValueError('Unsupported INT8 QKV cache')
   kv_heads,context,dim=cache.max_shape[2:]
@@ -199,9 +272,10 @@ def prepare_qkv_int8(raw:list[Tensor], sa:list[Tensor], sw:Tensor, sizes:list[in
       or not 1<=kv_heads<=heads<=128 or heads%kv_heads or sw.device!='CPU' or sw.dtype is not dtypes.float or sw.shape!=(columns,)
       or any(r.device!='CPU' or r.dtype is not dtypes.int32 or r.numel()!=m*round_up(columns,32) for r,m in zip(raw,sizes))
       or any(s.device!='CPU' or s.dtype is not dtypes.float or s.shape!=(m,) for s,m in zip(sa,sizes))
-      or any(w.device!='CPU' or w.shape!=(dim,) or w.dtype not in (dtypes.float,dtypes.half) for w in (qnorm,knorm))
-      or freqs.device!='CPU' or freqs.dtype is not dtypes.float or freqs.shape!=(context,dim)):
+      or normalize and any(w.device!='CPU' or w.shape!=(dim,) or w.dtype not in (dtypes.float,dtypes.half) for w in (qnorm,knorm))):
     raise ValueError('Unsupported INT8 QKV geometry')
+  rope_dim = _rope_width(dim,rope_dim,freqs,context)
+  qnorm,knorm = _normalizer_inputs(qnorm,knorm,freqs)
   if bias is not None and (bias.device!='CPU' or bias.dtype not in (dtypes.half,dtypes.float) or bias.shape!=(columns,)):
     raise ValueError('INT8 QKV bias must be a matching CPU FP16/FP32 vector')
   bias_values=(bias.contiguous(),) if bias is not None else ()
@@ -215,7 +289,7 @@ def prepare_qkv_int8(raw:list[Tensor], sa:list[Tensor], sw:Tensor, sizes:list[in
                     other[-1] if active else None,heads,kv_heads,dim,context,capacity,eps,start if isinstance(start,int) else 0,
                     tuple(args[n:n*2]),args[n*2],tuple(sizes),count if isinstance(count,int) else None,
                     normalize=normalize,balance_heads=bool(ONPU_PREFILL_CPU_TUNING),bias=args[n*2+4] if bias_values else None,
-                    token_major=token_major)
+                    token_major=token_major,rope_dim=rope_dim)
   result=Tensor.empty(*((1,capacity,heads,dim) if token_major else (1,heads,capacity,dim)),device='CPU',dtype=dtypes.float).custom_kernel(
     cache,*raw,*sa,sw,qnorm.contiguous(),knorm.contiguous(),freqs.contiguous(),*bias_values,*position,*active,fxn=build)
   full=result[0].transpose(1,2) if token_major else result[0]

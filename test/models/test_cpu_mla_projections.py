@@ -109,6 +109,45 @@ def test_cpu_mla_projection_configure_is_atomic_and_disable_removes_hook():
     configure(_model(), enabled=1)
 
 
+def test_configured_pool_dispatches_and_parks_when_graph_is_built_outside_scope():
+  from test.runtime.test_rockchip_shared_pool import _needs_pool, _pool_test_lock
+  from tinygrad.llm.kernels.rockchip_pool import AttentionPool
+  _needs_pool()
+  with _pool_test_lock():
+    pool=AttentionPool()
+    try:
+      model=_model()
+      assert configure(model,pool=pool)==1
+      hook=model.blk[0].cpu_mla_projections
+      assert hook._pool() is pool
+      x=Tensor.randn(1,4,17,64,device='CPU').realize()
+      output=hook.query(x)
+      before=pool.lib.pool_calls()
+      _assert_float_bits(output.numpy(),_reference(x,hook._sources()[0]).numpy())
+      assert pool.lib.pool_calls()>before
+      assert not pool.active and pool.lib.pool_parked()
+    finally:pool.close()
+
+
+def test_configured_prefill_pool_keeps_single_row_decode_serial():
+  from test.runtime.test_rockchip_shared_pool import _needs_pool, _pool_test_lock
+  from tinygrad.llm.kernels.rockchip_pool import AttentionPool
+  _needs_pool()
+  with _pool_test_lock():
+    pool=AttentionPool()
+    try:
+      key,value=_tables(heads=40,key_columns=256,key_depth=64,value_columns=64,value_depth=256)
+      hook=CPUMLAProjections(key,value,pool=pool)
+      hook.prepare()
+      for method,weight in ((hook.query,key),(hook.value,value)):
+        x=Tensor.randn(1,40,1,int(weight.shape[-1]),device='CPU').realize()
+        before=pool.lib.pool_calls()
+        _assert_float_bits(method(x).numpy(),_reference(x,weight).numpy())
+        assert pool.lib.pool_calls()==before
+      assert not pool.active and pool.lib.pool_parked()
+    finally:pool.close()
+
+
 def test_cpu_mla_projection_full_model_matches_serial_prefill_decode_reset_and_generation():
   serial = _model(seed=41)
   prepared = _model(seed=41)
@@ -220,3 +259,156 @@ def test_cpu_projection_option_activates_without_opening_npu(tmp_path, monkeypat
   assert data['placement']['cpu_mla_projection_blocks'] == 1
   assert data['placement']['cpu_mla_projection_packed_weight_bytes'] == 65536
   assert {name for name in Device._opened_devices if name.split(':')[0] == 'ROCKCHIP'} == before
+
+
+@pytest.mark.parametrize("heads,key_columns,key_depth,value_columns,value_depth", [(40, 256, 64, 64, 256)])
+def test_cpu_mla_projection_blocked_tiling_is_bitwise_identical(heads, key_columns, key_depth, value_columns, value_depth):
+  """ONPU_MLA_PROJ_BLOCKED re-tiles the kernel (8 rows x 8 columns per block) without changing arithmetic."""
+  from tinygrad.helpers import Context
+  key, value = _tables(heads, key_columns, key_depth, value_columns, value_depth)
+  hook = CPUMLAProjections(key, value)
+  hook.prepare()
+  rng = np.random.default_rng(37)
+  for rows in (1, 7, 128):
+    x = Tensor(rng.normal(size=(1, heads, rows, key_depth)).astype(np.float32)).realize()
+    with Context(ONPU_MLA_PROJ_BLOCKED=0): q0 = hook.query(x).numpy()
+    with Context(ONPU_MLA_PROJ_BLOCKED=1): q1 = hook.query(x).numpy()
+    np.testing.assert_array_equal(q0.view(np.uint32), q1.view(np.uint32))
+    xv = Tensor(rng.normal(size=(1, heads, rows, value_depth)).astype(np.float32)).realize()
+    with Context(ONPU_MLA_PROJ_BLOCKED=0): v0 = hook.value(xv).numpy()
+    with Context(ONPU_MLA_PROJ_BLOCKED=1): v1 = hook.value(xv).numpy()
+    np.testing.assert_array_equal(v0.view(np.uint32), v1.view(np.uint32))
+
+
+@pytest.mark.parametrize("heads,key_columns,key_depth,value_columns,value_depth",
+                         [(40, 256, 64, 64, 256), (4, 64, 64, 64, 64), (4, 68, 64, 64, 68)])
+def test_cpu_mla_projection_kpair_tiling_is_bitwise_identical(heads, key_columns, key_depth, value_columns, value_depth):
+  """ONPU_MLA_PROJ_KPAIR consumes two k steps per inner iteration without changing the
+  per-output ascending-k `acc = acc + x*w` sequence, so every result keeps its bits.
+  The 68-column case exercises the columns%8 fallback back to the shipped kernel."""
+  from tinygrad.helpers import Context
+  key, value = _tables(heads, key_columns, key_depth, value_columns, value_depth)
+  hook = CPUMLAProjections(key, value)
+  hook.prepare()
+  rng = np.random.default_rng(41)
+  for rows in (1, 7, 128):
+    x = Tensor(rng.normal(size=(1, heads, rows, key_depth)).astype(np.float32)).realize()
+    for blocked in (0, 1):
+      with Context(ONPU_MLA_PROJ_BLOCKED=blocked, ONPU_MLA_PROJ_KPAIR=0): q0 = hook.query(x).numpy()
+      with Context(ONPU_MLA_PROJ_BLOCKED=blocked, ONPU_MLA_PROJ_KPAIR=1): q1 = hook.query(x).numpy()
+      np.testing.assert_array_equal(q0.view(np.uint32), q1.view(np.uint32))
+    xv = Tensor(rng.normal(size=(1, heads, rows, value_depth)).astype(np.float32)).realize()
+    for blocked in (0, 1):
+      with Context(ONPU_MLA_PROJ_BLOCKED=blocked, ONPU_MLA_PROJ_KPAIR=0): v0 = hook.value(xv).numpy()
+      with Context(ONPU_MLA_PROJ_BLOCKED=blocked, ONPU_MLA_PROJ_KPAIR=1): v1 = hook.value(xv).numpy()
+      np.testing.assert_array_equal(v0.view(np.uint32), v1.view(np.uint32))
+
+
+def test_cpu_mla_projection_kpair_is_on_by_default_and_rowmajor_composes():
+  """ONPU_MLA_PROJ_KPAIR is now DEFAULT-ON: it is bit-exact (proven below) and its
+  shipping cost is zero, so hiding it behind an env var only made the shipped
+  configuration slower than the measured one. It composes with ONPU_MLA_VALUE_ROWMAJOR
+  because it only changes the inner k loop."""
+  from tinygrad.helpers import Context
+  from tinygrad.llm.kernels.rockchip_mla_cpu import ONPU_MLA_PROJ_KPAIR
+  assert ONPU_MLA_PROJ_KPAIR.value == 1
+  key, value = _tables(40, 256, 64, 64, 256)
+  hook = CPUMLAProjections(key, value)
+  hook.prepare()
+  rng = np.random.default_rng(43)
+  xv = Tensor(rng.normal(size=(1, 40, 32, 256)).astype(np.float32)).realize()
+  with Context(ONPU_MLA_VALUE_ROWMAJOR=1, ONPU_MLA_PROJ_KPAIR=0): v0 = hook.value(xv).numpy()
+  with Context(ONPU_MLA_VALUE_ROWMAJOR=1, ONPU_MLA_PROJ_KPAIR=1): v1 = hook.value(xv).numpy()
+  np.testing.assert_array_equal(v0.view(np.uint32), v1.view(np.uint32))
+
+
+def _emitted_source(hook, x):
+  """The SOURCE the projection program emitted for the JIT captured by `hook` on `x`."""
+  from tinygrad import TinyJit
+  run = TinyJit(lambda t: hook.query(t).realize())
+  run(x)
+  run(x)  # the second call installs the captured graph
+  assert run.captured is not None
+  return "\n".join(str(source.arg) for call in run.captured.linear.src if call.body.op.name == "PROGRAM"
+                   for source in call.body.src if source.op.name == "SOURCE")
+
+
+@pytest.mark.parametrize("heads,key_columns,key_depth,value_columns,value_depth",
+                         [(40, 256, 64, 64, 256), (4, 64, 64, 64, 64)])
+def test_cpu_mla_projection_f32w_tiling_is_bitwise_identical(heads, key_columns, key_depth, value_columns, value_depth):
+  """ONPU_MLA_PROJ_F32W prepares a single FP32 copy of the packed table and uses selector 3
+  (the k-pair tile with plain 16-byte weight loads). An fp16 -> fp32 conversion is exact, so
+  the kernel sees the same operand values and every output keeps its bits, for both
+  production shapes and for rows that are not a multiple of the 8-row tile."""
+  from tinygrad.helpers import Context
+  key, value = _tables(heads, key_columns, key_depth, value_columns, value_depth)
+  off = CPUMLAProjections(key, value)
+  off.prepare()
+  with Context(ONPU_MLA_PROJ_F32W=1):
+    on = CPUMLAProjections(key, value)
+    on.prepare()
+    assert on._f32w() is not None and off._f32w() is None
+    # One realised FP32 copy per table, and it is the packed layout widened in place.
+    assert [t.shape for t in on._f32w()] == [t.shape for t in on._packed()]
+    assert all(t.dtype is dtypes.float and t.device == "CPU" for t in on._f32w())
+    assert on.packed_bytes == sum(t.nbytes() for t in on._packed()) + sum(t.nbytes() for t in on._f32w())
+    rng = np.random.default_rng(47)
+    for rows in (1, 7, 128):
+      x = Tensor(rng.normal(size=(1, heads, rows, key_depth)).astype(np.float32)).realize()
+      # kpair on (the production stack) and the shipped kernel off, so the assertion does
+      # not depend on which other projection flags happen to be set.
+      for kpair in (0, 1):
+        with Context(ONPU_MLA_PROJ_F32W=0, ONPU_MLA_PROJ_KPAIR=kpair): q0 = off.query(x).numpy()
+        with Context(ONPU_MLA_PROJ_F32W=1, ONPU_MLA_PROJ_KPAIR=kpair): q1 = on.query(x).numpy()
+        np.testing.assert_array_equal(q0.view(np.uint32), q1.view(np.uint32))
+      xv = Tensor(rng.normal(size=(1, heads, rows, value_depth)).astype(np.float32)).realize()
+      for kpair in (0, 1):
+        with Context(ONPU_MLA_PROJ_F32W=0, ONPU_MLA_PROJ_KPAIR=kpair): v0 = off.value(xv).numpy()
+        with Context(ONPU_MLA_PROJ_F32W=1, ONPU_MLA_PROJ_KPAIR=kpair): v1 = on.value(xv).numpy()
+        np.testing.assert_array_equal(v0.view(np.uint32), v1.view(np.uint32))
+
+
+def test_cpu_mla_projection_f32w_is_off_by_default_and_emits_fp16_weight():
+  """Flag off must stay byte-identical: the emitted source still declares an FP16 weight
+  table and selects the shipped tiling; flag on declares `const float *weight` and selector 3."""
+  from tinygrad.helpers import Context
+  from tinygrad.llm.kernels.rockchip_mla_cpu import ONPU_MLA_PROJ_F32W
+  assert ONPU_MLA_PROJ_F32W.value == 0
+  key, value = _tables(40, 256, 64, 64, 256)
+  hook = CPUMLAProjections(key, value)
+  hook.prepare()
+  # The FP32 copy is realised ONCE in prepare(), under the flag state at prepare time,
+  # so nothing wider than the FP16 table is built on the prefill critical path.
+  with Context(ONPU_MLA_PROJ_F32W=1):
+    f32w_hook = CPUMLAProjections(key, value)
+    f32w_hook.prepare()
+  x = Tensor(np.random.default_rng(53).normal(size=(1, 40, 128, 64)).astype(np.float32)).realize()
+  with Context(ONPU_MLA_PROJ_F32W=0, ONPU_MLA_PROJ_KPAIR=0, ONPU_MLA_PROJ_BLOCKED=0):
+    off_source = _emitted_source(hook, x)
+  assert "const __fp16 *weight" in off_source
+  assert "mla_project(out,input,weight,40,128,*rows,64,256,0ULL,0,0)" in off_source
+  with Context(ONPU_MLA_PROJ_F32W=1):
+    on_source = _emitted_source(f32w_hook, x)
+  # Only the wrapper signature is asserted: the kernel body legitimately contains
+  # `(const __fp16*)w->weight` casts for the selectors that read an FP16 table.
+  assert "const float *weight" in on_source
+  assert "const __fp16 *weight,const int *rows" not in on_source
+  assert "mla_project(out,input,weight,40,128,*rows,64,256,0ULL,3,0)" in on_source
+  # The FP32 table is not prepared when the flag is off, so no resident copy is added.
+  assert hook._f32w() is None and hook.packed_bytes == sum(t.nbytes() for t in hook._packed())
+
+
+def test_cpu_mla_projection_f32w_never_feeds_the_fp16_decode_kernel():
+  """The decode-only FP16 accumulation kernel (`ONPU_MLA_CPU_FP16`, capacity 1) indexes the
+  table as `__fp16`, so an FP32 table must not be selected for it; the values are unchanged
+  either way because the fallback is the shipped kernel."""
+  from tinygrad.helpers import Context
+  key, value = _tables(40, 256, 64, 64, 256)
+  hook = CPUMLAProjections(key, value)
+  hook.prepare()
+  x = Tensor(np.random.default_rng(59).normal(size=(1, 40, 1, 64)).astype(np.float32)).realize()
+  with Context(ONPU_MLA_PROJ_F32W=0, ONPU_MLA_CPU_FP16=1): q0 = hook.query(x).numpy()
+  with Context(ONPU_MLA_PROJ_F32W=1, ONPU_MLA_CPU_FP16=1): q1 = hook.query(x).numpy()
+  np.testing.assert_array_equal(q0.view(np.uint32), q1.view(np.uint32))
+  with Context(ONPU_MLA_PROJ_F32W=1, ONPU_MLA_CPU_FP16=1):
+    assert "const __fp16 *weight" in _emitted_source(hook, x)

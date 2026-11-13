@@ -1,0 +1,9 @@
+# Frozen source snapshot
+freeze_date=2026-11-13
+source_tree=/home/orangepi/tg-exp-h5
+snapshot_parent=3a1b2e1c94ffdfee791b98434849af2a34ee7fc8
+freeze_branch=codex/freeze-tg-exp-h5-20261113
+
+This is the frozen prefill-margin experiment tree. At freeze, all five tracked margin-lever identifiers were present and the grouped/decode_pool signature was available on all four FFN pack functions. No tests or hardware benchmarks were run during freezing.
+
+The two codex-session-*.md conversation dumps in some source directories were excluded from Git; they remain untouched in the original directories. Runtime code, tests, fixtures, and supporting scripts were staged from the source snapshot.

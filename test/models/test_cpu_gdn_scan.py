@@ -12,6 +12,44 @@ from test.models.cpu_gdn_reference import FIXTURES, expected_for_call, make_fixt
 NUMERICAL_TOLERANCE = (2e-6,2e-4)
 
 
+@pytest.mark.parametrize('key_dim,value_dim,alpha_dim,start,rows,capacity',[
+  (4,4,1,17,1,1), (64,64,1,128,1,1), (128,128,1,128,1,1), (256,256,1,128,1,1),
+  (17,16,1,17,1,1), (16,17,1,17,1,1), (128,128,128,17,1,1), (128,128,1,0,1,1),
+  (64,64,1,0,5,7), (64,64,1,17,5,7),
+])
+def test_direct_decode_preserves_output_and_state_bits(key_dim,value_dim,alpha_dim,start,rows,capacity):
+  from tinygrad.helpers import Context
+  case=make_fixture(name='direct_decode',batch=1,heads=4,rows=rows,capacity=capacity,
+                    key_dim=key_dim,value_dim=value_dim,alpha_dim=alpha_dim,start=start,seed=98312,history=False)
+  outputs=[]
+  for direct in (0,1):
+    with Context(ONPU_GDN_DIRECT_DECODE=direct):
+      q,k,v,beta,alpha,state=_tensors(case)
+      result=gated_delta_scan(q,k,v,beta,alpha,state,start,rows).numpy()
+      outputs.append((result.tobytes(),state.numpy().tobytes()))
+  assert outputs[0]==outputs[1]
+
+
+@pytest.mark.parametrize('aliased',range(5))
+def test_direct_decode_retains_snapshot_behavior_for_input_state_aliases(aliased):
+  from tinygrad.helpers import Context
+  rng=np.random.default_rng(98313)
+  initial=rng.normal(0,.2,(1,4,64,64)).astype(np.float32)
+  arrays=[rng.normal(0,.2,(1,4,1,64)).astype(np.float32) for _ in range(3)]
+  arrays.extend([np.full((1,4,1),.5,np.float32) for _ in range(2)])
+  results=[]
+  for direct in (0,1):
+    state=Tensor(initial.copy(),device='CPU').realize()
+    operands=[Tensor(a.copy(),device='CPU').realize() for a in arrays]
+    shape=operands[aliased].shape
+    operands[aliased]=state.flatten()[:int(np.prod(shape))].reshape(shape).contiguous().realize()
+    address=state._buffer().get_buf('CPU')
+    assert address<=operands[aliased]._buffer().get_buf('CPU')<address+state.numel()*4
+    with Context(ONPU_GDN_DIRECT_DECODE=direct):
+      output=gated_delta_scan(*operands,state,128,1).numpy()
+      results.append((output.tobytes(),state.numpy().tobytes()))
+  assert results[0]==results[1]
+
 def _assert_numeric(actual, expected):
   atol,rtol=NUMERICAL_TOLERANCE
   np.testing.assert_allclose(actual,expected,atol=atol,rtol=rtol)
@@ -249,3 +287,18 @@ def test_history_rejects_vector_alpha_bad_capacity_dtype_shape_and_view():
   history=Tensor.empty(8,2,2,5,8,device='CPU').realize()
   with pytest.raises(ValueError,match='prefix state history'):
     gated_delta_scan(q,k,v,beta,alpha,state,0,1,history=history)
+
+
+@pytest.mark.parametrize('value_dim,alpha_dim,start',[(64,1,0),(64,7,9),(128,1,9),(128,7,0)])
+def test_wide_value_tiles_preserve_scalar_reference_state_padding_and_history(value_dim,alpha_dim,start):
+  case=make_fixture(name='wide-value',batch=1,heads=2,rows=3,capacity=5,key_dim=7,
+                    value_dim=value_dim,alpha_dim=alpha_dim,start=start,seed=6400+value_dim+alpha_dim,history=alpha_dim==1)
+  q,k,v,beta,alpha,state=_tensors(case)
+  expected=expected_for_call(case)
+  out_ref,state_ref,history_ref=_expected_arrays(case,expected)
+  history=Tensor.empty(5,1,2,value_dim,7,device='CPU').realize() if alpha_dim==1 else None
+  actual=gated_delta_scan(q,k,v,beta,alpha,state,start,3,history=history).numpy()
+  _assert_numeric(actual,out_ref)
+  _assert_numeric(state.numpy(),state_ref)
+  _assert_output_padding_zero(actual,3)
+  if history is not None:_assert_numeric(history.numpy()[:3],history_ref)

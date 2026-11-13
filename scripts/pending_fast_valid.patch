@@ -1,0 +1,229 @@
+--- a/tinygrad/llm/kernels/rockchip_replay.py	2026-11-09 23:08:35.323179452 +0800
++++ b/tinygrad/llm/kernels/rockchip_replay.py	2026-11-10 01:08:41.506283100 +0800
+@@ -1,6 +1,6 @@
+ """Native replay of prepared CPU/Rockchip inference calls, with guarded fallback."""
+ from __future__ import annotations
+-import ctypes, functools, itertools, json, os, subprocess, time
++import ctypes, functools, itertools, json, os, subprocess, time, weakref
+ from collections import Counter
+ from dataclasses import replace
+ from typing import Any, Callable, cast
+@@ -150,6 +150,108 @@
+           and tuple(plan.subcores)==((0,0),(0,0),(0,1),(1,1),(2,1)))
+ 
+ 
++# ---------------------------------------------------------------------------
++# Fast validity path (opt-in: ONPU_REPLAY_FAST_VALID=1; debug: ONPU_REPLAY_FAST_VALID_DEBUG=1).
++#
++# RockchipCapturedJit.__call__ runs NativeReplay.valid() for every decoded token.
++# The authoritative check costs ~0.43 ms/token on ChatGLM3-6B decode: it walks
++# every input size, every guarded intermediate storage, every weight version,
++# every attention program and all ~171 plans. None of that state can change
++# unless one of a handful of mutating operations runs, so the fast path caches
++# the last success verdict against a global epoch and only re-runs the
++# authoritative check when the epoch moves.
++#
++# Watched, not global: the epoch is bumped by
++#   * prepare/close of the plan classes and RockchipAttentionProgram
++#       -> plan.owned / plan.bufs identity / program liveness   (rare, global)
++#   * Buffer.allocate/.deallocate of a *watched* guarded CPU buffer
++#       -> the baked non-root CPU addresses used by the replay C  (guards check)
++#   * RockchipAllocator._copyin into a *watched* NPU meta
++#       -> weight meta.version / output cpu_clean_version checks
++# plus same-file lifecycle points (new NativeReplay, free_intermediates,
++# executor fallback). Unrelated per-token Buffer allocations do NOT bump the
++# epoch, so steady-state decode keeps using the cached verdict.
++#
++# The per-input shape/device/size check is NEVER skipped: the replay C function
++# reads through pointers passed on every call, so an input shape change must be
++# caught even inside the epoch window. With the flag off, valid() is the
++# original code unchanged and no hooks are installed. With _DEBUG=1 the
++# authoritative check still runs on EVERY token and a disagreement with the fast
++# verdict raises AssertionError (that is how an uncovered invalidation is found).
++# ---------------------------------------------------------------------------
++_FAST_VALID_EPOCH = 0
++_FAST_VALID_HOOKS_INSTALLED = False
++# Guarded CPU Buffer objects whose storage address is baked into the replay C.
++_FAST_VALID_WATCHED_BUFFERS: "weakref.WeakSet[Any]" = weakref.WeakSet()
++# id() of RockchipBuffer.meta objects whose version feeds a validity guard.
++_FAST_VALID_WATCHED_META_IDS: set[int] = set()
++
++
++def _bump_fast_valid_epoch() -> None:
++  global _FAST_VALID_EPOCH
++  _FAST_VALID_EPOCH += 1
++
++
++def _register_fast_valid_watch(replay:Any) -> None:
++  """Watch exactly the state this replay's validity depends on (called once per build)."""
++  _FAST_VALID_WATCHED_BUFFERS.update(replay.guards.keys())
++  _FAST_VALID_WATCHED_META_IDS.update(replay.weight_guards.keys())
++  _FAST_VALID_WATCHED_META_IDS.update(id(meta) for meta in replay._output_guards)
++
++
++def _install_fast_valid_hooks() -> bool:
++  """Wrap every mutator that can invalidate a NativeReplay. Idempotent."""
++  global _FAST_VALID_HOOKS_INSTALLED
++  if _FAST_VALID_HOOKS_INSTALLED: return True
++  import sys
++  from tinygrad.runtime.ops_rockchip import (RockchipMatmul, RockchipBatchedMatmul, RockchipGroupedMatmul,
++                                            RockchipRoutedMatmul, RockchipBucketedMatmul, RockchipAllocator)
++  from tinygrad.runtime.support.rockchip_attention import RockchipAttentionProgram
++
++  def hook_name(function:Any, name:str) -> Any:
++    function._onpu_fast_valid_hook = name  # type: ignore[attr-defined]
++    return function
++
++  def invalidating(original:Any, name:str) -> Any:
++    @functools.wraps(original)
++    def wrapper(*args:Any, **kwargs:Any) -> Any:
++      _bump_fast_valid_epoch()
++      return original(*args, **kwargs)
++    return hook_name(wrapper, name)
++
++  plan_classes:list[Any] = [RockchipMatmul, RockchipBatchedMatmul, RockchipGroupedMatmul,
++                            RockchipRoutedMatmul, RockchipBucketedMatmul, RockchipAttentionProgram]
++  gpu_module = sys.modules.get('tinygrad.runtime.support.rockchip_gpu')
++  if gpu_module is not None and (gpu_plan:=getattr(gpu_module,'RockchipGPUProgram',None)) is not None:
++    plan_classes.append(gpu_plan)
++  for cls in plan_classes:
++    for method in ('prepare', 'close'):
++      current = cls.__dict__.get(method)
++      if current is not None and not getattr(current, '_onpu_fast_valid_hook', None):
++        setattr(cls, method, invalidating(current, f'{cls.__name__}.{method}'))
++
++  # Only watched mutations matter for Buffer storage identity and meta versions.
++  def watched_buffer(original:Any, name:str) -> Any:
++    @functools.wraps(original)
++    def wrapper(self:Any, *args:Any, **kwargs:Any) -> Any:
++      if self in _FAST_VALID_WATCHED_BUFFERS: _bump_fast_valid_epoch()
++      return original(self, *args, **kwargs)
++    return hook_name(wrapper, name)
++
++  def watched_copyin(original:Any, name:str) -> Any:
++    @functools.wraps(original)
++    def wrapper(self:Any, dest:Any, src:Any) -> Any:
++      if id(dest.meta) in _FAST_VALID_WATCHED_META_IDS: _bump_fast_valid_epoch()
++      return original(self, dest, src)
++    return hook_name(wrapper, name)
++
++  for method in ('allocate', 'deallocate'):
++    setattr(Buffer, method, watched_buffer(getattr(Buffer, method), f'Buffer.{method}'))
++  RockchipAllocator._copyin = watched_copyin(RockchipAllocator._copyin, 'RockchipAllocator._copyin')
++  _FAST_VALID_HOOKS_INSTALLED = True
++  return True
++
++
+ class UnsupportedReplay(Exception): pass
+ 
+ 
+@@ -317,6 +419,15 @@
+     self._merge_groups: list[list[int]] = []
+     self._merge_run: list[int] = []
+     self._last_merge_plan: Any = None
++    # ONPU_REPLAY_FAST_VALID: 0 off (default), 1 epoch-gated authoritative check.
++    # ONPU_REPLAY_FAST_VALID_DEBUG=1: run the authoritative check every token and assert agreement.
++    self._fast_valid_debug = bool(getenv('ONPU_REPLAY_FAST_VALID_DEBUG',0))
++    self._fast_valid = bool(getenv('ONPU_REPLAY_FAST_VALID',0)) or self._fast_valid_debug
++    if self._fast_valid: _install_fast_valid_hooks()
++    self._fast_valid_epoch: int|None = None
++    self._fast_valid_full_runs = 0
++    self._fast_valid_skips = 0
++    self._fast_valid_mismatch = 0
+     for index,call in enumerate(self.calls):
+       if call.op is not Ops.CALL: raise UnsupportedReplay('non-call graph entry')
+       if call.body.op is Ops.PROGRAM and call.device!='ROCKCHIP': self.pending_npu_outputs.clear()
+@@ -357,6 +468,11 @@
+     self.program = cast(Any,cpu.runtime(TinyELF(renderer.compiler.compile_cached(source),'replay',renderer.target,())))
+     self.program.fxn.restype = ctypes.c_int
+     self.source = source
++    if _FAST_VALID_HOOKS_INSTALLED:
++      # Build the output-guard tuple here (one-off, not on the first token) and watch
++      # exactly the state this replay's validity guards depend on.
++      _register_fast_valid_watch(self)
++      _bump_fast_valid_epoch()  # a new replay is new state for any other live replay
+ 
+   def buffer(self, node:UOp) -> tuple[Buffer,Any,str]:
+     # Symbolic views require their own pointer expression; leave them on the ordinary executor.
+@@ -728,7 +844,14 @@
+       if meta.cpu_clean_version!=meta.version:return False
+     return True
+ 
+-  def valid(self, inputs:list[UOp]) -> bool:
++  def _valid_inputs(self, inputs:list[UOp]) -> bool:
++    """Authoritative input shape check: the replay reads through these pointers on every call."""
++    if len(inputs)!=len(self.roots):return False
++    for u,size in zip(inputs,self.input_sizes):
++      if not isinstance(buf:=u.buffer,Buffer) or buf.device!='CPU' or buf.nbytes!=size:return False
++    return True
++
++  def _valid_authoritative(self, inputs:list[UOp]) -> bool:
+     if getenv('ONPU_REPLAY_DEDUP_GUARDS',1):return self._valid_deduplicated(inputs)
+     return (len(inputs)==len(self.roots) and all(isinstance(u.buffer,Buffer) and u.buffer.device=='CPU'
+       and u.buffer.nbytes==size for u,size in zip(inputs,self.input_sizes))
+@@ -739,6 +862,40 @@
+         ((plan.bufs[0],plan.bufs[4],plan.bufs[5]) if len(plan.bufs)==6 else (plan.bufs[0],))) for plan,_ in self.plans if plan.bufs)
+       and all(plan.owned and plan.bufs==buffers for plan,buffers in self.plans))
+ 
++  def _valid_epoch_cached(self, inputs:list[UOp]) -> bool:
++    """Fast path: authoritative input-shape check, then reuse the last success until the epoch moves."""
++    if not self._valid_inputs(inputs):return False
++    epoch = _FAST_VALID_EPOCH
++    if epoch!=self._fast_valid_epoch:
++      self._fast_valid_full_runs += 1
++      if not self._valid_authoritative(inputs):return False
++      self._fast_valid_epoch = epoch
++      return True
++    self._fast_valid_skips += 1
++    return True
++
++  def valid(self, inputs:list[UOp]) -> bool:
++    if not self._fast_valid:
++      if getenv('ONPU_REPLAY_DEDUP_GUARDS',1):return self._valid_deduplicated(inputs)
++      return (len(inputs)==len(self.roots) and all(isinstance(u.buffer,Buffer) and u.buffer.device=='CPU'
++        and u.buffer.nbytes==size for u,size in zip(inputs,self.input_sizes))
++        and all(buf._storage is storage for buf,storage in self.guards.items())
++        and all(meta.version==version for meta,version in self.weight_guards.values())
++        and all(not program.closed and program.owned for program in self.attention_programs)
++        and all(all(buf.meta.cpu_clean_version==buf.meta.version for buf in
++          ((plan.bufs[0],plan.bufs[4],plan.bufs[5]) if len(plan.bufs)==6 else (plan.bufs[0],))) for plan,_ in self.plans if plan.bufs)
++        and all(plan.owned and plan.bufs==buffers for plan,buffers in self.plans))
++    fast = self._valid_epoch_cached(inputs)
++    if not self._fast_valid_debug:return fast
++    # Debug mode: the authoritative check runs on every token; a disagreement means
++    # an invalidation path is not covered by _install_fast_valid_hooks (or that the
++    # fast path is too strict, which is also a bug).
++    full = self._valid_authoritative(inputs)
++    if full==fast:return fast
++    self._fast_valid_mismatch += 1
++    raise AssertionError(f'ONPU_REPLAY_FAST_VALID_DEBUG mismatch on replay {id(self)}: '
++                         f'fast={fast} authoritative={full} (an invalidation path is unhooked)')
++
+   def __call__(self, inputs:list[UOp], values:dict[str,int]):
+     ops,mem = sym_infer(self.estimates.ops,values),sym_infer(self.estimates.mem,values)
+     pointers = [ctypes.c_void_p(cast(Buffer,u.buffer).ensure_allocated().get_buf('CPU')) for u in inputs]
+@@ -802,6 +959,7 @@
+ 
+   def free_intermediates(self):
+     self.native,self.warmed,self.reason = None,False,None
++    if _FAST_VALID_HOOKS_INSTALLED: _bump_fast_valid_epoch()
+     super().free_intermediates()
+ 
+   def __call__(self, input_uops:list[UOp], var_vals:dict[str,int]):
+@@ -818,6 +976,7 @@
+         # A native replay that merged submits in place mutates prepared command tails;
+         # the ordinary executor must never inherit those links.
+         _restore_merged_tails()
++        if _FAST_VALID_HOOKS_INSTALLED: _bump_fast_valid_epoch()  # executor fallback: replay state left the native path
+         self.reason = str(exc)
+         return result if warming else super().__call__(input_uops,var_vals)
+     # Preparing a replay does not execute it. Keep the warmup's state update and
+@@ -828,3 +987,8 @@
+     for tensor,uop,values in self._symbolic_ret:
+       tensor.uop = uop.substitute({v:v.bind(var_vals.get(v.expr,i)) for v,i in values.items()},walk=True)
+     return self.ret
++
++
++# Install the mutator hooks at import when the fast validity path is requested
++# (env is set before the benchmark process starts, so import-time is the right place).
++if getenv('ONPU_REPLAY_FAST_VALID',0) or getenv('ONPU_REPLAY_FAST_VALID_DEBUG',0): _install_fast_valid_hooks()

@@ -81,6 +81,21 @@ def gated_activation(gate:Tensor, up:Tensor, *, alpha:float=1.0, limit:float|Non
       except ValueError: pass
   return gate * (gate * alpha).sigmoid().contiguous() * (up + up_bias)
 
+def _prefill_residual_add(h:Tensor, value:Tensor, scale:float, *, site:str="") -> Tensor:
+  """`h + value*scale`, optionally folded into the dequantizer that produces `value`.
+
+  Opt-in (`ONPU_PREFILL_RESIDUAL_FUSE=1`): when `value` is a registered prefill projection
+  output whose parts are still un-materialized CPU dequantizers, one custom kernel
+  dequantizes every part in registers, sums them in the reference order, scales and adds the
+  residual. The fallback is byte-identical to the previous expression.
+  """
+  from tinygrad.llm.kernels.rockchip_int8 import ONPU_PREFILL_RESIDUAL_FUSE
+  if ONPU_PREFILL_RESIDUAL_FUSE:
+    from tinygrad.llm.kernels.rockchip_int8 import try_prefill_residual
+    if (fused:=try_prefill_residual(h,value,scale,site=site)) is not None:return fused
+  return h+value*scale
+
+
 def apply_rope(x:Tensor, freqs_cis:Tensor) -> Tensor:
   assert x.shape[-1] % 2 == 0
   cos, sin = freqs_cis.reshape(1, 1, x.shape[2], -1).chunk(2, dim=-1)
@@ -285,10 +300,10 @@ class FFNBlock:
         attention = self._attention(self.attn_norm(x),start_pos,state_trace=trace)
       else:attention = self._attention(self.attn_norm(x),start_pos)
       if self.config.post_norm:attention=self.attn_post_norm(attention)
-      h = x+attention*self.config.residual_scale
+      h = _prefill_residual_add(x,attention,self.config.residual_scale,site="attn")
       feed_forward = self._feed_forward(self.ffn_norm(h))
       if self.config.post_norm:feed_forward=self.ffn_post_norm(feed_forward)
-      return (h+feed_forward*self.config.residual_scale).contiguous()
+      return _prefill_residual_add(h,feed_forward,self.config.residual_scale,site="ffn").contiguous()
     return _run(x,start_pos,state_trace) if state_trace is not None else _run(x,start_pos)
 
 class TransformerBlock(FFNBlock):
@@ -321,9 +336,11 @@ class TransformerBlock(FFNBlock):
     if not self.config.attn_logit_softcap and not self.config.attn_head_gate and not self.config.attn_output_gate and \
        (prepared:=getattr(self,'prepared_qkv',None)) is not None and prepared.enabled(x):
       q,assigned_kv = prepared(x,start_pos,self.cache_kv,self.freqs_cis)
-      attention = self.prefill_attention
-      assert attention is not None
       B,T,_ = x.shape
+      # The prepared graph also serves one-token decode, where the specialized
+      # decode attention kernel (worker pool + GQA head fusion) is required.
+      attention = self.decode_attention if resolve(T==1) else self.prefill_attention
+      assert attention is not None
       return self.attn_output(attention(q,assigned_kv,start_pos+T).transpose(1,2).reshape(B,T,-1))
     q,k,v = joint(x) if (joint:=getattr(self,'attn_qkv',None)) is not None else (self.attn_q(x),self.attn_k(x),self.attn_v(x))
     if self.config.qk_norm and self.config.qk_norm != self.config.head_dim: q, k = self.attn_q_norm(q), self.attn_k_norm(k)
@@ -449,9 +466,16 @@ class MLATransformerBlock(FFNBlock):
     B, T, _ = x.shape
     q_nope_head_dim = self.config.head_dim - self.config.rope_dim
     q_proj = self.attn_q_b(self.attn_q_a_norm(self.attn_q_a(x))) if self.config.q_lora_rank > 0 else self.attn_q(x)
-    q = q_proj.reshape(B, T, self.config.n_heads, self.config.head_dim).transpose(1, 2)
-    q_nope, q_rope = q[..., :q_nope_head_dim], q[..., q_nope_head_dim:]
-    if not self.config.ssm or not self.config.ssm.kda: q_rope = apply_rope(q_rope, self.freqs_cis[start_pos:start_pos+T])
+    mla_hint = getattr(self,'cpu_mla_attention',None)
+    fused_query = (mla_hint is not None and getattr(mla_hint,'fused_query',False)
+                   and int(q_proj.max_shape[1])>1 and not getenv('ONPU_MLA_LEGACY_Q',0)
+                   and (not self.config.ssm or not self.config.ssm.kda))
+    if fused_query:
+      q_nope, q_rope = mla_hint.split_query(q_proj, self.freqs_cis, start_pos)
+    else:
+      q = q_proj.reshape(B, T, self.config.n_heads, self.config.head_dim).transpose(1, 2)
+      q_nope, q_rope = q[..., :q_nope_head_dim], q[..., q_nope_head_dim:]
+      if not self.config.ssm or not self.config.ssm.kda: q_rope = apply_rope(q_rope, self.freqs_cis[start_pos:start_pos+T])
     projections=getattr(self,'npu_mla_projections',None) or getattr(self,'cpu_mla_projections',None)
     q_nope = projections.query(q_nope) if projections is not None else q_nope @ self.attn_k_b["weight"].transpose(-1, -2)
 
@@ -466,16 +490,32 @@ class MLATransformerBlock(FFNBlock):
     v = k[..., :self.config.kv_lora_rank]
 
     mla = getattr(self,'cpu_mla_attention',None)
-    if mla is not None:
-      if getenv('ONPU_MLA_LEGACY_Q',0): attn = mla.query_key(q_nope.cat(q_rope,dim=-1),cache,start_pos)
-      else: attn = mla.query_key(q_nope,cache,start_pos,rope=q_rope)
+    fused_prefill = (mla is not None and int(q_nope.max_shape[2])>1 and not getenv('ONPU_MLA_LEGACY_Q',0))
+    fused_attn = fused_prefill and getattr(mla,'fused_attn',False)
+    fused_qk_softmax = fused_prefill and getattr(mla,'qk_softmax',False)
+    if fused_attn:
+      context = mla.query_key_softmax_value(q_nope,cache,start_pos,rope=q_rope)
     else:
-      attn = q_nope.cat(q_rope, dim=-1) @ k.transpose(-1, -2) * (1.0 / self.config.head_dim ** 0.5)
-      if (mask:=self._attn_mask(x, start_pos)) is not None: attn = attn + mask
-    attn = mla.softmax(attn,start_pos) if mla is not None else attn.softmax(-1)
-    context = mla.weighted_value(attn,cache,start_pos) if mla is not None else attn @ v
-    attn = (projections.value(context) if projections is not None else context @ self.attn_v_b["weight"].transpose(-1, -2)).transpose(
-      1, 2).reshape(B, T, -1)
+      if mla is not None and fused_qk_softmax:
+        attn = mla.query_key_softmax(q_nope,cache,start_pos,rope=q_rope)
+      else:
+        if mla is not None:
+          if getenv('ONPU_MLA_LEGACY_Q',0): attn = mla.query_key(q_nope.cat(q_rope,dim=-1),cache,start_pos)
+          else: attn = mla.query_key(q_nope,cache,start_pos,rope=q_rope)
+        else:
+          attn = q_nope.cat(q_rope, dim=-1) @ k.transpose(-1, -2) * (1.0 / self.config.head_dim ** 0.5)
+          if (mask:=self._attn_mask(x, start_pos)) is not None: attn = attn + mask
+        attn = mla.softmax(attn,start_pos) if mla is not None else attn.softmax(-1)
+      context = mla.weighted_value(attn,cache,start_pos) if mla is not None else attn @ v
+    if projections is not None:
+      projected = projections.value(context)
+      # ONPU_MLA_VALUE_ROWMAJOR: the CPU value projection already wrote the
+      # row-major (rows, heads*v) layout, so the transpose view and its
+      # downstream contiguous materialisation are not needed (same values).
+      row_major = getattr(projections,'value_row_major',False) and int(context.max_shape[2])>1
+      attn = projected if row_major else projected.transpose(1, 2).reshape(B, T, -1)
+    else:
+      attn = (context @ self.attn_v_b["weight"].transpose(-1, -2)).transpose(1, 2).reshape(B, T, -1)
     return self.attn_output(attn)
 
   def _attn_mask(self, x:Tensor, start_pos:int|UOp) -> Tensor|None:  # (1, 1, T, start_pos+T), None: everything is visible
