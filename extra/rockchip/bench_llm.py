@@ -23,6 +23,29 @@ def sha256(path: pathlib.Path) -> str:
     return digest.hexdigest()
 
 
+def _read(path: str) -> str | None:
+    try:
+        return pathlib.Path(path).read_text().strip()
+    except OSError:
+        return None
+
+
+def clocks() -> dict:
+    """Device state at call time, recorded so a row can be checked after the fact."""
+    return {
+        "npu_min_hz": _read("/sys/class/devfreq/fdab0000.npu/min_freq"),
+        "npu_max_hz": _read("/sys/class/devfreq/fdab0000.npu/max_freq"),
+        "npu_cur_hz": _read("/sys/class/devfreq/fdab0000.npu/cur_freq"),
+        "npu_governor": _read("/sys/class/devfreq/fdab0000.npu/governor"),
+        "ddr_cur_hz": _read("/sys/class/devfreq/dmc/cur_freq"),
+        "cpu4_cur_hz": _read("/sys/devices/system/cpu/cpufreq/policy4/scaling_cur_freq"),
+        "cpu4_governor": _read("/sys/devices/system/cpu/cpufreq/policy4/scaling_governor"),
+        "cpu6_cur_hz": _read("/sys/devices/system/cpu/cpufreq/policy6/scaling_cur_freq"),
+        "cpu6_governor": _read("/sys/devices/system/cpu/cpufreq/policy6/scaling_governor"),
+        "temperature_c": round(int(_read("/sys/class/thermal/thermal_zone0/temp") or 0) / 1000, 1),
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--ckpt", type=pathlib.Path, required=True)
@@ -56,14 +79,19 @@ def main() -> int:
 
     started = time.time()
     model, _ = Transformer.from_gguf(str(args.ckpt), max_context=max_context)
-    from tinygrad.nn.state import get_parameters
-    for parameter in get_parameters(model):
-        parameter.realize()
+    # Do not realize every parameter here. The weights stay lazy and each Linear
+    # dequantizes its own slice inside prepare(), which drops the source after
+    # packing. Realizing up front costs 7 GB of shmem on Qwen3.5 4B (4 GB -> 11 GB)
+    # before a single NPU buffer exists, which is what pushed it into OOM.
     npu_linears = 0
     if args.npu:
         from npu_linear import prepare_linears, replace_linears
         npu_linears = replace_linears(model)
         prepare_linears(model)
+    else:
+        from tinygrad.nn.state import get_parameters
+        for parameter in get_parameters(model):
+            parameter.realize()
     load_seconds = time.time() - started
 
     temperature = Tensor([0.0])
@@ -83,7 +111,9 @@ def main() -> int:
 
     for _ in range(args.warmups):
         trial()
+    clocks_start = clocks()
     trials = [trial() for _ in range(args.runs)]
+    clocks_end = clocks()
     report = {
         "kind": "npu-baseline-timing" if args.npu else "native-baseline-timing",
         "name": args.name,
@@ -103,6 +133,8 @@ def main() -> int:
         "decode_tokens_per_second": [round(d, 4) for _, d in trials],
         "median_ttft_ms": round(statistics.median(t for t, _ in trials), 2),
         "median_decode_tokens_per_second": round(statistics.median(d for _, d in trials), 4),
+        "clocks_start": clocks_start,
+        "clocks_end": clocks_end,
         "total_seconds": round(time.time() - started, 1),
     }
     (args.out / "report.json").write_text(json.dumps(report, indent=2) + "\n")
