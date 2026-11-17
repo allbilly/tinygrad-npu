@@ -12,8 +12,9 @@
 `~/pr/tinygrad` is the only worktree on main. Do not create extra worktrees or
 experiment subfolders; new code lives under `extra/rockchip/`.
 
-`~/oNPU` and `~/tinygrad` are **reference only**: read them for evidence and
-design, never run their runners or import their trees.
+`~/oNPU` and `~/tinygrad` are **archives**: read them for evidence and design.
+Never write to either, never run their runners, never import their trees.
+Results and logs belong in this checkout, under `docs/rknpu/results/`.
 
 ### Running
 
