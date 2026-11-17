@@ -173,6 +173,12 @@ class TransformerBlock(FFNBlock):
     k = assigned_kv[0, :, :, 0:start_pos+T, :]
     v = assigned_kv[1, :, :, 0:start_pos+T, :]
 
+    if getattr(self, "fast_attention", False) and self.config.n_heads == 8 and self.config.n_kv_heads == 2 \
+       and self.config.head_dim == 256 and self.config.rope_dim == 64 and self.config.attn_output_gate:
+      from extra.ane.ane_linear import fast_attention
+      attn = fast_attention(q, k, v, gate).reshape(B, T, -1)
+      return self.attn_output(attn)
+
     #self.cache_kv[:, :, :, start_pos:start_pos+T, :].assign(Tensor.stack(k, v))
     #k = self.cache_kv[0, :, :, 0:start_pos+T, :]
     #v = self.cache_kv[1, :, :, 0:start_pos+T, :]
@@ -266,6 +272,18 @@ class GatedDeltaNetBlock(FFNBlock):
     x = x.half()
     out_gate = self.ssm_g_b(self.ssm_g_a(x)) if hasattr(self, "ssm_g_a") else self.attn_gate(x)
     out_gate = out_gate.reshape(B, 1, self.num_v_heads, self.head_v_dim)
+    if getattr(self, "fast_gdn", False) and B == 1 and not hasattr(self, "ssm_g_a") and not hasattr(self, "ssm_f_a"):
+      from extra.ane.ane_linear import fast_gdn
+      beta_logit = self.ssm_beta(x)
+      alpha_raw = self.ssm_alpha(x)
+      qkv_raw = self.attn_qkv(x)
+      conv_window = self.conv_state.cat(qkv_raw, dim=1)
+      conv_out = (conv_window * self.ssm_conv1d["weight"].T.unsqueeze(0)).sum(1).silu()
+      core = fast_gdn(self.recurrent_state, conv_out.reshape(-1), out_gate.reshape(-1),
+                      beta_logit.reshape(-1), alpha_raw.reshape(-1),
+                      self.ssm_a, self.ssm_dt["bias"], self.ssm_norm.weight,
+                      qkv_raw.reshape(-1), self.conv_state)
+      return self.ssm_out(core.reshape(B, 1, 2048))
     beta = self.ssm_beta(x).sigmoid().reshape(B, self.num_v_heads, 1, 1)
     alpha = self.ssm_f_b(self.ssm_f_a(x)) if hasattr(self, "ssm_f_a") else self.ssm_alpha(x)
     alpha = ((alpha.float() + self.ssm_dt["bias"]).softplus().reshape(B, self.num_v_heads, -1) *
@@ -324,9 +342,16 @@ class Transformer:
     self.rollout_jit = TinyJit(self.forward)
 
   def forward(self, tokens:Tensor, start_pos:int|UOp, temperature:Tensor) -> Tensor:
-    x = self.token_embd(tokens).float()                   # (B, T, D)
+    if getattr(self, "fast_embedding", False):
+      from extra.ane.ane_linear import fast_embedding
+      x = fast_embedding(self.token_embd.weight, tokens).float()  # (B, T, D)
+    else:
+      x = self.token_embd(tokens).float()                 # (B, T, D)
     for block in self.blk: x = block(x, start_pos)
     logits = self.output(self.output_norm(x))[:, -1, :]
+    if getattr(self, "greedy", False):
+      from extra.ane.ane_linear import fast_argmax
+      return fast_argmax(logits)
     # Gumbel-max trick: argmax(logits/temp - log(-log(uniform))) is equivalent to sampling from softmax(logits/temp)
     return (logits / temperature.maximum(1e-12) - (Tensor.rand_like(logits).maximum(1e-12).log().neg()).log()).argmax(-1, keepdim=True)
 
