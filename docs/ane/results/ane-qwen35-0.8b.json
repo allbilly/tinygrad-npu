@@ -1,0 +1,64 @@
+{
+  "model": "/home/asahi/.cache/ane-models/Qwen3.5-0.8B-Q8_0.gguf",
+  "arch": "qwen35",
+  "device": "ANE+CPU",
+  "ane_linears": 139,
+  "ane_submissions": 24640,
+  "prompt_source": "tokenizer",
+  "prompt_tokens": 32,
+  "decode_tokens": 8,
+  "chunk_size": 1,
+  "load_seconds": 1.3107912600007694,
+  "prepare_seconds": 5.927960079001423,
+  "prefill_seconds": 3.3248107100007473,
+  "decode_seconds": 0.6934087199988426,
+  "prefill_tok_s": 9.624608072798468,
+  "decode_tok_s": 11.537207089079228,
+  "trials": [
+    {
+      "prefill_seconds": 3.3248107100007473,
+      "decode_seconds": 0.9122171649996744,
+      "output": [
+        1208,
+        310,
+        1301,
+        13,
+        561,
+        26257,
+        314,
+        279,
+        17933
+      ]
+    },
+    {
+      "prefill_seconds": 3.05955220100077,
+      "decode_seconds": 0.6806062600007863,
+      "output": [
+        1208,
+        310,
+        1301,
+        13,
+        561,
+        26257,
+        314,
+        279,
+        17933
+      ]
+    },
+    {
+      "prefill_seconds": 3.7627132469988283,
+      "decode_seconds": 0.6934087199988426,
+      "output": [
+        1208,
+        310,
+        1301,
+        13,
+        561,
+        26257,
+        314,
+        279,
+        17933
+      ]
+    }
+  ]
+}
