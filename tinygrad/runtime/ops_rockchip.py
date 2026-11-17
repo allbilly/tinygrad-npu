@@ -94,13 +94,112 @@ def _matmul_body(m:int, n:int, k:int, lhs:int, rhs:int, dst:int, row_major:bool=
                for target,registers in _MATMUL_REGISTERS for reg in registers)
 
 
-def _matmul_parts(m:int, n:int, k:int, cores:int) -> tuple[tuple[int,int],...]:
+def _matmul_parts(m:int, n:int, k:int, cores:int, int8:bool=False) -> tuple[tuple[int,int],...]:
   if cores not in (1,3) or not 0<n<=(8192 if m==1 else 4096)*cores: raise ValueError('Invalid Rockchip core assignment')
   width = round_up(ceildiv(n,cores),32)
   parts = tuple((offset,min(width,n-offset)) for offset in range(0,n,width))
   if len(parts) not in (1,3): parts = ((0,n),)
-  for _,columns in parts: _matmul_body(m,columns,k,0,0,0)
+  for _,columns in parts:
+    _int8_matmul_body(m,columns,k,0,0,0,columns) if int8 else _matmul_body(m,columns,k,0,0,0)
   return parts
+
+
+# INT8 K depths the CNA accepts without padding to a 512 multiple.
+_INT8_NATURAL_DEPTHS = frozenset((576,768,1152,2304))
+
+
+def _int8_padded_depth(k:int) -> int:
+  """Physical K for an INT8 task: the natural depth when qualified, else a 512 multiple."""
+  return k if k in _INT8_NATURAL_DEPTHS else round_up(k,512)
+
+
+def _int8_supported_depth(k:int) -> bool:
+  # 4096 is a real wall for this recipe, not the conservative cap the reference reports.
+  # Measured: k=9216 at m=1, n=2560, cores=3 times out (DRM_IOCTL_RKNPU_SUBMIT, Errno 110)
+  # because `banks` collapses to its 0x1b floor at 18 groups. So ffn_down stays split into
+  # three K tiles, and 323 submits per forward is the floor for this recipe.
+  return k in _INT8_NATURAL_DEPTHS or (512<=k<=4096 and k%512==0)
+
+
+def _int8_matmul_body(m:int, n:int, k:int, lhs:int, rhs:int, dst:int, stride:int) -> tuple[int, ...]:
+  """INT8 x INT8 -> INT32. `lhs` points at the activation payload, past its fp32 scale header.
+
+  `n` is this program's output width; `stride` is the row stride of the output buffer, which
+  must be the FULL width when several cores write column ranges into one buffer (0x403c packs
+  stride in the high half and width-1 in the low half).
+  """
+  if not (1<=m<=(128 if k<=2048 else 64) and _int8_supported_depth(k)
+          and 32<=n<=(8192 if m==1 else 4096) and n%32==0 and stride==n):
+    raise ValueError(f"Unsupported Rockchip INT8 matmul geometry {(m, n, k)} stride={stride}")
+  capacity = 1 << ((131072//k).bit_length()-1)
+  groups = ceildiv(k,512)
+  banks = max(0x1b, 177-15*(groups-1)-15*groups*(ceildiv(m,64)-1))
+  # One-row wide-K decode needs a single data bank; retain eleven weight banks, which
+  # matches the captured RKLLM single-row decode CBUF_CON0=0xb1 across k=768/2560/4096.
+  if m==1 and k==4096 and (n==512 or n>=1024): banks = 0xb1
+  C, O, D = 0x201, 0x801, 0x1001
+  values = {
+    (D,0x4004):0xe,(C,0x100c):1<<29,(C,0x1010):16*min(m+1,capacity),(C,0x1014):9,
+    (C,0x1020):(1<<16)|m,(C,0x1024):((k-1)<<16)|k,(C,0x1028):1,(C,0x102c):m,
+    (C,0x1030):k*n,(C,0x1034):k,(C,0x1038):0x1010000|n,(C,0x1040):banks,
+    (C,0x1044):ceildiv(k,64),(C,0x104c):11,
+    **{(C,r):1<<16 for r in (0x1050,0x1054,0x1058,0x105c)},
+    (C,0x1070):lhs,(C,0x1078):0xf000f,(C,0x107c):k//16,(C,0x1084):(1<<16)|m,
+    (C,0x1088):k,(C,0x1110):rhs,
+    (O,0x3010):1,(O,0x3014):(m-1)<<16,(O,0x3018):n-1,
+    (D,0x400c):0x1e4,(D,0x4010):0x80000000,(D,0x4020):dst,(D,0x4024):16,
+    (D,0x4034):m-1,(D,0x4038):((stride//4-1)<<16)|(n//4-1),
+    (D,0x403c):((stride-1)<<16)|(n-1),(D,0x4040):0x53,(D,0x4050):0x7fc,
+    (D,0x4058):n-1,(D,0x405c):(m-1)<<16,(D,0x4060):0x53,(D,0x4070):0x383,
+    (D,0x4078):1,(D,0x4084):1,(D,0x40c0):0x80}
+  return tuple(_cmd(t,r,values.get((t,r),0)) for t,registers in _MATMUL_REGISTERS for r in registers)
+
+
+def _encode_task_chain(dev:'RockchipDevice', bodies:tuple[tuple[int, ...], ...],
+                       active_cores:int) -> tuple['RockchipBuffer', 'RockchipBuffer', int, int, tuple[tuple[int, int], ...]]:
+  """Lay `bodies` out as one command buffer plus one task array.
+
+  Returns (cmd, task, tasks, core_mask, subcores). Shared by `RockchipMatmul.prepare` and
+  `int8_task_plan`, so the fused INT8 Linear submits a byte-identical chain from its own C
+  function instead of re-deriving the encoding.
+  """
+  tasks = len(bodies)
+  if tasks%active_cores: raise ValueError('Unbalanced Rockchip matrix task chains')
+  per_core = tasks//active_cores
+  total_words = sum(round_up(len(b)+4,2) for b in bodies)
+  cmd = dev.allocate(round_up(total_words*8,4096))
+  task = dev.allocate(max(4096,tasks*ctypes.sizeof(rk.struct_rknpu_task)),rk.RKNPU_MEM_KERNEL_MAPPING)
+  ctypes.memset(cmd.addr,0,cmd.size)
+  words, offset = to_mv(cmd.addr,cmd.size).cast('Q'), 0
+  descs = (rk.struct_rknpu_task*tasks).from_address(task.addr)
+  for i,body in enumerate(bodies):
+    next_task = i+1 if (i+1)%per_core else None
+    tail:tuple[int, ...] = ((_cmd(rk.TARGET_PC_REG,rk.REG_PC_BASE_ADDRESS,(cmd.dma+(offset+round_up(len(body)+4,2))*8)&0xfffffff0),
+             _cmd(rk.TARGET_PC_REG,rk.REG_PC_REGISTER_AMOUNTS,ceildiv(len(bodies[next_task]),2)+1)) if next_task is not None else
+            (_cmd(1,0),_cmd(rk.TARGET_PC_REG,rk.REG_PC_REGISTER_AMOUNTS)))
+    tail += (_cmd(rk.TARGET_VERSION,0),_cmd(rk.TARGET_PC,rk.REG_PC_OPERATION_ENABLE,0xd))
+    words[offset:offset+len(body)+4] = array.array('Q',body+tail)
+    descs[i] = rk.struct_rknpu_task(0,0,0xd,0x300,0x1ffff,0,len(body),0,cmd.dma+offset*8)
+    offset += round_up(len(body)+4,2)
+  subcores = ((0,tasks),) if active_cores==1 else ((0,0),(0,0),*((i*(tasks//3),tasks//3) for i in range(3)))
+  dev.sync(cmd,rk.RKNPU_MEM_SYNC_TO_DEVICE)
+  dev.sync(task,rk.RKNPU_MEM_SYNC_TO_DEVICE)
+  return cmd, task, tasks, (1<<active_cores)-1, subcores
+
+
+def int8_task_plan(dev:'RockchipDevice', m:int, n:int, k:int, cores:int, out_dma:int, lhs_dma:int,
+                   rhs_dma:int) -> tuple['RockchipBuffer', 'RockchipBuffer', int, int,
+                                        tuple[tuple[int, int], ...], tuple[tuple[int, int], ...]]:
+  """Command buffer, task array and part table for one INT8 matmul at explicit device addresses.
+
+  `lhs_dma` points past the payload's fp32 scale header and `rhs_dma` already includes the
+  output-column offset, exactly as `RockchipMatmul.prepare` computes them. The caller owns
+  the returned buffers and must `dev.free` them.
+  """
+  parts = _matmul_parts(m,n,k,cores,int8=True)
+  bodies = tuple(_int8_matmul_body(m,n,k,lhs_dma,rhs_dma+offset*k,out_dma+offset*m*4,n) for offset,n in parts)
+  cmd, task, tasks, core_mask, subcores = _encode_task_chain(dev,bodies,1 if len(parts)==1 else 3)
+  return cmd, task, tasks, core_mask, subcores, parts
 
 
 @dataclass(frozen=True)
@@ -134,13 +233,14 @@ class RockchipMatmul:
     self.rhs_offset = struct.unpack('<I',obj.lib[16:20])[0] if len(obj.lib)>=20 else 0
     self.lhs_offset = struct.unpack('<I',obj.lib[20:24])[0] if len(obj.lib)>=24 else 0
     self.split_k = bool(struct.unpack('<I',obj.lib[24:28])[0]) if len(obj.lib)>=28 else False
-    self.itemsize = 2
+    self.int8 = bool(struct.unpack('<I',obj.lib[28:32])[0]) if len(obj.lib)>=32 else False
+    self.itemsize = 1 if self.int8 else 2
     self.parts:tuple[tuple[int,int],...]
     if self.split_k:
       if self.cores!=3 or self.k%96: raise ValueError('Invalid Rockchip K split')
       _matmul_body(self.m,self.n,self.k//3,0,0,0)
       self.parts = ((0,self.n),)*3
-    else: self.parts = _matmul_parts(self.m,self.n,self.k,self.cores)
+    else: self.parts = _matmul_parts(self.m,self.n,self.k,self.cores,self.int8)
     self.bufs:tuple[RockchipBuffer, ...] = ()
     self.owned:list[RockchipBuffer] = []
     self.weight_version:tuple[int,int]|None = None
@@ -161,40 +261,24 @@ class RockchipMatmul:
     self.close()
     self.bufs = out, lhs, rhs
     parts = self.parts
-    self.tasks = len(parts)
-    active_cores = 1 if self.tasks==1 else 3
-    self.core_mask = (1<<active_cores)-1
     if self.split_k:
       part = self.k//3
-      bodies = tuple(_matmul_body(self.m,self.n,part,lhs.dma+self.lhs_offset+i*self.m*part*2,
-        rhs.dma+self.rhs_offset+i*self.n*part*2,out.dma+i*self.m*self.n*4) for i in range(3))
+      bodies = tuple(_matmul_body(self.m,self.n,part,lhs.dma+self.lhs_offset+i*self.m*part*self.itemsize,
+        rhs.dma+self.rhs_offset+i*self.n*part*self.itemsize,out.dma+i*self.m*self.n*4) for i in range(3))
+    elif self.int8:
+      # Each core writes a dense (m, part_width) plane at offset*m int32 elements; the host
+      # scatters the planes into (m, n). There is no register that makes a column-split core
+      # write into a wider row-major buffer: 0x4038/0x403c carry channel counts, not a stride.
+      bodies = tuple(_int8_matmul_body(self.m,n,self.k,lhs.dma+self.lhs_offset,
+        rhs.dma+self.rhs_offset+offset*self.k*self.itemsize,out.dma+offset*self.m*4,n) for offset,n in parts)
     else:
-      bodies = tuple(_matmul_body(self.m,n,self.k,lhs.dma+self.lhs_offset,rhs.dma+self.rhs_offset+offset*self.k*2,
-        out.dma+offset*self.m*4) for offset,n in parts)
+      bodies = tuple(_matmul_body(self.m,n,self.k,lhs.dma+self.lhs_offset,
+        rhs.dma+self.rhs_offset+offset*self.k*self.itemsize,out.dma+offset*self.m*4) for offset,n in parts)
     self.tasks = len(bodies)
-    if self.tasks%active_cores:raise ValueError('Unbalanced Rockchip matrix task chains')
-    per_core = self.tasks//active_cores
-    total_words = sum(round_up(len(b)+4,2) for b in bodies)
-    self.cmd = self.dev.allocate(round_up(total_words*8,4096))
+    self.cmd, self.task, self.tasks, self.core_mask, self.subcores = _encode_task_chain(
+      self.dev, bodies, 1 if self.tasks==1 else 3)
     self.owned.append(self.cmd)
-    self.task = self.dev.allocate(max(4096,self.tasks*ctypes.sizeof(rk.struct_rknpu_task)),rk.RKNPU_MEM_KERNEL_MAPPING)
     self.owned.append(self.task)
-    ctypes.memset(self.cmd.addr,0,self.cmd.size)
-    words, offset = to_mv(self.cmd.addr,self.cmd.size).cast('Q'), 0
-    descs = (rk.struct_rknpu_task*self.tasks).from_address(self.task.addr)
-    for i,body in enumerate(bodies):
-      next_task = i+1 if (i+1)%per_core else None
-      tail:tuple[int,...] = ((_cmd(rk.TARGET_PC_REG,rk.REG_PC_BASE_ADDRESS,(self.cmd.dma+(offset+round_up(len(body)+4,2))*8)&0xfffffff0),
-               _cmd(rk.TARGET_PC_REG,rk.REG_PC_REGISTER_AMOUNTS,ceildiv(len(bodies[next_task]),2)+1)) if next_task is not None else
-              (_cmd(1,0),_cmd(rk.TARGET_PC_REG,rk.REG_PC_REGISTER_AMOUNTS)))
-      tail += (_cmd(rk.TARGET_VERSION,0),_cmd(rk.TARGET_PC,rk.REG_PC_OPERATION_ENABLE,0xd))
-      words[offset:offset+len(body)+4] = array.array('Q',body+tail)
-      descs[i] = rk.struct_rknpu_task(0,0,0xd,0x300,0x1ffff,0,len(body),0,self.cmd.dma+offset*8)
-      offset += round_up(len(body)+4,2)
-    self.subcores = ((0,self.tasks),) if active_cores==1 else (
-      (0,0),(0,0),*((i*(self.tasks//3),self.tasks//3) for i in range(3)))
-    self.dev.sync(self.cmd,rk.RKNPU_MEM_SYNC_TO_DEVICE)
-    self.dev.sync(self.task,rk.RKNPU_MEM_SYNC_TO_DEVICE)
 
   def __call__(self, *args:RockchipBuffer, global_size=(1,1,1), local_size=(1,1,1), wait=False, timeout=None):
     out,lhs,rhs = args
@@ -204,7 +288,7 @@ class RockchipMatmul:
       check = _finite_program()
       self.update_inputs(lhs,rhs)
       version = rhs.meta.obj_addr,rhs.meta.version
-      if self.dynamic_weights or version != self.weight_version:
+      if not self.int8 and (self.dynamic_weights or version != self.weight_version):
         count = getattr(self,'weight_groups',self.groups)*self.n*self.k
         if not check.fxn(ctypes.c_void_p(rhs.addr+self.rhs_offset),ctypes.c_ulong(count)):
           raise ValueError('Rockchip matmul requires finite FP16 weights')
@@ -225,7 +309,9 @@ class RockchipMatmul:
         raise
       self.dev.submit_count += 1
       self.dev.task_count += self.tasks
-      return time.perf_counter()-start if wait else None
+      elapsed = time.perf_counter()-start
+      self.dev.submit_seconds += elapsed
+      return elapsed if wait else None
 
   def __del__(self):
     if hasattr(self,'owned'): self.close()
@@ -257,6 +343,11 @@ class _RockchipHardware:
     self.lock = threading.Lock()
     self.poisoned, self.users = False, 0
     self.submit_count = self.task_count = self.allocation_count = 0
+    # Wall time spent inside blocking submits, so a run can separate device time from host time.
+    self.submit_seconds = 0.0
+    # The fused INT8 Linear submits from its own C function, so its counters live in this
+    # process's memory and the C side accumulates into them: [submit_ns, submits, tasks].
+    self.fused_stats = (ctypes.c_uint64 * 3)()
 
 _hardware_lifetime_lock = threading.Lock()
 
@@ -286,17 +377,23 @@ class RockchipDevice(Compiled):
   @poisoned.setter
   def poisoned(self, value:bool): self.hw.poisoned = value
   @property
-  def submit_count(self) -> int: return self.hw.submit_count
+  def submit_count(self) -> int: return self.hw.submit_count + self.hw.fused_stats[1]
   @submit_count.setter
   def submit_count(self, value:int): self.hw.submit_count = value
   @property
-  def task_count(self) -> int: return self.hw.task_count
+  def task_count(self) -> int: return self.hw.task_count + self.hw.fused_stats[2]
   @task_count.setter
   def task_count(self, value:int): self.hw.task_count = value
   @property
   def allocation_count(self) -> int: return self.hw.allocation_count
   @allocation_count.setter
   def allocation_count(self, value:int): self.hw.allocation_count = value
+  @property
+  def submit_seconds(self) -> float: return self.hw.submit_seconds + self.hw.fused_stats[0] * 1e-9
+  @submit_seconds.setter
+  def submit_seconds(self, value:float): self.hw.submit_seconds = value
+  @property
+  def fused_stats_addr(self) -> int: return ctypes.addressof(self.hw.fused_stats)
 
   def check_domain(self, *bufs:RockchipBuffer):
     if any(buf.meta.iommu_domain_id!=self.domain for buf in bufs): raise ValueError('Rockchip matrix buffers cross memory domains')

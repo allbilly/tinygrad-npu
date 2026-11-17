@@ -742,7 +742,11 @@ class GatedDeltaNetBlock(FFNBlock):
         s1 = state * alpha[:, :, t]  # decay the state
         delta = (v[:, :, t] - (s1*k[:, :, t]).sum(-1, keepdim=True)) * beta[:, :, t]  # the delta rule update
         state = s1 + delta * k[:, :, t]
-        outs.append((state * q[:, :, t]).sum(-1))
+        # Materialize each step. Left lazy, the 128 per-step reduces fuse into one
+        # kernel with 128 reduce ranges, which measures 6.28 s per block against
+        # 29 ms for the 128 separate kernels (214x). The fusion is a codegen
+        # pathology, not arithmetic: same work, one 139-dimensional loop nest.
+        outs.append((state * q[:, :, t]).sum(-1).contiguous())
 
       # store the updated recurrent state in place, then read the stacked outputs after the state and conv writes
       state_store = self.recurrent_state.uop.after(self.recurrent_state.uop.store(state.cast(self.recurrent_state.dtype).uop))

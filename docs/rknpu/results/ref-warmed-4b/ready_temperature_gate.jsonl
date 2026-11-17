@@ -1,0 +1,14 @@
+{"ddr_cur_hz": 2112000000, "elapsed_s": 0.021, "npu_cur_hz": 1000000000, "policy4_cur_khz": 2256000, "policy6_cur_khz": 2256000, "temperature_millic": 68384, "timestamp_unix": 1794946555.1551766}
+{"ddr_cur_hz": 2112000000, "elapsed_s": 5.053, "npu_cur_hz": 1000000000, "policy4_cur_khz": 2256000, "policy6_cur_khz": 2256000, "temperature_millic": 63769, "timestamp_unix": 1794946560.1881087}
+{"ddr_cur_hz": 2112000000, "elapsed_s": 10.072, "npu_cur_hz": 1000000000, "policy4_cur_khz": 2256000, "policy6_cur_khz": 2256000, "temperature_millic": 60076, "timestamp_unix": 1794946565.2068987}
+{"ddr_cur_hz": 2112000000, "elapsed_s": 15.104, "npu_cur_hz": 1000000000, "policy4_cur_khz": 2256000, "policy6_cur_khz": 2256000, "temperature_millic": 59153, "timestamp_unix": 1794946570.238887}
+{"ddr_cur_hz": 2112000000, "elapsed_s": 20.12, "npu_cur_hz": 1000000000, "policy4_cur_khz": 2256000, "policy6_cur_khz": 2256000, "temperature_millic": 58230, "timestamp_unix": 1794946575.2549703}
+{"ddr_cur_hz": 2112000000, "elapsed_s": 25.139, "npu_cur_hz": 1000000000, "policy4_cur_khz": 2256000, "policy6_cur_khz": 2256000, "temperature_millic": 57307, "timestamp_unix": 1794946580.2736604}
+{"ddr_cur_hz": 2112000000, "elapsed_s": 30.154, "npu_cur_hz": 1000000000, "policy4_cur_khz": 2256000, "policy6_cur_khz": 2256000, "temperature_millic": 56384, "timestamp_unix": 1794946585.2882617}
+{"ddr_cur_hz": 2112000000, "elapsed_s": 35.17, "npu_cur_hz": 1000000000, "policy4_cur_khz": 2256000, "policy6_cur_khz": 2256000, "temperature_millic": 56384, "timestamp_unix": 1794946590.3047664}
+{"ddr_cur_hz": 2112000000, "elapsed_s": 40.181, "npu_cur_hz": 1000000000, "policy4_cur_khz": 2256000, "policy6_cur_khz": 2256000, "temperature_millic": 56384, "timestamp_unix": 1794946595.3158605}
+{"ddr_cur_hz": 2112000000, "elapsed_s": 45.194, "npu_cur_hz": 1000000000, "policy4_cur_khz": 2256000, "policy6_cur_khz": 2256000, "temperature_millic": 55461, "timestamp_unix": 1794946600.3284786}
+{"ddr_cur_hz": 2112000000, "elapsed_s": 50.207, "npu_cur_hz": 1000000000, "policy4_cur_khz": 2256000, "policy6_cur_khz": 2256000, "temperature_millic": 55461, "timestamp_unix": 1794946605.3418746}
+{"ddr_cur_hz": 2112000000, "elapsed_s": 55.221, "npu_cur_hz": 1000000000, "policy4_cur_khz": 2256000, "policy6_cur_khz": 2256000, "temperature_millic": 55461, "timestamp_unix": 1794946610.3559284}
+{"ddr_cur_hz": 2112000000, "elapsed_s": 60.235, "npu_cur_hz": 1000000000, "policy4_cur_khz": 2256000, "policy6_cur_khz": 2256000, "temperature_millic": 55461, "timestamp_unix": 1794946615.36969}
+{"ddr_cur_hz": 2112000000, "elapsed_s": 65.252, "npu_cur_hz": 1000000000, "policy4_cur_khz": 2256000, "policy6_cur_khz": 2256000, "temperature_millic": 54538, "timestamp_unix": 1794946620.3868794}

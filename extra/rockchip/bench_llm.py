@@ -51,13 +51,28 @@ def main() -> int:
     parser.add_argument("--ckpt", type=pathlib.Path, required=True)
     parser.add_argument("--name", required=True)
     parser.add_argument("--out", type=pathlib.Path, required=True)
-    parser.add_argument("--warmups", type=int, default=1)
+    parser.add_argument("--warmups", type=int, default=None)
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--prompt", type=int, default=128)
     parser.add_argument("--gen", type=int, default=64)
     parser.add_argument("--npu", action="store_true", help="replace nn.Linear with the generic NPU GEMM")
+    parser.add_argument("--quick", action="store_true",
+                        help="iteration mode: 16-token prompt, 8 decode tokens, no warm-up, 1 pass. "
+                             "Surfaces crashes and gross regressions in ~1/16 the time of the full protocol. "
+                             "Never quote a --quick number as a measurement.")
     args = parser.parse_args()
+    if args.quick:
+        args.prompt, args.gen, args.runs = 16, 8, 1
+        # A warm-up is what removes JIT capture from the decode figure, so keep it
+        # available in quick mode even though the default is off.
+        args.warmups = 0 if args.warmups is None else args.warmups
+    elif args.warmups is None:
+        args.warmups = 1
+    # Label by protocol, not by flag: a short run with a warm-up is still not a
+    # measurement, and a full-length run without --quick still is.
+    full_protocol = args.prompt >= 128 and args.gen >= 64 and args.warmups >= 1 and args.runs >= 3
     args.out.mkdir(parents=True, exist_ok=True)
+    checkpoint_sha256 = sha256(args.ckpt)
 
     from tinygrad import Device, Tensor
     from tinygrad.llm.gguf import gguf_parse
@@ -84,10 +99,12 @@ def main() -> int:
     # packing. Realizing up front costs 7 GB of shmem on Qwen3.5 4B (4 GB -> 11 GB)
     # before a single NPU buffer exists, which is what pushed it into OOM.
     npu_linears = 0
+    npu_bytes = 0
     if args.npu:
-        from npu_linear import prepare_linears, replace_linears
+        from npu_linear import packed_weight_bytes, prepare_linears, replace_linears
         npu_linears = replace_linears(model)
         prepare_linears(model)
+        npu_bytes = packed_weight_bytes(model)
     else:
         from tinygrad.nn.state import get_parameters
         for parameter in get_parameters(model):
@@ -99,45 +116,96 @@ def main() -> int:
     from tinygrad.uop.ops import UOp
     v_start = UOp.variable("start_pos", 0, max_context - 1)
 
-    def trial() -> tuple[float, float]:
+    def trial(tag: str = "") -> dict:
+        npu_dev = Device["ROCKCHIP"] if args.npu else None
         begin = time.perf_counter()
+        s0 = npu_dev.submit_count if npu_dev else 0
+        t0 = npu_dev.task_count if npu_dev else 0
+        w0 = npu_dev.submit_seconds if npu_dev else 0.0
         out = model(prompt_tensor, (v_start.bind(0),), temperature).realize()
         ttft_ms = (time.perf_counter() - begin) * 1000
+        prefill_submits = (npu_dev.submit_count - s0) if npu_dev else 0
+        prefill_tasks = (npu_dev.task_count - t0) if npu_dev else 0
+        prefill_npu_ms = (npu_dev.submit_seconds - w0) * 1000 if npu_dev else 0.0
+        print(f"  {tag} prefill {ttft_ms/1000:.1f}s {prefill_submits} submits "
+              f"{prefill_npu_ms/1000:.1f}s in npu", flush=True)
         begin = time.perf_counter()
+        s0 = npu_dev.submit_count if npu_dev else 0
+        t0 = npu_dev.task_count if npu_dev else 0
+        w0 = npu_dev.submit_seconds if npu_dev else 0.0
         for step in range(args.gen):
             out = model(out, (v_start.bind(args.prompt + step),), temperature).realize()
+            if (step + 1) % 16 == 0:
+                rate = (step + 1) / (time.perf_counter() - begin)
+                print(f"  {tag} decode {step+1}/{args.gen} {rate:.2f} tok/s", flush=True)
         decode_seconds = time.perf_counter() - begin
-        return ttft_ms, args.gen / decode_seconds
+        rate = args.gen / decode_seconds
+        decode_submits = (npu_dev.submit_count - s0) if npu_dev else 0
+        decode_tasks = (npu_dev.task_count - t0) if npu_dev else 0
+        decode_npu_ms = (npu_dev.submit_seconds - w0) * 1000 if npu_dev else 0.0
+        print(f"  {tag} done decode {rate:.2f} tok/s ({decode_seconds:.1f}s) "
+              f"{decode_submits/args.gen:.1f} submits/token {decode_tasks/args.gen:.1f} tasks/token "
+              f"npu {decode_npu_ms/args.gen:.1f} ms/token", flush=True)
+        return {"ttft_ms": ttft_ms, "decode": rate, "prefill_submits": prefill_submits,
+                "prefill_tasks": prefill_tasks, "decode_submits_per_token": decode_submits / args.gen,
+                "decode_tasks_per_token": decode_tasks / args.gen,
+                "decode_npu_ms_per_token": decode_npu_ms / args.gen,
+                "prefill_npu_ms": prefill_npu_ms}
 
-    for _ in range(args.warmups):
-        trial()
+    print(f"loaded in {load_seconds:.1f}s, {npu_linears} linears, prompt {prompt_source}", flush=True)
+    for i in range(args.warmups):
+        trial(f"warmup {i+1}/{args.warmups}")
     clocks_start = clocks()
-    trials = [trial() for _ in range(args.runs)]
-    clocks_end = clocks()
-    report = {
-        "kind": "npu-baseline-timing" if args.npu else "native-baseline-timing",
-        "name": args.name,
-        "checkpoint": str(args.ckpt),
-        "checkpoint_sha256": sha256(args.ckpt),
-        "arch": kv.get("general.architecture"),
-        "device": Device.DEFAULT,
-        "npu": args.npu,
-        "npu_linears": npu_linears,
-        "prompt_tokens": args.prompt,
-        "prompt_source": prompt_source,
-        "generated_tokens": args.gen,
-        "warmups": args.warmups,
-        "runs": args.runs,
-        "load_seconds": round(load_seconds, 2),
-        "ttft_ms": [round(t, 2) for t, _ in trials],
-        "decode_tokens_per_second": [round(d, 4) for _, d in trials],
-        "median_ttft_ms": round(statistics.median(t for t, _ in trials), 2),
-        "median_decode_tokens_per_second": round(statistics.median(d for _, d in trials), 4),
-        "clocks_start": clocks_start,
-        "clocks_end": clocks_end,
-        "total_seconds": round(time.time() - started, 1),
-    }
-    (args.out / "report.json").write_text(json.dumps(report, indent=2) + "\n")
+
+    def write_report(trials, clocks_end):
+        """Rewrite after every trial: a crash must not cost the passes already run."""
+        report = {
+            "kind": ("npu-baseline-timing" if args.npu else "native-baseline-timing")
+                    if full_protocol else "quick-check",
+            "name": args.name,
+            "checkpoint": str(args.ckpt),
+            # Hashed once at startup: re-reading 4.4 GB per trial is what lost a
+            # completed run before its report was written.
+            "checkpoint_sha256": checkpoint_sha256,
+            "arch": kv.get("general.architecture"),
+            # The reference reports "CPU+ROCKCHIP" when parameters are on the host and
+            # layers are placed on the NPU, which is exactly what --npu does. Reporting
+            # bare "CPU" hides that every Linear runs on the device.
+            "device": f"{Device.DEFAULT}+ROCKCHIP" if args.npu else Device.DEFAULT,
+            "npu": args.npu,
+            "npu_linears": npu_linears,
+            "npu_weight_bytes": npu_bytes,
+            "npu_weight_mib": round(npu_bytes / 2**20, 1),
+            "prompt_tokens": args.prompt,
+            "prompt_source": prompt_source,
+            "generated_tokens": args.gen,
+            "warmups": args.warmups,
+            "runs": args.runs,
+            "trials_completed": len(trials),
+            "complete": len(trials) == args.runs,
+            "load_seconds": round(load_seconds, 2),
+            "ttft_ms": [round(t["ttft_ms"], 2) for t in trials],
+            "decode_tokens_per_second": [round(t["decode"], 4) for t in trials],
+            "median_ttft_ms": round(statistics.median(t["ttft_ms"] for t in trials), 2),
+            "median_decode_tokens_per_second": round(statistics.median(t["decode"] for t in trials), 4),
+            "npu_submits": [{"prefill": t["prefill_submits"], "prefill_tasks": t["prefill_tasks"],
+                             "prefill_npu_ms": round(t["prefill_npu_ms"], 1),
+                             "decode_per_token": round(t["decode_submits_per_token"], 2),
+                             "decode_tasks_per_token": round(t["decode_tasks_per_token"], 2),
+                             "decode_npu_ms_per_token": round(t["decode_npu_ms_per_token"], 1)} for t in trials],
+            "clocks_start": clocks_start,
+            "clocks_end": clocks_end,
+            "total_seconds": round(time.time() - started, 1),
+        }
+        (args.out / "report.json").write_text(json.dumps(report, indent=2) + "\n")
+        return report
+
+    trials: list[dict] = []
+    for _ in range(args.runs):
+        trials.append(trial(f"trial {len(trials)+1}/{args.runs}"))
+        report = write_report(trials, clocks())
+        print(f"  wrote report: {len(trials)}/{args.runs} trials, "
+              f"median ttft {report['median_ttft_ms']:.0f} ms decode {report['median_decode_tokens_per_second']:.2f} tok/s", flush=True)
     print(json.dumps({k: report[k] for k in ("name", "median_ttft_ms", "median_decode_tokens_per_second")}))
     return 0
 

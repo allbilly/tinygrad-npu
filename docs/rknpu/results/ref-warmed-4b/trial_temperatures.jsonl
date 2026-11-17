@@ -1,0 +1,8 @@
+{"event": "begin", "temperature_millic": 54538, "timestamp_ns": 1794946620427211193, "trial_index": 0}
+{"event": "end", "temperature_millic": 71153, "timestamp_ns": 1794946660921848216, "trial_index": 0}
+{"event": "begin", "temperature_millic": 71153, "timestamp_ns": 1794946660946848974, "trial_index": 1}
+{"event": "end", "temperature_millic": 76692, "timestamp_ns": 1794946680039540967, "trial_index": 1}
+{"event": "begin", "temperature_millic": 76692, "timestamp_ns": 1794946680080459226, "trial_index": 2}
+{"event": "end", "temperature_millic": 79461, "timestamp_ns": 1794946710290371277, "trial_index": 2}
+{"event": "begin", "temperature_millic": 71153, "timestamp_ns": 1794946711763822063, "trial_index": 3}
+{"event": "end", "temperature_millic": 79461, "timestamp_ns": 1794946724291475352, "trial_index": 3}
