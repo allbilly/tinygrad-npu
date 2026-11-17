@@ -58,6 +58,8 @@ weights
 *.lprof
 comgr_*
 *.pkl
+*.npy
+*.npz
 !extra/sqtt/examples/**/*.pkl
 site/
 profile_stats
