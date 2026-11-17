@@ -270,12 +270,14 @@ Both local checkpoints are benchmarked pinned (`taskset -c 4-7`, 3 warm-ups +
 | model | ANE Linears | prefill tok/s | decode tok/s | tokens |
 | --- | ---: | ---: | ---: | --- |
 | Qwen3.5-0.8B-Q8_0 | 139 | **12.39** | **13.10** | exact |
-| Qwen3.8-2B-Q4_K_M | 138 | 2.28 | 2.32 | exact |
+| Qwen3.8-2B-Q4_K_M | 139 | **6.17** | **6.36** | exact |
 
 The 2B is the same `qwen35` architecture at dim 2048 / 24 blocks; its per-token
-compute is ~5x the 0.8B (inner size 6144 vs 2048), so 2.3 tok/s is expected. Its
-508M-element vocabulary head stays on the CPU (`ANE_MAX_WEIGHT`), and the 4/2
-token check matches the CPU path (`[3516, 4042, 369]`).
+compute is ~5x the 0.8B (inner size 6144 vs 2048), so 6.2 tok/s is expected. Its
+508M-element vocabulary head is now chunked onto the ANE too (`ANE_MAX_WEIGHT`
+default raised to 600M; the 4B 1B head still stays on the CPU), which took the
+2B from 2.28/2.32 to 6.17/6.36. The 4/2 token check matches the CPU path
+(`[3516, 4042, 369]`).
 
 The 2B initially failed with `ANE submission failed: Connection timed out` on
 its K=6144 `ssm_out`/`down` plans. The M1 ANE times out above K=4096, so

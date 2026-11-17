@@ -8,16 +8,16 @@
   "prompt_tokens": 32,
   "decode_tokens": 8,
   "chunk_size": 1,
-  "load_seconds": 1.4195104940008605,
-  "prepare_seconds": 3.732192894000036,
-  "prefill_seconds": 2.583714428001258,
-  "decode_seconds": 0.6108678659984434,
-  "prefill_tok_s": 12.385269692810036,
-  "decode_tok_s": 13.09612183794324,
+  "load_seconds": 1.7399403140007053,
+  "prepare_seconds": 3.888831434000167,
+  "prefill_seconds": 2.577148352000222,
+  "decode_seconds": 0.6128301770004327,
+  "prefill_tok_s": 12.416824966697627,
+  "decode_tok_s": 13.05418744089417,
   "trials": [
     {
-      "prefill_seconds": 2.583714428001258,
-      "decode_seconds": 0.6158996070007561,
+      "prefill_seconds": 2.577148352000222,
+      "decode_seconds": 0.6144123390004097,
       "output": [
         1208,
         310,
@@ -31,8 +31,8 @@
       ]
     },
     {
-      "prefill_seconds": 2.5902484460020787,
-      "decode_seconds": 0.6087519280008564,
+      "prefill_seconds": 2.584379686999455,
+      "decode_seconds": 0.6128301770004327,
       "output": [
         1208,
         310,
@@ -46,8 +46,8 @@
       ]
     },
     {
-      "prefill_seconds": 2.575202220999927,
-      "decode_seconds": 0.6108678659984434,
+      "prefill_seconds": 2.5758071949967416,
+      "decode_seconds": 0.6084381159998884,
       "output": [
         1208,
         310,

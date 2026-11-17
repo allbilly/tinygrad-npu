@@ -45,7 +45,7 @@ ANE_MAX_COLS = int(getenv("ANE_MAX_COLS", 16384))
 ANE_MAX_DEPTH = int(getenv("ANE_MAX_DEPTH", 4096))
 # Include the 248320 x 1024 vocabulary head (254M elements) so it can be
 # chunked onto the ANE; the 2B model's 508M-element head stays on the CPU.
-ANE_MAX_WEIGHT = int(getenv("ANE_MAX_WEIGHT", 300 << 20))
+ANE_MAX_WEIGHT = int(getenv("ANE_MAX_WEIGHT", 600 << 20))  # the 2B 508M head fits; the 4B 1B head does not
 
 _ANE = None
 _ARGMAX_PROGRAM = None

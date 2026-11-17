@@ -71,7 +71,7 @@ small models:
 | path | format | tinygrad/llm support |
 | --- | --- | --- |
 | `~/.cache/ane-models/Qwen3.5-0.8B-Q8_0.gguf` | GGUF, `qwen35`, Q8_0 (812 MB) | **yes** — used by this baseline |
-| `~/.cache/Qwen3.8-2B-Q4_K_M.gguf` | GGUF, `qwen35`, Q4_K_M (1.31 GB) | **yes** — a 1-token forward completed in 15.0 s with 2.5 GB peak RSS; 2B is not the smallest first run |
+| `~/.cache/Qwen3.8-2B-Q4_K_M.gguf` | GGUF, `qwen35`, Q4_K_M (1.31 GB) | **yes** — 139 ANE Linears (the 508M head is chunked), 6.17 prefill / 6.36 decode tok/s pinned, exact CPU tokens, ~23 s plan preparation |
 | `~/.cache/qwen3.c/Qwen3-0.6B/qwen3-0.6b-q8.bin` | qwen3.c custom Q8 container (magic `1cja`) | no — not GGUF |
 | `~/.cache/qwen3.c/Qwen3-0.6B/model.safetensors` | HF safetensors, Qwen3 0.6B (1.5 GB) | no — this branch's `tinygrad/llm` loads GGUF only |
 | `~/.cache/huggingface/hub/models--mlx-community--Qwen3-0.6B-bf16` | MLX safetensors (1.2 GB) | no — MLX layout, not GGUF |
