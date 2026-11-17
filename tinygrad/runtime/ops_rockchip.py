@@ -6,7 +6,6 @@ The register recipes are retained from the branch-1500 streaming experiments.
 """
 from __future__ import annotations
 import array, contextlib, ctypes, fcntl, functools, mmap, os, struct, threading, time, weakref
-from collections import OrderedDict
 from dataclasses import dataclass, replace
 from typing import Any, Protocol
 from tinygrad.device import Allocator, BufferSpec, BufferStorage, Compiled, Device, Program
@@ -235,18 +234,12 @@ class RockchipProgram(Program['RockchipDevice']):
   """A kernel can occur in many layers; retain each layer's bound command buffers."""
   def __init__(self, dev:RockchipDevice, obj:TinyELF, links:dict[str,Program]|None=None):
     self.dev, self.obj = dev, obj
-    self.binding_limit = getenv('ROCKCHIP_BINDING_CACHE',256)
-    if not 1<=self.binding_limit<=8192: raise ValueError('Rockchip binding cache must be between 1 and 8192')
-    self.bindings:OrderedDict[tuple,RockchipMatmul] = OrderedDict()
+    self.bindings:dict[tuple,RockchipMatmul] = {}
 
   def __call__(self, *args:RockchipBuffer, global_size=(1,1,1), local_size=(1,1,1), wait=False, timeout=None):
     key = tuple((id(buf.meta),buf.addr,buf.size) for buf in args)
-    if key not in self.bindings:
-      self.bindings[key] = RockchipMatmul(self.dev,self.obj)
-      # A live replay can still own an evicted plan. Its final owner releases it.
-      if len(self.bindings)>self.binding_limit: self.bindings.popitem(last=False)
-    self.bindings.move_to_end(key)
-    return self.bindings[key](*args,global_size=global_size,local_size=local_size,wait=wait,timeout=timeout)
+    if (plan := self.bindings.get(key)) is None: plan = self.bindings[key] = RockchipMatmul(self.dev,self.obj)
+    return plan(*args,global_size=global_size,local_size=local_size,wait=wait,timeout=timeout)
 
 class PreparedNPUResource(Protocol):
   def close(self) -> None: ...
