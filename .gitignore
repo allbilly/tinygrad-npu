@@ -70,3 +70,5 @@ dagre/
 graphlib/
 uv.lock
 pi_session_window0.jsonl
+docs/rknpu/results/**/report.json
+todo.md
