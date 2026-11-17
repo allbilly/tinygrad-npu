@@ -72,3 +72,4 @@ uv.lock
 pi_session_window0.jsonl
 docs/rknpu/results/**/*.json
 todo.md
+docs/rknpu/results/fused-linear/
