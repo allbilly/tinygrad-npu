@@ -221,13 +221,18 @@ def int8_task_plan_multi(dev:'RockchipDevice', sources:tuple[tuple[int,int,int,i
   column ranges. Parity is column-for-column, because each output column depends only on its own
   weight tile and its own K reduction order.
   """
-  bodies: list[tuple[int, ...]] = []
+  per_source: list[list[tuple[int, ...]]] = []
   part_tables: list[tuple[tuple[int, int], ...]] = []
   for m, n, k, lhs_dma, rhs_dma, out_dma in sources:
     parts = _matmul_parts(m, n, k, 3, int8=True)
-    bodies.extend(_int8_matmul_body(m, n, k, lhs_dma, rhs_dma + offset*k, out_dma + offset*m*4, n)
-                  for offset, _ in parts)
+    per_source.append([_int8_matmul_body(m, n, k, lhs_dma, rhs_dma + offset*k,
+                                         out_dma + offset*m*4, n) for offset, _ in parts])
     part_tables.append(parts)
+  # `_encode_task_chain` links task i -> i+1 while (i+1) % per_core, so bodies must be grouped BY CORE:
+  # core 0's tasks for every source, then core 1's, ... Appending per source instead would chain two
+  # column ranges of the same core, which is a different (and wrong) task sequence.
+  bodies: list[tuple[int, ...]] = [per_source[src][core]
+                                   for core in range(3) for src in range(len(per_source))]
   if len(bodies) % 3: raise ValueError(f'unbalanced merged chain: {len(bodies)} tasks over 3 cores')
   cmd, task, tasks, core_mask, subcores = _encode_task_chain(dev, tuple(bodies), 3)
   return cmd, task, tasks, core_mask, subcores, tuple(part_tables)
