@@ -2518,3 +2518,31 @@ move the stall, not remove it.
 This closes the last bounded structural lever identified. What remains is the reference's async pool
 architecture, which schedules work from different stages concurrently -- not a change expressible in
 `model.py` or `npu_linear.py`.
+
+## MEASURED: there is no exposed NPU stall to overlap -- removing the wait changes 4 ms
+
+Timing ablation (output discarded, the dequant reads racy data -- not a candidate, only a clock):
+
+    no-wait: trials 2604 / 2611 / 2610   median 2610 ms
+    baseline: 2614 ms                   -> -4 ms (-0.1%)
+    the split's ideal bound was 1,894 ms
+
+**The trailing `sync_mem(fd,2,...)` costs essentially nothing.** So the 0.72 s attributed to `qz_row`
+in the profile is *not* exposed stall: the NPU finishes inside the time the surrounding CPU work takes,
+and the wait returns immediately. There is no 720 ms of blocking to hide, which is why the proposed
+submit/dequant split could not have delivered its bound -- it would have added 249 kernels and a 300 MB
+pass to remove a 4 ms wait.
+
+This is the empirical refutation of the last structural lever. Combined with the earlier results:
+
+| hypothesis | measurement | verdict |
+| --- | --- | --- |
+| NPU blocking is exposed and could overlap | wait removal = -4 ms | **refuted (this entry)** |
+| scan is core-bound and could parallelise | pure C 4 threads = 1.21x | refuted |
+| kernels are serialised only by tinygrad | same | refuted |
+| custom kernels beat generated code | 3 attempts, +75/+52/0 ms | refuted |
+
+**Where the 2,614 ms actually goes:** ~1.79 s of CPU kernel time on one core, ~0.72 s of NPU compute that
+is already effectively overlapped, and ~0.1 s of bookkeeping. Reaching 1,201 ms needs the CPU kernels
+themselves to be ~2.5x faster or to run concurrently -- and the concurrency route is closed by measured
+dependencies (every kernel consumes the previous one's output) plus the 1.21x parallelism ceiling.
