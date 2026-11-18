@@ -2201,3 +2201,25 @@ Therefore the m-tile merge must be implemented in the fused C after all -- m_row
 separate from per-task m=64, one sync, one 6-task submit via int8_task_plan_multi, one output sync,
 two dequant row ranges. packed_matmul_int8_multi stays as a correctness reference for the chain, not as
 a shipping path.
+
+## Scan chunking REFUTED: the reference's 96 calls/prefill is not an available speedup
+
+The reference invokes `cpu_gated_delta_scan` 96x per prefill against our 24x, which suggested a 4x
+finer chunking might be faster. Measured (B=1,H=32,T=128,K=V=128, median of 5, standalone):
+
+| chunking | time | vs one call | reproduces one call |
+| --- | --: | --: | --- |
+| 1 x T=128 | **42.04 ms** | -- | reference |
+| 2 x T=64 | 56.13 ms | **+33% slower** | no, maxdiff 1.10 |
+| 4 x T=32 | 74.76 ms | **+78% slower** | no, maxdiff 0.78 |
+
+So chunking is both slower *and* numerically different -- the state carried across calls does not
+reproduce the single-call result, so it is not even an equivalent configuration. The reference's call
+count must reflect a different decomposition (or per-layer geometry), not a faster one, and it does not
+transfer.
+
+Incidentally the standalone call is 42 ms against 25.4 ms in-model, i.e. in-model is *faster* here --
+another case where isolation is not representative.
+
+**Consequence:** the 0.61 s scan item has no cheap lever left. Beating it needs a better algorithm than
+the reference kernel we already ported, not a different invocation.
