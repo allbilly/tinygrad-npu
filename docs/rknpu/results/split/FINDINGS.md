@@ -2692,3 +2692,35 @@ dominant:
 **Consequence:** there is no single large item left. Reaching 1,201 ms requires ~2.1x across every row of
 that table, which is the reference's pool/async architecture, not any one kernel. The 182 ms
 transposed-gather item is real but requires a kernel layout rewrite to claim.
+
+## The deficit is per-call overhead: ~1.3 ms per CPU program x ~1,031 programs ~= the whole gap
+
+Measured through tinygrad on the CPU device (sigmoid, median of 10):
+
+| n | time | throughput |
+| --: | --: | --: |
+| 1,024 | **1.307 ms** | 0.8 M elem/s |
+| 8,192 | 1.380 ms | 5.9 M elem/s |
+| 65,536 | 2.069 ms | 31.7 M elem/s |
+| 262,144 | 4.425 ms | 59.2 M elem/s |
+| 524,288 | 7.585 ms | 69.1 M elem/s |
+| 1,179,648 | 5.576 ms | 211.5 M elem/s |
+| 2,359,296 | 9.909 ms | 238.1 M elem/s |
+
+Reading it: a 1,024-element sigmoid still costs **1.307 ms**, i.e. there is a **~1.3 ms fixed cost per CPU
+program call**, and the mid-size points are dominated by it (which is why 524k appears *slower per element*
+than 1.18M -- those points are overhead + cache effects, not arithmetic; the large sizes approach the
+real rate, ~275 M elem/s).
+
+**Our prefill launches ~1,031 CPU programs.** At ~1.3 ms each that is **~1.34 s of per-call overhead** --
+almost exactly the 1,331 ms deficit to the reference. It also matches the profiler's separate
+`bookkeeping 0.38 s` plus the many small `E_*` kernels whose measured times (0.02-0.36 s) are consistent
+with overhead-dominated calls.
+
+**The reference runs 1,597 CPU programs against our 1,031 and is still 2.1x faster**, because its programs
+are C functions dispatched from a pool, paying microseconds per call rather than 1.3 ms.
+
+So the remaining lever is **fewer, larger CPU kernels**: fusing the elementwise chain per layer would cut
+program count several-fold, and at 1.3 ms each the saving scales directly. This is the "fuse boundaries,
+not arithmetic" lesson from the earlier work, now quantified: each removed CPU program is worth ~1.3 ms of
+prefill.
