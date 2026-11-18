@@ -2250,3 +2250,35 @@ a best-case artefact -- it is what the reference does on every native call.
 0.79 s NPU submits (0.55 s fixed cost), 0.61 s scan, 0.61 s attention-adjacent, 0.35 s SwiGLU, 0.35 s
 elementwise, 0.22 s bookkeeping. The m-tile merge addresses 0.28 s of it; the remaining ~1.2 s needs
 the CPU-side work that has not been started.
+
+## Decomposition of the 1,200 ms target (metal_kernels style): two different problems
+
+`ref-profile/report.json` native trial carries `prefill_submits`, `decode_submits`, `prefill_tps`,
+`decode_tps` -- the fields needed for a proper decomposition. Ours come from `baseline-recheck`.
+
+| metric | reference | ours | ratio |
+| --- | --: | --: | --: |
+| prefill | **1,200.4 ms** | 2,703 ms | 2.25x |
+| prefill tok/s | 106.6 | 47.3 | 2.25x |
+| **prefill submits** | **475** | **603** | **1.27x** |
+| prefill per-submit (incl. CPU) | **2.53 ms** | 4.48 ms | 1.77x |
+| decode | 6.52 tok/s | 3.16 tok/s | 2.06x |
+| decode ms/token | 153.4 | 316 | 2.06x |
+| **decode submits/token** | **22.2** | **323** | **14.6x** |
+| decode per-submit | **6.9 ms** | 0.98 ms | 7.0x |
+
+**The reference does not win prefill by fusing submits.** 475 vs 603 is 1.27x -- precisely the ~0.28 s
+the m-tile merge is worth. It wins because each submit carries far more work: 2.53 ms/submit against our
+4.48 ms, and in decode 6.9 ms/submit against our 0.98 ms.
+
+**So the two gaps are different problems:**
+
+- **prefill** is work-bound: comparable submit counts, but each of ours costs 1.77x more wall time. The
+  merge addresses the 1.27x; the remaining 1.77x is the CPU-side kernel time inside those submits.
+- **decode** is dispatch-bound: **14.6x more submits per token**, each only 0.98 ms, i.e. tiny. Our NPU
+  time is already 143.5 ms/token against the reference's 138.66 (device at parity), so the decode gap is
+  almost entirely 323 small launches per token versus their 22 large ones.
+
+Consequence for the goal: the m-tile merge is worth ~0.28 s of the 1,502 ms prefill gap. Closing the rest
+requires making each prefill submit do more useful work per millisecond (CPU-side kernels), and decode
+requires ~15x submit reduction -- a different, larger change than any prefill lever.
