@@ -43,8 +43,12 @@ def gated_activation(gate:Tensor, up:Tensor, config:TransformerConfig) -> Tensor
   alpha, limit, up_bias, situ = config.swiglu_alpha, config.swiglu_limit, config.swiglu_up_bias, config.situ
   if situ is not None: return (gate / situ[0]).tanh() * situ[0] * gate.sigmoid() * (up / situ[1]).tanh() * situ[1]
   if limit is not None and limit > 0: gate, up = gate.clamp(max_=limit), up.clamp(-limit, limit)
-  # TODO: remove the need for this contiguous
-  return gate * (gate * alpha).sigmoid().contiguous() * (up + up_bias)
+  # No `.contiguous()` here: it forced the sigmoid into its own pass (`E_589824_2`, 0.21 s) instead of
+  # letting the whole expression fuse. Removing it measured -24 ms prefill (2,735 -> 2,711) and
+  # 3.12 -> 3.15 tok/s decode, at the cost of a 1-ULP change in ~22% of elements (fusion
+  # reassociates): max relative difference 1e-7 over 20 cases incl. NaN/inf/ties. That is deliberate
+  # and quantified, not bit-identical -- see FINDINGS.md.
+  return gate * (gate * alpha).sigmoid() * (up + up_bias)
 
 def apply_rope(x:Tensor, freqs_cis:Tensor, interleaved:bool=False, last:bool=False) -> Tensor:
   # rotates freqs_cis.shape[-1] dims of x: the leading dims by default, the trailing dims if last=True
@@ -149,6 +153,34 @@ class IndexerConfig:  # select top_k tokens by scoring individual keys or pools 
   rope_interleave: bool = True
   msa: bool = False
   qsa: bool = False
+
+# The GDN scan kernel replaces the per-token loop: prefill 22.45 s -> 8.07 s, with the 6,144-call
+# reduce and 3,072-call elementwise collapsing to 24 `scan_head` calls. Accepted on these
+# measurements (docs/rknpu/results/split/FINDINGS.md):
+#   - the kernel matches the loop formula to 4e-7 in isolation, in every regime tested
+#     (random state, zero state, alpha down to 1e-6, exact model geometry)
+#     -- extra/rockchip/check_scan_kernel.py
+#   - against the reference repo at 0.8B, our logits are 2.653e-4 (scan) vs 2.498e-4 (loop)
+#     away -- numerically equivalent, with the same argmax
+#   - at 4B BOTH arms agree 0/64 with the reference's tokens, so the loop is not a fidelity
+#     standard to preserve; the ids are not comparable across implementations
+# It is not bit-reproducible against the loop (1-2 ulp state difference, amplified), so any
+# recorded token ids must be re-baselined per configuration.
+# The SIMD port of the reference `rockchip_recurrent.c` (extra/rockchip/scan_native.py).
+# Measured 4.38x faster per block than our scalar scan_head (128.36 -> 29.32 ms), and matches an
+# fp64 replay of the recurrence at every geometry tested to 2-4e-07, the same order as scan_head
+# (docs/rknpu/results/split/FINDINGS.md). The one thing that had to be right was `start=1`: the
+# reference zeroes the state when start==0, which silently ignored the supplied state.
+# fp32 causal GQA attention written for this CPU (extra/rockchip/attn_native.py): 17.54 ms per
+# block at 15.28 GFLOP/s against the generated kernel's 252 ms at 1.06 GFLOP/s, a 14.4x gain, and
+# within 5.0e-06 of an fp64 reference. Only used at T=128, 16 heads / 4 kv heads / 256 dim.
+# Ablation switch: when True the attention sublayer returns zeros, so its true in-model cost is
+# the difference in prefill. Isolated per-block timing of the generated kernel (252 ms) does not
+# transfer -- the in-model cost has to be measured (AGENTS.md: never quote isolation as in-model).
+ATTN_STUB = False
+ATTN_KERNEL = True
+GDN_SCAN_SIMD = True
+GDN_SCAN = True
 
 @dataclass(frozen=True)
 class TransformerConfig:
@@ -338,7 +370,14 @@ class FFNBlock:
         if hasattr(self, 'ffn_gate_inp_shexp'): shexp = shexp * (x * self.ffn_gate_inp_shexp["weight"]).sum(axis=-1, keepdim=True).sigmoid()
         out = out + shexp
       return out
-    return self.ffn_down(gated_activation(self.ffn_gate(x), self.ffn_up(x), self.config))
+    if hasattr(self, 'ffn_gateup'):
+      # gate/up fused into one GEMM by npu_linear.fuse_linears: one activation quantisation and, at
+      # m==1, one NPU submit instead of two. Exact: weight scales are per output row.
+      gateup = self.ffn_gateup(x)
+      gate_in, up_in = gateup[..., :self._gateup_width], gateup[..., self._gateup_width:]
+    else:
+      gate_in, up_in = self.ffn_gate(x), self.ffn_up(x)
+    return self.ffn_down(gated_activation(gate_in, up_in, self.config))
 
   # given the token-prefix match, return how much cached state this block can still reuse
   def _reusable_prefix_len(self, prefix_len:int, cached_len:int) -> int: return prefix_len
@@ -385,7 +424,15 @@ class TransformerBlock(FFNBlock):
     self.indexer = Indexer(config) if config.indexer else None
 
   def _attention(self, x:Tensor, start_pos:StartPos, idx_mask:Tensor|None=None) -> Tensor:
-    q, k, v = self.attn_q(x), self.attn_k(x), self.attn_v(x)
+    if hasattr(self, 'attn_qkv'):
+      # q/k/v fused into one GEMM by extra/rockchip/npu_linear.py:fuse_linears -- one NPU submit
+      # and one activation quantisation instead of three. Exact: the weight scales are per output
+      # row, so the concatenated GEMM reproduces each column bit for bit.
+      qkv = self.attn_qkv(x)
+      qw, kw, vw = self._qkv_widths
+      q, k, v = qkv[..., :qw], qkv[..., qw:qw+kw], qkv[..., qw+kw:qw+kw+vw]
+    else:
+      q, k, v = self.attn_q(x), self.attn_k(x), self.attn_v(x)
     if self.config.qk_norm and self.config.qk_norm != self.config.head_dim: q, k = self.attn_q_norm(q), self.attn_k_norm(k)
 
     B, T, _ = x.shape
@@ -408,6 +455,23 @@ class TransformerBlock(FFNBlock):
       attn = flash_attention(q, assigned_kv.transpose(0, 1), start_pos[0]+T)
       attn = attn.transpose(1, 2).reshape(B, T, -1)                                    # back to (B,T,D)
       return self.attn_output(attn if not self.config.attn_output_gate else (attn * gate.sigmoid()))
+    # fp32 CPU attention kernel (extra/rockchip/attn_native.py): 17.55 ms per block at 14.6x the
+    # generated kernel's throughput. It takes the *whole concrete cache buffer* plus start_pos as a
+    # float scalar, because a symbolic extent cannot be a kernel placeholder. Guarded to exactly the
+    # geometry it was verified at; everything else falls through to the generic path below.
+    if (ATTN_KERNEL and idx_mask is None and not hasattr(self, 'attn_sinks') and len(start_pos) == 1
+        and self.config.sliding_window == 0):
+      try:
+        from extra.rockchip.attn_native import attention as _attn_kernel, supported as _attn_ok
+      except ImportError:
+        try:
+          from attn_native import attention as _attn_kernel, supported as _attn_ok
+        except ImportError:
+          _attn_ok = None
+      if _attn_ok is not None and _attn_ok(T, self.config.n_heads, self.config.n_kv_heads,
+                                           self.config.head_dim, assigned_kv.shape[3]):
+        attn = _attn_kernel(q, assigned_kv, start_pos[0]).transpose(1, 2).reshape(B, T, -1)
+        return self.attn_output(attn if not self.config.attn_output_gate else (attn * gate.sigmoid()))
     assigned_kv = _cache_prefix(assigned_kv, start_pos, T, 3).transpose(0, 1)
     k, v = assigned_kv[0], assigned_kv[1]
     mask = (idx_mask.repeat_interleave(self.config.n_heads // int(idx_mask.shape[1]), dim=1) if idx_mask is not None else
@@ -734,24 +798,58 @@ class GatedDeltaNetBlock(FFNBlock):
       state = Tensor(self.recurrent_state.uop.after(*conv_state_stores))  # carry the conv write into this graph
       core = gated_delta_prefill(q, k, v, beta, alpha, state, Tensor(pos)).transpose(1, 2)
     else:
-      q, k, v, beta = q.unsqueeze(-2), k.unsqueeze(-2), v.unsqueeze(-1), beta.unsqueeze(-1).unsqueeze(-1)
-      alpha = alpha.unsqueeze(-2)
       state = initial.where(0, self.recurrent_state.float())
-      outs = []
-      for t in range(T_pad):
-        s1 = state * alpha[:, :, t]  # decay the state
-        delta = (v[:, :, t] - (s1*k[:, :, t]).sum(-1, keepdim=True)) * beta[:, :, t]  # the delta rule update
-        state = s1 + delta * k[:, :, t]
-        # Materialize each step. Left lazy, the 128 per-step reduces fuse into one
-        # kernel with 128 reduce ranges, which measures 6.28 s per block against
-        # 29 ms for the 128 separate kernels (214x). The fusion is a codegen
-        # pathology, not arithmetic: same work, one 139-dimensional loop nest.
-        outs.append((state * q[:, :, t]).sum(-1).contiguous())
+      core = None
+      # One C call for the whole scan when the geometry qualifies. Verified against the
+      # loop below to rel 4e-7 at B=1 H=32 T=128 V=128 K=128
+      # (extra/rockchip/check_scan_kernel.py). The scan is 85% of prefill by ablation.
+      if GDN_SCAN and self.head_k_dim % 4 == 0 and self.head_v_dim % 4 == 0:
+        # Two spellings: `extra.rockchip.scan` when the repo root is on sys.path, `scan`
+        # when this runs as a script from extra/rockchip (bench_llm.py sets sys.path[0] to
+        # that directory, so `import extra...` fails with "No module named 'extra'" and the
+        # old bare except silently left the fallback loop running for every prefill).
+        try:
+          from extra.rockchip.scan import gated_delta_scan, scan_supported
+        except ImportError:
+          try:
+            from scan import gated_delta_scan, scan_supported
+          except ImportError:
+            gated_delta_scan = None
+        if GDN_SCAN_SIMD:
+          try:
+            from extra.rockchip.scan_native import gated_delta_scan_simd
+            gated_delta_scan = gated_delta_scan_simd
+          except ImportError:
+            try:
+              from scan_native import gated_delta_scan_simd
+              gated_delta_scan = gated_delta_scan_simd
+            except ImportError:
+              pass
+        if gated_delta_scan is not None and scan_supported(q.shape[0], self.num_v_heads, T_pad,
+                                                          self.head_v_dim, self.head_k_dim, alpha.shape[-1]):
+          scan_out, scan_state = gated_delta_scan(q, k, v, beta, alpha, state)
+          state_store = self.recurrent_state.uop.after(
+            self.recurrent_state.uop.store(scan_state.cast(self.recurrent_state.dtype).uop))
+          conv_writes = [c.uop.after(st) for c, st in zip(states, conv_state_stores)]
+          core = Tensor(scan_out.contiguous().uop.after(state_store, *conv_writes))
+      if core is None:
+        q, k, v, beta = q.unsqueeze(-2), k.unsqueeze(-2), v.unsqueeze(-1), beta.unsqueeze(-1).unsqueeze(-1)
+        alpha = alpha.unsqueeze(-2)
+        outs = []
+        for t in range(T_pad):
+          s1 = state * alpha[:, :, t]  # decay the state
+          delta = (v[:, :, t] - (s1*k[:, :, t]).sum(-1, keepdim=True)) * beta[:, :, t]  # the delta rule update
+          state = s1 + delta * k[:, :, t]
+          # Materialize each step. Left lazy, the 128 per-step reduces fuse into one
+          # kernel with 128 reduce ranges, which measures 6.28 s per block against
+          # 29 ms for the 128 separate kernels (214x). The fusion is a codegen
+          # pathology, not arithmetic: same work, one 139-dimensional loop nest.
+          outs.append((state * q[:, :, t]).sum(-1).contiguous())
 
-      # store the updated recurrent state in place, then read the stacked outputs after the state and conv writes
-      state_store = self.recurrent_state.uop.after(self.recurrent_state.uop.store(state.cast(self.recurrent_state.dtype).uop))
-      conv_writes = [c.uop.after(st) for c, st in zip(states, conv_state_stores)]
-      core = Tensor(outs[0].stack(*outs[1:], dim=1).contiguous().uop.after(state_store, *conv_writes))
+        # store the updated recurrent state in place, then read the stacked outputs after the state and conv writes
+        state_store = self.recurrent_state.uop.after(self.recurrent_state.uop.store(state.cast(self.recurrent_state.dtype).uop))
+        conv_writes = [c.uop.after(st) for c, st in zip(states, conv_state_stores)]
+        core = Tensor(outs[0].stack(*outs[1:], dim=1).contiguous().uop.after(state_store, *conv_writes))
 
     # output; undo the padding before the output projection
     z = (self.ssm_norm(core) * (out_gate.silu() if unwrap(self.config.ssm).silu_gate else out_gate.sigmoid())).cast(x.dtype).contiguous()

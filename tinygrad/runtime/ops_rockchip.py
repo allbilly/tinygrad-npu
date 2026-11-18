@@ -202,6 +202,37 @@ def int8_task_plan(dev:'RockchipDevice', m:int, n:int, k:int, cores:int, out_dma
   return cmd, task, tasks, core_mask, subcores, parts
 
 
+def int8_task_plan_multi(dev:'RockchipDevice', sources:tuple[tuple[int,int,int,int,int,int], ...]
+                         ) -> tuple['RockchipBuffer', 'RockchipBuffer', int, int,
+                                    tuple[tuple[int, int], ...], tuple[tuple[tuple[int,int], ...], ...]]:
+  """One submit carrying several INT8 matmuls that read *different* activations.
+
+  `sources` is `(m, n, k, lhs_dma, rhs_dma, out_dma)` per Linear. This works because
+  `_int8_matmul_body` bakes its own lhs/rhs/dst into the register program: verified that two bodies
+  differing only in lhs differ in **1 word of 108**, and that each body contains its own lhs address.
+  So no register or encoding change is needed -- `_encode_task_chain` already lays out arbitrary
+  bodies, requiring only `tasks % active_cores == 0`.
+
+  Every source must use 3 cores (3 parts each), so two sources give 6 bodies = 2 tasks per core.
+  The saving is the measured **0.920 ms fixed cost per submit**: merging two submits into one is
+  worth ~0.92 ms, and halving a 603-submit prefill is worth ~0.28 s.
+
+  Each source's output goes to a distinct `out_dma`; callers that want one buffer must give disjoint
+  column ranges. Parity is column-for-column, because each output column depends only on its own
+  weight tile and its own K reduction order.
+  """
+  bodies: list[tuple[int, ...]] = []
+  part_tables: list[tuple[tuple[int, int], ...]] = []
+  for m, n, k, lhs_dma, rhs_dma, out_dma in sources:
+    parts = _matmul_parts(m, n, k, 3, int8=True)
+    bodies.extend(_int8_matmul_body(m, n, k, lhs_dma, rhs_dma + offset*k, out_dma + offset*m*4, n)
+                  for offset, _ in parts)
+    part_tables.append(parts)
+  if len(bodies) % 3: raise ValueError(f'unbalanced merged chain: {len(bodies)} tasks over 3 cores')
+  cmd, task, tasks, core_mask, subcores = _encode_task_chain(dev, tuple(bodies), 3)
+  return cmd, task, tasks, core_mask, subcores, tuple(part_tables)
+
+
 @dataclass(frozen=True)
 class RockchipBuffer:
   addr: int

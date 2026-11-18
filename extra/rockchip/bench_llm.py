@@ -102,6 +102,9 @@ def main() -> int:
     npu_bytes = 0
     if args.npu:
         from npu_linear import packed_weight_bytes, prepare_linears, replace_linears
+        from npu_linear import fuse_linears
+        fused = fuse_linears(model)
+        print(f"fused {fused} qkv groups (gate/up deliberately not fused)", flush=True)
         npu_linears = replace_linears(model)
         prepare_linears(model)
         npu_bytes = packed_weight_bytes(model)
@@ -115,6 +118,10 @@ def main() -> int:
     prompt_tensor = Tensor(ids, dtype="int32").reshape(1, args.prompt)
     from tinygrad.uop.ops import UOp
     v_start = UOp.variable("start_pos", 0, max_context - 1)
+    # Bind ONCE. `v_start.bind(0)` allocates a fresh UOp, and TinyJit keys capture on that UOp's
+    # identity, so binding inside the trial makes every trial re-trace the graph (~2.4 s of Python
+    # per prefill on top of the 3.34 s of work). A real server creates its variable once.
+    pos_zero = v_start.bind(0)
 
     def trial(tag: str = "") -> dict:
         npu_dev = Device["ROCKCHIP"] if args.npu else None
@@ -122,7 +129,7 @@ def main() -> int:
         s0 = npu_dev.submit_count if npu_dev else 0
         t0 = npu_dev.task_count if npu_dev else 0
         w0 = npu_dev.submit_seconds if npu_dev else 0.0
-        out = model(prompt_tensor, (v_start.bind(0),), temperature).realize()
+        out = model(prompt_tensor, (pos_zero,), temperature).realize()
         ttft_ms = (time.perf_counter() - begin) * 1000
         prefill_submits = (npu_dev.submit_count - s0) if npu_dev else 0
         prefill_tasks = (npu_dev.task_count - t0) if npu_dev else 0
@@ -133,8 +140,10 @@ def main() -> int:
         s0 = npu_dev.submit_count if npu_dev else 0
         t0 = npu_dev.task_count if npu_dev else 0
         w0 = npu_dev.submit_seconds if npu_dev else 0.0
+        generated = []
         for step in range(args.gen):
             out = model(out, (v_start.bind(args.prompt + step),), temperature).realize()
+            generated.append(int(out.item()))
             if (step + 1) % 16 == 0:
                 rate = (step + 1) / (time.perf_counter() - begin)
                 print(f"  {tag} decode {step+1}/{args.gen} {rate:.2f} tok/s", flush=True)
@@ -146,7 +155,7 @@ def main() -> int:
         print(f"  {tag} done decode {rate:.2f} tok/s ({decode_seconds:.1f}s) "
               f"{decode_submits/args.gen:.1f} submits/token {decode_tasks/args.gen:.1f} tasks/token "
               f"npu {decode_npu_ms/args.gen:.1f} ms/token", flush=True)
-        return {"ttft_ms": ttft_ms, "decode": rate, "prefill_submits": prefill_submits,
+        return {"ttft_ms": ttft_ms, "decode": rate, "generated_ids": generated, "prefill_submits": prefill_submits,
                 "prefill_tasks": prefill_tasks, "decode_submits_per_token": decode_submits / args.gen,
                 "decode_tasks_per_token": decode_tasks / args.gen,
                 "decode_npu_ms_per_token": decode_npu_ms / args.gen,
@@ -185,6 +194,7 @@ def main() -> int:
             "complete": len(trials) == args.runs,
             "load_seconds": round(load_seconds, 2),
             "ttft_ms": [round(t["ttft_ms"], 2) for t in trials],
+            "generated_ids": [t["generated_ids"] for t in trials],
             "decode_tokens_per_second": [round(t["decode"], 4) for t in trials],
             "median_ttft_ms": round(statistics.median(t["ttft_ms"] for t in trials), 2),
             "median_decode_tokens_per_second": round(statistics.median(t["decode"] for t in trials), 4),

@@ -336,6 +336,77 @@ class _FusedKey:
     tasks: int
 
 
+# Vectorised INT8 row quantisation for the fused Linear. The scalar loop it replaces measured
+# 0.831 ms for m=128 x depth 2560 and 3.247 ms for depth 9728, and it is paid once per Linear per
+# prefill -- roughly 8.2 ms/layer, ~0.3 s over the model, which is half of the 0.62 s that the
+# generated `rockchip_linear` spends outside the NPU submit.
+#
+# The codes must be BIT-IDENTICAL to the scalar path or every published number changes, so the
+# rounding has to be round-half-to-even: `vcvtnq_s32_f32` is FRINTN, the same rounding
+# `__builtin_nearbyintf` uses. Verified over 42 cases (depth 2560/9728/2559/31/4/1/130, half of
+# them constructed to land exactly on .5/127 ties): 0 codes differing, 0 scales differing.
+# Measured 3.02x (depth 2560) and 3.06x (depth 9728).
+_QZ_HELPER = r"""
+#if defined(__aarch64__)
+#include <arm_neon.h>
+static void qz_row(const float *xr, int depth, int k, signed char *o, float *scale_out) {
+  float32x4_t vmax = vdupq_n_f32(0.0f);
+  const float32x4_t zero = vdupq_n_f32(0.0f);
+  int i = 0;
+  for (; i + 4 <= depth; i += 4) {
+    float32x4_t a = vabsq_f32(vld1q_f32(xr + i));
+    /* The scalar loop is `if (a > largest)`, which IGNORES NaN; vmaxq_f32 propagates it, and one
+       NaN lane then makes the row's scale NaN, which zeroes every code and collapses the model.
+       NaN test is `a != a` (vceqq is false for NaN, so negate it) -- NOT `a < a`, which is also
+       false for NaN. Substituting 0 is exact because `largest` starts at 0 and every term is
+       |x| >= 0, so a dropped NaN leaves the result unchanged, exactly as the scalar compare does. */
+    a = vbslq_f32(vmvnq_u32(vceqq_f32(a, a)), zero, a);
+    vmax = vmaxq_f32(vmax, a);
+  }
+  float largest = vmaxvq_f32(vmax);
+  for (; i < depth; i++) { float a = xr[i] < 0.0f ? -xr[i] : xr[i]; if (a > largest) largest = a; }
+  float scale = largest / 127.0f;
+  if (scale < 1e-8f) scale = 1e-8f;
+  *scale_out = scale;
+  const float32x4_t vinv = vdupq_n_f32(1.0f / scale);
+  const int32x4_t lo = vdupq_n_s32(-127), hi = vdupq_n_s32(127);
+  i = 0;
+  for (; i + 4 <= depth; i += 4) {
+    int32x4_t q = vcvtnq_s32_f32(vmulq_f32(vld1q_f32(xr + i), vinv));
+    q = vminq_s32(vmaxq_s32(q, lo), hi);
+    int16x4_t n = vmovn_s32(q);
+    int8x8_t b = vmovn_s16(vcombine_s16(n, n));
+    int32_t packed = vget_lane_s32(vreinterpret_s32_s8(b), 0);
+    __builtin_memcpy(o + i, &packed, 4);
+  }
+  for (; i < depth; i++) {
+    float q = __builtin_nearbyintf(xr[i] * (1.0f / scale));
+    if (q > 127.0f) q = 127.0f;
+    if (q < -127.0f) q = -127.0f;
+    o[i] = (signed char)q;
+  }
+  for (int j = depth; j < k; j++) o[j] = 0;
+}
+#else
+static void qz_row(const float *xr, int depth, int k, signed char *o, float *scale_out) {
+  float largest = 0.0f;
+  for (int i = 0; i < depth; i++) { float a = xr[i] < 0.0f ? -xr[i] : xr[i]; if (a > largest) largest = a; }
+  float scale = largest / 127.0f;
+  if (scale < 1e-8f) scale = 1e-8f;
+  *scale_out = scale;
+  float inv = 1.0f / scale;
+  for (int i = 0; i < depth; i++) {
+    float q = __builtin_nearbyintf(xr[i] * inv);
+    if (q > 127.0f) q = 127.0f;
+    if (q < -127.0f) q = -127.0f;
+    o[i] = (signed char)q;
+  }
+  for (int i = depth; i < k; i++) o[i] = 0;
+}
+#endif
+"""
+
+
 def _fused_source(key: _FusedKey) -> str:
     """The whole Linear as one C function: quantize, two ioctls, dequantize.
 
@@ -356,20 +427,8 @@ def _fused_source(key: _FusedKey) -> str:
     quantize = f"""
   for (int row = 0; row < {key.m}; row++) {{
     const float *xr = x + (long)({key.row_offset}+row)*{key.row_stride} + {key.k_offset};
-    float largest = 0.0f;
-    for (int i = 0; i < {key.depth_in}; i++) {{ float a = xr[i] < 0.0f ? -xr[i] : xr[i]; if (a > largest) largest = a; }}
-    float scale = largest / 127.0f;
-    if (scale < 1e-8f) scale = 1e-8f;
-    scales[row] = scale;
-    float inv = 1.0f / scale;
     signed char *o = codes + (long)row*{key.k};
-    for (int i = 0; i < {key.depth_in}; i++) {{
-      float q = __builtin_nearbyintf(xr[i]*inv);
-      if (q > 127.0f) q = 127.0f;
-      if (q < -127.0f) q = -127.0f;
-      o[i] = (signed char)q;
-    }}
-    for (int i = {key.depth_in}; i < {key.k}; i++) o[i] = 0;
+    qz_row(xr, {key.depth_in}, {key.k}, o, scales + row);
   }}"""
     planes = "".join(f"""
   for (int row = 0; row < {key.m}; row++) {{
@@ -380,6 +439,7 @@ def _fused_source(key: _FusedKey) -> str:
   }}""" for offset, width in key.parts)
     subcores = ",".join(str(value) for value in key.subcores)
     return f"""#pragma clang fp contract(off)
+{_QZ_HELPER}
 typedef unsigned int U32;
 typedef unsigned long long U64;
 extern int ioctl(int,unsigned long,...);
@@ -685,6 +745,90 @@ def _walk(obj, visit) -> int:
                 walk(value)
 
     walk(obj)
+    return count
+
+
+def _cat_linears(parts: list) -> nn.Linear:
+    """One Linear whose rows are the parts' rows, so `cat(parts_out) == fused(x)`.
+
+    Built with `object.__new__` on purpose: `nn.Linear.__init__` would allocate and fill a random
+    (sum(rows) x in) matrix first, which for the qkv group is 10240x2560 of pointless work and
+    memory per layer.
+    """
+    weight = Tensor.cat(*[p.weight for p in parts], dim=0).realize()
+    if all(p.bias is not None for p in parts):
+        bias = Tensor.cat(*[p.bias for p in parts], dim=0).realize()
+    elif any(p.bias is not None for p in parts):
+        raise ValueError("fused Linears must agree on whether they have a bias")
+    else:
+        bias = None
+    fused = object.__new__(nn.Linear)
+    fused.weight, fused.bias = weight, bias
+    return fused
+
+
+def fuse_linears(model) -> int:
+    """Fuse `attn_q`/`attn_k`/`attn_v` and `ffn_gate`/`ffn_up` into single Linears.
+
+    **MEASURED AND REJECTED -- do not call this.** With 40 groups fused, prefill went
+    2,771 -> 3,179 ms (+14.7%) while submits only fell 635 -> 603 and decode improved 3.10 -> 3.14
+    tok/s. The fused gate/up weight is 19456 columns, so `prepare` packs a single 24576-column tile
+    and the NPU does the same arithmetic over a 24.5%-wider tile; above the 12288 prefill limit the
+    call still splits into two submits, so the submit saving never materialises. The float-path
+    fusion itself is exact (weights and outputs bit-identical, verified), so this is a tiling
+    result, not a correctness one. Kept because the qkv half alone may pay at m==1; re-measure with
+    qkv fusion only before using it.
+
+    Why this is exact rather than approximate: `pack_weight_int8` gives **one fp32 scale per output
+    row** (`quantize_rows` on the weight), and TILE is 24576 columns, larger than the fused qkv
+    width of 10240. So every output row keeps its own scale through the concatenation and the fused
+    GEMM produces, column for column, the same codes, scales and K-reduction order as the three
+    separate ones. The activation is also quantised **once instead of three times** (same x for all
+    three projections), which is exact because the per-row scale depends only on that row of x.
+
+    `ffn_gate`/`ffn_up` are fused too. Their combined width is 19456: above the 12288 three-core
+    limit, so prefill splits it back into two submits (same count, but one activation quantisation
+    instead of two), and at m==1 the limit is 24576 so decode gets **one** submit instead of two --
+    32 fewer submits per token across the 32 blocks.
+
+    Call after the GGUF weights are loaded and before `replace_linears`, so the fused Linear is
+    wrapped (and packed) like any other.
+    """
+    count = 0
+
+    def fuse(node) -> None:
+        nonlocal count
+        for value in list(vars(node).values()):
+            if isinstance(value, (nn.Linear, NPULinear, Tensor, dict, str, int, float)):
+                continue
+            if isinstance(value, list):
+                for item in value:
+                    if hasattr(item, "__dict__") and not isinstance(item, (nn.Linear, NPULinear, Tensor)):
+                        fuse(item)
+            elif hasattr(value, "__dict__"):
+                fuse(value)
+        # `not hasattr(node, "attn_qkv")` protects blocks that already own a native fused qkv
+        # (GatedDeltaNetBlock builds one unless it is KDA, and overwriting it would be a bug).
+        if (all(hasattr(node, name) for name in ("attn_q", "attn_k", "attn_v"))
+                and not hasattr(node, "attn_qkv")):
+            parts = [node.attn_q, node.attn_k, node.attn_v]
+            node._qkv_widths = tuple(p.weight.shape[0] for p in parts)
+            node.attn_qkv = _cat_linears(parts)
+            for name in ("attn_q", "attn_k", "attn_v"):
+                delattr(node, name)
+            count += 1
+        # gate/up fusion DISABLED: measured +14.7% prefill (n=19456 exceeds the 12288 prefill width,
+        # so it still splits, and prepare packs it as one 24576-column tile). qkv alone is measured
+        # below because it fits (n=10240).
+        if False and all(hasattr(node, name) for name in ("ffn_gate", "ffn_up")):
+            parts = [node.ffn_gate, node.ffn_up]
+            node._gateup_width = parts[0].weight.shape[0]
+            node.ffn_gateup = _cat_linears(parts)
+            for name in ("ffn_gate", "ffn_up"):
+                delattr(node, name)
+            count += 1
+
+    fuse(model)
     return count
 
 

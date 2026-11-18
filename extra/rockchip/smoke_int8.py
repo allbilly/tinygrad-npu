@@ -24,6 +24,7 @@ SHAPES = [
   (64, 9216, 2560, 3),   # ffn gate/up at prefill
   (64, 2560, 4096, 3),   # ffn down at prefill: m=64 is legal for INT8 at k>2048
   (128, 2560, 2048, 3),  # 128 rows allowed only when k<=2048
+  (128, 2560, 2560, 3),  # PROBE: m=128 at k=2560, OUTSIDE the documented envelope (m<=64 above k=2048)
 ]
 
 dev = Device["ROCKCHIP"]
