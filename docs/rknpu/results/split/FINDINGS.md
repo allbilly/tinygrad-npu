@@ -2047,3 +2047,26 @@ nothing yet pairs two of its Linears into a merged submit. So there is no 3+3 A/
 choose a pair of same-`k` Linears per block whose activations are both live at the same point
 (e.g. `attn_output` and a second `k=2560` projection), emit the multi descriptor from
 `packed_matmul_int8`'s caller, and then measure with `--warmups 3 --runs 3` on both arms.
+
+## Corrected projection for the merge: ~60 ms for the clean pair, not 0.42 s
+
+The 0.42 s figure assumed halving all 603 submits. That requires merging across **different**
+activations, which reorders the graph. The merge that is clean -- same activation, same k, both live at
+the same point, which is `ffn_gate` + `ffn_up` -- is bounded much lower, because at `m=128` each Linear
+is already split into two submits by `row_tile=64`:
+
+| configuration | submits per layer | total submits | at 0.920 ms |
+| --- | --: | --: | --: |
+| today | 4 (gate 2 + up 2) | 603 | 0.79 s |
+| merged gate+up | 2 | ~539 | -59 ms |
+
+So the clean merge is worth **~59 ms plus ~9 ms** of shared activation quantisation, i.e. **~60-70 ms**,
+about 2.5% of prefill. Reaching 0.42 s needs pairing Linears with *different* activations, which the
+descriptor supports (each source carries its own `lhs`) but which changes block evaluation order.
+
+Integration is also not a caller tweak: the model's Linears are `NPULinear` on the fused C path
+(`_FusedInt8Plan`), not `packed_matmul_int8`, so a merged path needs a new module (an `NPULinearPair`)
+plus model wiring and a fallback -- roughly 60-80 lines -- before any A/B is possible.
+
+**Status: correct and unused.** No integration has been written, so no A/B exists and `qz_row` has not
+been shown to fall from 0.790 s.
