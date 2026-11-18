@@ -1969,3 +1969,25 @@ submit happened.
 through the new multi path -- and compare against `packed_matmul_int8`. If N=1 also fails, the bug is in
 the multi branch's own addressing (`lhs_off`/`rhs_off` handling in `prepare`); if N=1 passes, the bug is
 specific to the second source's `out_offset` or to which `(lhs, rhs)` pair the second task group binds.
+
+## The N=1 bisection WEDGED the NPU -- the multi branch can emit an invalid submit
+
+Running the multi descriptor with a **single** source at `m=1, n=2560, k=2048` did not return wrong
+data; it hung the job:
+
+    RKNPU: failed to wait job, task counter: 0, flags: 0x5, elapsed time: 6104735us
+    RKNPU: job timeout, flags: 0x0  (core 0/1/2 irq status 0x0, task counter 0x0)
+    RKNPU: soft reset, num: 6
+
+The driver recovered (lock free, no orphaned processes, `smoke_int8.py` 7/7 exact afterwards), but this
+is the documented wedge signature and it came from my own probe.
+
+**What the asymmetry tells us:** the *same* branch with **N=2** ran to completion, deterministically, twice
+(`0 of 5,120 ints` differing); with **N=1** it produces a submit the NPU never completes. So the multi
+path is not merely computing the wrong thing -- it can encode an *invalid task program*, and the fault
+depends on the source count. That is a register/task-encoding problem in the new branch, not a dequant
+or offset problem, and it means **the merged path must not be dispatched again until the emitted task
+program for N=1 is decoded and compared against the single-source path**, the way `per_core=2` chaining
+was verified by decoding `PC_BASE_ADDRESS` writes.
+
+Do not run this probe again on this board without that offline check first.
