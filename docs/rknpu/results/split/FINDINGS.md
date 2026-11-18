@@ -1,3 +1,12 @@
+
+> **CORRECTION (applied):** the reference's measured trials
+> `[9335.78, 19132.28, 1210.63]` were taken after **one** warm-up, and that 9.3 / 19.1 / 1.2 s shape is
+> the same JIT lifecycle documented in this file: ignore -> capture -> `NativeReplay` construction ->
+> native. With the **3 warm-ups** used here, all three measured trials would be at the native figure,
+> so the comparable reference median is **~1,210 ms, not 9,336 ms**. Every "3.44x faster than the
+> reference median" statement below is **withdrawn**; it compared their under-warmed median against a
+> properly-warmed one. The honest comparison is **2,711 vs ~1,210 ms = 2.24x slower**, the same as the
+> best-trial comparison, and 1.31x slower than RKLLM.
 # Qwen3.5 4B — the trial pattern, resolved
 
 Run: `docs/rknpu/results/split/` (1 warm-up + 5 measured, exact reference argv and
@@ -1745,7 +1754,7 @@ So the fair statements are:
 
 | comparison | result |
 | --- | --- |
-| our median vs reference median | **3.44x FASTER than the reference** |
+| our median vs reference median | **2.24x slower** |
 | our last trial vs reference last trial | 2,710 vs 1,210.6 ms -> **2.24x slower** |
 | our median vs RKLLM 2,069 ms | 1.31x slower |
 | our median vs RKLLM last-trial-class | ~1.31x (RKLLM publishes one number) |
