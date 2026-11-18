@@ -2546,3 +2546,32 @@ This is the empirical refutation of the last structural lever. Combined with the
 is already effectively overlapped, and ~0.1 s of bookkeeping. Reaching 1,201 ms needs the CPU kernels
 themselves to be ~2.5x faster or to run concurrently -- and the concurrency route is closed by measured
 dependencies (every kernel consumes the previous one's output) plus the 1.21x parallelism ceiling.
+
+## IN-MODEL ABLATION: the scan is 1,313 ms of the 2,614 ms prefill -- 50%, not 0.61 s
+
+Stubbing `gated_delta_scan_simd` to return zeros (output discarded; `STUB_SCAN` in scan_native) and running
+at the same protocol:
+
+    scan stubbed: prefill 1,301 ms   ->   -1,313 ms vs the 2,614 ms baseline
+
+**So the scan costs 1,313 ms in-model, not the 0.61 s the profiler attributed to it** -- the profiler
+undercounts it by 2.2x, because it times `rt(*args)` and misses dependent work. This is the session's
+`M37` lesson again (attribute by ablation, never by the profiler's per-kernel column), and it inverts the
+priority list: the scan is 50% of prefill and by far the largest item, ahead of everything else combined.
+
+| configuration | prefill |
+| --- | --: |
+| baseline | 2,614 ms |
+| scan stubbed | **1,301 ms** |
+| target | 1,201 ms |
+
+Consequences:
+
+- Removing the scan entirely lands at **1,301 ms -- only 100 ms above target**. The scan is *the* item.
+- Per call: 1,313 / 24 = **54.7 ms**, against 42 ms measured in isolation and ~2.5 ms per call implied for
+  the reference's 96-call invocation.
+- Our scan computes 32 heads x 128 steps x 128x128 ~ 67 MFLOP in 54.7 ms = **1.2 GFLOP/s**, so it is
+  scalar-bound, not bandwidth-bound -- the profile that the scan and qz_row successes came from.
+
+**Next target is therefore the scan's inner loop**, not the elementwise kernels, and the method that has
+worked twice (far-from-hardware scalar code, rewritten bit-identically) applies to it.
