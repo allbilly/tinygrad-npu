@@ -1,0 +1,630 @@
+{
+  "checkpoint": "/home/orangepi/vlm-bench/baseline-20261021/checkpoints/Qwen3.5-4B/Qwen3.5-4B-Q8_0.gguf",
+  "npu_linears": 233,
+  "npu_weight_mib": 4010.0,
+  "load_seconds": 64.23,
+  "trials": [
+    {
+      "tag": "capture",
+      "instrumented": false,
+      "wall_ms": 11990.5,
+      "cpu_programs": 0,
+      "dispatch_outer_ms": 0.0,
+      "dispatch_pack_ms": 0.0,
+      "kernel_fxn_ms": 0.0,
+      "thread_cpu_ms": 0.0,
+      "non_program_ms": 11990.5,
+      "npu_submits": 355,
+      "temp_c": 73.0,
+      "npu_seconds": 0.418,
+      "top": []
+    },
+    {
+      "tag": "instrumented-a",
+      "instrumented": true,
+      "wall_ms": 4465.9,
+      "cpu_programs": 1006,
+      "dispatch_outer_ms": 2058.9,
+      "dispatch_pack_ms": 7.0,
+      "kernel_fxn_ms": 2051.9,
+      "thread_cpu_ms": 1640.0,
+      "non_program_ms": 2406.9,
+      "npu_submits": 355,
+      "temp_c": 74.8,
+      "npu_seconds": 0.419,
+      "top": [
+        {
+          "name": "rockchip_scan_simd_1_32_128_128_128_1",
+          "calls": 24,
+          "outer_ms": 727.4,
+          "fxn_ms": 727.1,
+          "thread_ms": 724.1
+        },
+        {
+          "name": "rockchip_linear_64_9216_2560",
+          "calls": 64,
+          "outer_ms": 221.4,
+          "fxn_ms": 221.0,
+          "thread_ms": 59.0
+        },
+        {
+          "name": "rockchip_linear_64_2560_4096",
+          "calls": 96,
+          "outer_ms": 194.6,
+          "fxn_ms": 194.1,
+          "thread_ms": 69.5
+        },
+        {
+          "name": "E_131072_4",
+          "calls": 72,
+          "outer_ms": 169.9,
+          "fxn_ms": 169.3,
+          "thread_ms": 169.1
+        },
+        {
+          "name": "E_2_16_32_32_4_4",
+          "calls": 48,
+          "outer_ms": 108.7,
+          "fxn_ms": 108.3,
+          "thread_ms": 108.7
+        },
+        {
+          "name": "rockchip_linear_64_8192_2560",
+          "calls": 24,
+          "outer_ms": 71.8,
+          "fxn_ms": 71.6,
+          "thread_ms": 24.3
+        },
+        {
+          "name": "E_128_16_64_4",
+          "calls": 8,
+          "outer_ms": 51.3,
+          "fxn_ms": 51.3,
+          "thread_ms": 51.3
+        },
+        {
+          "name": "r_32_16_4_32_4",
+          "calls": 48,
+          "outer_ms": 49.6,
+          "fxn_ms": 49.3,
+          "thread_ms": 49.6
+        },
+        {
+          "name": "E_32_32_128_4",
+          "calls": 24,
+          "outer_ms": 46.8,
+          "fxn_ms": 46.6,
+          "thread_ms": 46.7
+        },
+        {
+          "name": "rockchip_linear_64_4096_2560",
+          "calls": 24,
+          "outer_ms": 43.7,
+          "fxn_ms": 43.6,
+          "thread_ms": 18.7
+        },
+        {
+          "name": "E_1024_32_4_4",
+          "calls": 24,
+          "outer_ms": 42.0,
+          "fxn_ms": 41.8,
+          "thread_ms": 42.0
+        },
+        {
+          "name": "E_393216_3",
+          "calls": 32,
+          "outer_ms": 39.4,
+          "fxn_ms": 39.2,
+          "thread_ms": 39.4
+        },
+        {
+          "name": "rockchip_attn_128_145",
+          "calls": 8,
+          "outer_ms": 31.6,
+          "fxn_ms": 31.5,
+          "thread_ms": 31.6
+        },
+        {
+          "name": "E_32_640_4_4",
+          "calls": 64,
+          "outer_ms": 29.5,
+          "fxn_ms": 29.1,
+          "thread_ms": 29.5
+        },
+        {
+          "name": "rockchip_linear_64_32_2560",
+          "calls": 96,
+          "outer_ms": 27.5,
+          "fxn_ms": 26.9,
+          "thread_ms": 21.7
+        },
+        {
+          "name": "rockchip_linear_64_10240_2560",
+          "calls": 8,
+          "outer_ms": 27.0,
+          "fxn_ms": 26.9,
+          "thread_ms": 7.7
+        },
+        {
+          "name": "E_128_80_8_10_4",
+          "calls": 1,
+          "outer_ms": 22.2,
+          "fxn_ms": 22.2,
+          "thread_ms": 22.2
+        },
+        {
+          "name": "rockchip_linear_128_2560_1024",
+          "calls": 32,
+          "outer_ms": 20.7,
+          "fxn_ms": 20.5,
+          "thread_ms": 11.4
+        },
+        {
+          "name": "r_128_640_4",
+          "calls": 64,
+          "outer_ms": 20.5,
+          "fxn_ms": 20.1,
+          "thread_ms": 20.5
+        },
+        {
+          "name": "rockchip_linear_1_24576_2560",
+          "calls": 10,
+          "outer_ms": 20.4,
+          "fxn_ms": 20.3,
+          "thread_ms": 0.6
+        },
+        {
+          "name": "E_81920_4",
+          "calls": 32,
+          "outer_ms": 17.7,
+          "fxn_ms": 17.4,
+          "thread_ms": 17.7
+        },
+        {
+          "name": "E_268288_4",
+          "calls": 24,
+          "outer_ms": 16.7,
+          "fxn_ms": 16.5,
+          "thread_ms": 16.7
+        },
+        {
+          "name": "E_128_32_32_4",
+          "calls": 24,
+          "outer_ms": 9.3,
+          "fxn_ms": 9.1,
+          "thread_ms": 9.3
+        },
+        {
+          "name": "E_4_128_32_2_4_4",
+          "calls": 8,
+          "outer_ms": 8.9,
+          "fxn_ms": 8.8,
+          "thread_ms": 8.9
+        },
+        {
+          "name": "r_1024_4_32_4",
+          "calls": 24,
+          "outer_ms": 8.6,
+          "fxn_ms": 8.5,
+          "thread_ms": 8.6
+        },
+        {
+          "name": "E_62080_4",
+          "calls": 1,
+          "outer_ms": 8.6,
+          "fxn_ms": 8.5,
+          "thread_ms": 8.6
+        },
+        {
+          "name": "r_16_128_64_4",
+          "calls": 8,
+          "outer_ms": 5.8,
+          "fxn_ms": 5.8,
+          "thread_ms": 5.8
+        },
+        {
+          "name": "E_4_128_32_2_4_2",
+          "calls": 8,
+          "outer_ms": 4.5,
+          "fxn_ms": 4.4,
+          "thread_ms": 4.5
+        },
+        {
+          "name": "E_32_64_2",
+          "calls": 48,
+          "outer_ms": 3.6,
+          "fxn_ms": 3.3,
+          "thread_ms": 3.6
+        },
+        {
+          "name": "r_81920_4_10",
+          "calls": 1,
+          "outer_ms": 3.0,
+          "fxn_ms": 3.0,
+          "thread_ms": 3.0
+        },
+        {
+          "name": "E_124160_2",
+          "calls": 1,
+          "outer_ms": 2.1,
+          "fxn_ms": 2.1,
+          "thread_ms": 2.1
+        },
+        {
+          "name": "r_4_128_64_4",
+          "calls": 8,
+          "outer_ms": 1.4,
+          "fxn_ms": 1.3,
+          "thread_ms": 1.4
+        },
+        {
+          "name": "E_8192_3",
+          "calls": 24,
+          "outer_ms": 0.9,
+          "fxn_ms": 0.7,
+          "thread_ms": 0.9
+        },
+        {
+          "name": "E_74240_4",
+          "calls": 8,
+          "outer_ms": 0.8,
+          "fxn_ms": 0.7,
+          "thread_ms": 0.8
+        },
+        {
+          "name": "r_64_4_970",
+          "calls": 2,
+          "outer_ms": 0.4,
+          "fxn_ms": 0.4,
+          "thread_ms": 0.4
+        },
+        {
+          "name": "E",
+          "calls": 9,
+          "outer_ms": 0.3,
+          "fxn_ms": 0.1,
+          "thread_ms": 0.3
+        },
+        {
+          "name": "rockchip_linear_1_2560_2560",
+          "calls": 1,
+          "outer_ms": 0.3,
+          "fxn_ms": 0.3,
+          "thread_ms": 0.0
+        },
+        {
+          "name": "r_640_4",
+          "calls": 1,
+          "outer_ms": 0.0,
+          "fxn_ms": 0.0,
+          "thread_ms": 0.0
+        },
+        {
+          "name": "E_640_4",
+          "calls": 1,
+          "outer_ms": 0.0,
+          "fxn_ms": 0.0,
+          "thread_ms": 0.0
+        },
+        {
+          "name": "r_64_4",
+          "calls": 2,
+          "outer_ms": 0.0,
+          "fxn_ms": 0.0,
+          "thread_ms": 0.0
+        }
+      ]
+    },
+    {
+      "tag": "bare",
+      "instrumented": false,
+      "wall_ms": 1834.4,
+      "cpu_programs": 0,
+      "dispatch_outer_ms": 0.0,
+      "dispatch_pack_ms": 0.0,
+      "kernel_fxn_ms": 0.0,
+      "thread_cpu_ms": 0.0,
+      "non_program_ms": 1834.4,
+      "npu_submits": 355,
+      "temp_c": 75.8,
+      "npu_seconds": 0.418,
+      "top": []
+    },
+    {
+      "tag": "instrumented-b",
+      "instrumented": true,
+      "wall_ms": 1837.8,
+      "cpu_programs": 1006,
+      "dispatch_outer_ms": 1686.7,
+      "dispatch_pack_ms": 4.9,
+      "kernel_fxn_ms": 1681.9,
+      "thread_cpu_ms": 1272.8,
+      "non_program_ms": 151.1,
+      "npu_submits": 355,
+      "temp_c": 75.8,
+      "npu_seconds": 0.418,
+      "top": [
+        {
+          "name": "rockchip_scan_simd_1_32_128_128_128_1",
+          "calls": 24,
+          "outer_ms": 598.3,
+          "fxn_ms": 598.2,
+          "thread_ms": 598.4
+        },
+        {
+          "name": "rockchip_linear_64_9216_2560",
+          "calls": 64,
+          "outer_ms": 218.3,
+          "fxn_ms": 217.9,
+          "thread_ms": 55.9
+        },
+        {
+          "name": "rockchip_linear_64_2560_4096",
+          "calls": 96,
+          "outer_ms": 193.8,
+          "fxn_ms": 193.3,
+          "thread_ms": 68.4
+        },
+        {
+          "name": "E_2_16_32_32_4_4",
+          "calls": 48,
+          "outer_ms": 91.2,
+          "fxn_ms": 90.9,
+          "thread_ms": 91.2
+        },
+        {
+          "name": "rockchip_linear_64_8192_2560",
+          "calls": 24,
+          "outer_ms": 66.9,
+          "fxn_ms": 66.8,
+          "thread_ms": 19.8
+        },
+        {
+          "name": "E_128_16_64_4",
+          "calls": 8,
+          "outer_ms": 51.4,
+          "fxn_ms": 51.3,
+          "thread_ms": 51.4
+        },
+        {
+          "name": "r_32_16_4_32_4",
+          "calls": 48,
+          "outer_ms": 42.9,
+          "fxn_ms": 42.7,
+          "thread_ms": 42.9
+        },
+        {
+          "name": "E_1024_32_4_4",
+          "calls": 24,
+          "outer_ms": 41.8,
+          "fxn_ms": 41.6,
+          "thread_ms": 41.8
+        },
+        {
+          "name": "rockchip_linear_64_4096_2560",
+          "calls": 24,
+          "outer_ms": 38.7,
+          "fxn_ms": 38.6,
+          "thread_ms": 13.7
+        },
+        {
+          "name": "E_32_32_128_4",
+          "calls": 24,
+          "outer_ms": 37.9,
+          "fxn_ms": 37.9,
+          "thread_ms": 38.0
+        },
+        {
+          "name": "E_393216_3",
+          "calls": 32,
+          "outer_ms": 35.2,
+          "fxn_ms": 35.1,
+          "thread_ms": 35.2
+        },
+        {
+          "name": "rockchip_attn_128_145",
+          "calls": 8,
+          "outer_ms": 31.4,
+          "fxn_ms": 31.4,
+          "thread_ms": 31.4
+        },
+        {
+          "name": "E_32_640_4_4",
+          "calls": 64,
+          "outer_ms": 29.1,
+          "fxn_ms": 28.8,
+          "thread_ms": 29.2
+        },
+        {
+          "name": "rockchip_linear_64_10240_2560",
+          "calls": 8,
+          "outer_ms": 26.8,
+          "fxn_ms": 26.8,
+          "thread_ms": 7.6
+        },
+        {
+          "name": "rockchip_linear_64_32_2560",
+          "calls": 96,
+          "outer_ms": 23.3,
+          "fxn_ms": 22.9,
+          "thread_ms": 17.5
+        },
+        {
+          "name": "rockchip_linear_128_2560_1024",
+          "calls": 32,
+          "outer_ms": 20.5,
+          "fxn_ms": 20.4,
+          "thread_ms": 11.3
+        },
+        {
+          "name": "r_128_640_4",
+          "calls": 64,
+          "outer_ms": 20.3,
+          "fxn_ms": 19.9,
+          "thread_ms": 20.3
+        },
+        {
+          "name": "rockchip_linear_1_24576_2560",
+          "calls": 10,
+          "outer_ms": 20.3,
+          "fxn_ms": 20.3,
+          "thread_ms": 0.5
+        },
+        {
+          "name": "E_81920_4",
+          "calls": 32,
+          "outer_ms": 16.9,
+          "fxn_ms": 16.7,
+          "thread_ms": 16.9
+        },
+        {
+          "name": "E_268288_4",
+          "calls": 24,
+          "outer_ms": 10.1,
+          "fxn_ms": 10.0,
+          "thread_ms": 10.1
+        },
+        {
+          "name": "E_131072_4",
+          "calls": 72,
+          "outer_ms": 9.5,
+          "fxn_ms": 9.2,
+          "thread_ms": 9.5
+        },
+        {
+          "name": "E_128_32_32_4",
+          "calls": 24,
+          "outer_ms": 9.0,
+          "fxn_ms": 8.8,
+          "thread_ms": 9.1
+        },
+        {
+          "name": "E_4_128_32_2_4_4",
+          "calls": 8,
+          "outer_ms": 8.8,
+          "fxn_ms": 8.8,
+          "thread_ms": 8.8
+        },
+        {
+          "name": "r_1024_4_32_4",
+          "calls": 24,
+          "outer_ms": 8.6,
+          "fxn_ms": 8.4,
+          "thread_ms": 8.6
+        },
+        {
+          "name": "E_62080_4",
+          "calls": 1,
+          "outer_ms": 8.5,
+          "fxn_ms": 8.5,
+          "thread_ms": 8.5
+        },
+        {
+          "name": "E_128_80_8_10_4",
+          "calls": 1,
+          "outer_ms": 6.9,
+          "fxn_ms": 6.9,
+          "thread_ms": 6.9
+        },
+        {
+          "name": "r_16_128_64_4",
+          "calls": 8,
+          "outer_ms": 5.8,
+          "fxn_ms": 5.8,
+          "thread_ms": 5.8
+        },
+        {
+          "name": "E_4_128_32_2_4_2",
+          "calls": 8,
+          "outer_ms": 4.5,
+          "fxn_ms": 4.5,
+          "thread_ms": 4.5
+        },
+        {
+          "name": "E_32_64_2",
+          "calls": 48,
+          "outer_ms": 3.0,
+          "fxn_ms": 2.8,
+          "thread_ms": 3.0
+        },
+        {
+          "name": "E_124160_2",
+          "calls": 1,
+          "outer_ms": 2.1,
+          "fxn_ms": 2.1,
+          "thread_ms": 2.1
+        },
+        {
+          "name": "r_4_128_64_4",
+          "calls": 8,
+          "outer_ms": 1.4,
+          "fxn_ms": 1.3,
+          "thread_ms": 1.4
+        },
+        {
+          "name": "r_81920_4_10",
+          "calls": 1,
+          "outer_ms": 1.3,
+          "fxn_ms": 1.3,
+          "thread_ms": 1.3
+        },
+        {
+          "name": "E_8192_3",
+          "calls": 24,
+          "outer_ms": 0.7,
+          "fxn_ms": 0.5,
+          "thread_ms": 0.7
+        },
+        {
+          "name": "E_74240_4",
+          "calls": 8,
+          "outer_ms": 0.7,
+          "fxn_ms": 0.7,
+          "thread_ms": 0.7
+        },
+        {
+          "name": "r_64_4_970",
+          "calls": 2,
+          "outer_ms": 0.4,
+          "fxn_ms": 0.4,
+          "thread_ms": 0.4
+        },
+        {
+          "name": "rockchip_linear_1_2560_2560",
+          "calls": 1,
+          "outer_ms": 0.2,
+          "fxn_ms": 0.2,
+          "thread_ms": 0.0
+        },
+        {
+          "name": "E",
+          "calls": 9,
+          "outer_ms": 0.1,
+          "fxn_ms": 0.1,
+          "thread_ms": 0.1
+        },
+        {
+          "name": "r_640_4",
+          "calls": 1,
+          "outer_ms": 0.0,
+          "fxn_ms": 0.0,
+          "thread_ms": 0.0
+        },
+        {
+          "name": "E_640_4",
+          "calls": 1,
+          "outer_ms": 0.0,
+          "fxn_ms": 0.0,
+          "thread_ms": 0.0
+        },
+        {
+          "name": "r_64_4",
+          "calls": 2,
+          "outer_ms": 0.0,
+          "fxn_ms": 0.0,
+          "thread_ms": 0.0
+        }
+      ]
+    }
+  ]
+}

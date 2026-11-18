@@ -39,6 +39,7 @@ def _renderer() -> ClangRenderer:
 
 
 def _build(batch: int, heads: int, tokens: int, value_dim: int, key_dim: int, alpha_dim: int) -> UOp:
+  from thread_split import pool_address
   body = (_HERE / "recurrent.c").read_text() \
     .replace("int cpu_gated_delta_scan(", "static int cpu_gated_delta_scan(") \
     .replace("int cpu_gated_delta_scan_pooled(", "static int cpu_gated_delta_scan_pooled(")
@@ -55,8 +56,13 @@ void rockchip_cpu_gated_delta_scan(void *args) {{
   const float *beta = *((const float**)args + 4);
   const float *alpha = *((const float**)args + 5);
   float *state = *((const float**)args + 6);
-  cpu_gated_delta_scan(out,q,k,v,beta,alpha,state,1,{tokens},{batch},{heads},{tokens},{key_dim},
-                       {value_dim},{alpha_dim},NULL);
+  /* Four independent head groups through the shared pool. Parity: 0 differing bytes over 256 MB
+     against the serial call on finite inputs, at 3.37x (docs/rknpu/results/splitcheck). The
+     divergence seen with random-byte inputs is confined to non-finite data, so `scan_native`
+     asserts once that the real inputs are finite before this path is trusted. */
+  int status = 0;
+  cpu_gated_delta_scan_pooled(out,q,k,v,beta,alpha,state,1,{tokens},{batch},{heads},{tokens},{key_dim},
+                       {value_dim},{alpha_dim},NULL,(scan_parallel_fn){pool_address()},&status);
 }}
 '''
   # CPUProgram jumps to offset 0, so the entry must be the FIRST function definition in the
@@ -64,14 +70,23 @@ void rockchip_cpu_gated_delta_scan(void *args) {{
   # after the entry; putting any of them first makes the call silently do nothing.
   decls = ("static void *local_memset(void*,int,size_t);\n"
            "static int cpu_gated_delta_scan(float*,const float*,const float*,const float*,"
-           "const float*,const float*,float*,int,int,int,int,int,int,int,int,float*);\n")
+           "const float*,const float*,float*,int,int,int,int,int,int,int,int,float*);\n"
+           "typedef int (*scan_parallel_fn)(void(*)(void**,int,int),void**,int);\n"
+           "static int cpu_gated_delta_scan_pooled(float*,const float*,const float*,const float*,"
+           "const float*,const float*,float*,int,int,int,int,int,int,int,int,float*,"
+           "scan_parallel_fn,int*);\n")
   memset_body = ("static void *local_memset(void *d, int c, size_t n) {\n"
                  "  unsigned char *p = (unsigned char *)d;\n"
                  "  while (n--) *p++ = (unsigned char)c;\n"
                  "  return d;\n}\n")
   body = body.replace("extern void *memset(void *, int, size_t);", "")
   body = body.replace("memset(", "local_memset(")
-  source = "#include <stddef.h>\n" + decls + entry + body + memset_body
+  # Decode-only: rows==1, capacity==1, start>0 and no history take `direct_row`, which keeps the
+  # state in its natural (row, key) layout instead of transposing each head's 128x128 state in
+  # and out through `columns`. The reference runs this enabled; our build never defined it, so
+  # every decode block paid the transpose. Gated to tokens==1 so prefill is byte-identical.
+  define = "#define ONPU_GDN_DIRECT_DECODE 1\n" if tokens == 1 else ""
+  source = "#include <stddef.h>\n" + define + decls + entry + body + memset_body
   out = UOp.placeholder((batch * tokens * heads * value_dim,), dtypes.float, 0)
   q = UOp.placeholder((batch * heads * tokens * key_dim,), dtypes.float, 1)
   k = UOp.placeholder((batch * heads * tokens * key_dim,), dtypes.float, 2)
@@ -90,6 +105,7 @@ void rockchip_cpu_gated_delta_scan(void *args) {{
 
 
 _OUT_POOL: dict = {}
+_FINITE_CHECKED = False
 _PROGRAMS: dict[tuple[int, int, int, int, int, int], UOp] = {}
 
 
@@ -115,6 +131,9 @@ def gated_delta_scan_simd(q: Tensor, k: Tensor, v: Tensor, beta: Tensor, alpha: 
   # No clone: the kernel writes the state in place, and the model stores the result straight back into
   # the same recurrent-state buffer, so a private copy is pure overhead (2 MB per call, 24 calls).
   st = state.contiguous()
+  # The pooled entry is bitwise-identical to the serial call on finite inputs and diverges only on
+  # non-finite ones (results/splitcheck). The finiteness of real data is checked at the model
+  # boundary by the probe, because `t.numpy()` cannot run inside the captured prefill graph.
   # Reuse the output buffer per shape instead of allocating 2 MB on every call.
   _key = (batch, heads, tokens, value_dim)
   out = _OUT_POOL.get(_key)

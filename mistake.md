@@ -938,6 +938,118 @@ preference. And a recorded command is meant to be executed, not reconstructed.
 | ran the reference | launched, failed | read the log |
 | ran the reference configuration, 5 times | 35,200 prefill submits, not 475; prefill eager | `jq .command receipt.json` |
 
+### M48. Ran a timing benchmark while three subagents were compiling on the same four cores
+
+I launched three analysis subagents, then measured a threaded kernel on the same board. Two
+consecutive identical commands returned **1.87x** and **3.70x**, and I wrote the 1.87x into a
+README before noticing the 2x swing was my own load. The rule I already had ("two runs >20%
+apart: stop and find out why") caught it only because the two numbers happened to be adjacent.
+
+**It then recurred twice more in the same session.** While the attention 3+3 was running I
+compiled and ran four pinned harnesses (`parts`, `threads4`, `scale`, `refpooltest`) on the same
+four cores. The first contaminated run reported **2,941 ms** against a 1,929 ms baseline and I
+nearly reported it as a regression; the second was killed mid-warmup at **load average 3.42**.
+
+**Fix:** a timing run is exclusive, and that includes the author. Before starting a measurement,
+record `uptime` and the PIDs of every process on the target cores. While it runs: read files,
+write code, do not compile and do not execute anything pinned to those cores. Any number produced
+while `load average` exceeds ~1 must be labelled contaminated and discarded, not published.
+
+### M49. Built a threading wrapper on file-scope state, which this loader zeroes
+
+Two lost in-model runs (2,566 ms and 2,543.8 ms against a 2,532 ms baseline, i.e. both
+"no change" within noise) came from **three** independent defects stacked on one another:
+
+1. **File-scope data in a jit_loader'd kernel is at address 0.** `static int g_x; g_x = 42;
+   &g_x` returns `0x0` through `custom_kernel`. A pool that parks workers in a static array
+   can never be woken, and `pthread_create` still returns success, so the kernel silently runs
+   serially at 1.00x. The reference avoids this because its partition index is a *function
+   argument* and its pool is a separate `.so`.
+2. **Kernels compile in a worker pool.** `get_worker_pool()` returns `None` only when
+   `PARALLEL == 0`; otherwise an in-process patch to `ClangCompiler.compile_cached` sees only
+   the single-task batches (7 of ~30 kernels). The log line `transforms applied: NONE` was the
+   tell and I did not read it the first time.
+3. **A thread created on an idle A76 does not start for 2-6 ticks** (`CONFIG_HZ=300`,
+   `NO_HZ_IDLE`): 6.6-11 ms per call against a 0.434 ms kernel, versus 0.58 us for a parked
+   worker.
+
+**Fix:** partition index as an argument (`_part(..., group)`), dispatcher address baked into
+the emitted source as an integer, pool built as `librkpool.so` with real statics, and
+`PARALLEL=0` for the run. Verified 3.96x standalone and 3.3-3.9x in-model per kernel.
+
+**Guards:** a probe kernel that writes a static and reads it back must return the written value
+before any kernel relies on file-scope state. A patch that changes compilation must assert its
+own hit count, and the assertion must be read every run, not only when the result looks wrong.
+
+### M50. Retracted a correct measurement without reading the field that scoped it
+
+`ref-profile`'s per-kernel profile is exactly 4x `ref-phase2`'s on every threaded kernel
+(scan 704.6 vs 177.4, swiglu 216.2 vs 53.7, CPU total 2,912.1 vs 736.6). I concluded the two
+"cannot both describe one prefill", retracted the scan row, and rewrote the priority table around
+a 295 ms gap. The JSON has a field `native_execution.prefill.runs`: it is **4** in `ref-profile`
+and **1** in `ref-phase2`. Divided by four, the numbers agree to 1% (728.0 vs 736.6; 176.2 vs
+177.4). The retraction was wrong, and I published it before reading a field in the file I had
+already opened.
+
+**Fix:** before withdrawing or reconciling any number, `grep` its artifact for the fields that
+define its scope -- `runs`, `trials`, `warmups`, `N`, `repeats` -- and state them with the number.
+A 4x disagreement between two runs of the same configuration is a scope mismatch or a bug, never a
+reason to delete a measurement.
+
+### M51. Put wall time and main-thread time in the same comparison column
+
+For hours I compared our per-kernel **wall** time (the probe times the call, including waiting for
+pool workers) against the reference's per-kernel figure from its own profile -- which is
+**main-thread** time. The tell was in their own data all along: "main CPU 720 ms" against "total CPU
+5,140 ms". Once measured directly, their scan's 7.39 ms/call matched one group's 7.89 ms, not a
+four-way wall.
+
+**Fix:** a comparison table must name the instrument per column (`wall`, `main-thread CPU`,
+`total CPU`, `device`). If the two sides were measured by different instruments, the row is not a
+comparison and must not carry a delta.
+
+### M52. Published a "verbatim" reproduce command that had dropped 14 environment variables
+
+The reference doc's §3 claimed the command was copied verbatim from `run.sh`. It had lost
+`ONPU_INT8_NATURAL2304`, `ONPU_FFN_PACKED_UPLOAD`, `ONPU_GDN_*`, `ONPU_SWIGLU_PACK_STATIC_LAYOUT`,
+`ONPU_REPLAY_SCALAR_COPY` and others, plus `--input`, `--fuse-projections`, `--cpu-attention` and
+the `taskset` prefix -- and two variables I invented (`ONPU_CPU_POOL`, `ONPU_CPU_PREFILL_POOL`)
+which are CLI flags. That is mistake M22's exact failure mode, in a document that warned about M22
+two paragraphs earlier.
+
+**Fix:** a command labelled verbatim must be diffable against the file it came from. Copy it with
+`sed -n` from the source, and if it is re-typed, `diff` the env list against that source and show
+the empty diff. Never introduce an env var that is not in the executed configuration.
+
+### M53. Trusted a benchmark whose kernel was running a quarter of its work
+
+The thread-split transform emitted its helper `_group` **before** the entry point, and
+`CPUProgram` jumps to **offset 0**. Every call therefore executed `_group` with a garbage group
+index: one quarter of the loop, once, with the pool never touched. That produced a 27% "gain"
+(2,531.67 -> 1,848.56 ms) on wrong outputs, and it survived six 3+3 runs because I was comparing
+wall times and never checked that the pool had been entered.
+
+The tell was visible three ways at once and I explained each away: `E_2_16` landed at exactly
+6.46/4, `thread_ms == wall` on pooled kernels, and a dispatch counter read 0. I even instrumented
+the counter and then doubted *the counter* rather than the kernel.
+
+**Fix:** a transform that claims to change execution must prove it changed execution -- count
+dispatches inside the callee and require the count to exceed zero, and require the caller's thread
+CPU to be a fraction of the wall for a pooled call. Compare outputs against the untransformed
+kernel at the function boundary, not token ids.
+
+### M54. Built load-bearing conclusions on a micro-probe that never ran the kernel
+
+`Tensor.custom_kernel` returns a new tensor. In three probes I called
+`buf.custom_kernel(...)` and then read `buf`, which is never written. So "file-scope data is at
+address 0" (`&g_x == 0x0`) and "`pthread_create` returns 0 but the worker never runs" were
+measurements of untouched zeroed memory. The first of those conclusions justified an entire
+`.so`-based pool redesign.
+
+**Fix:** every micro-probe must have a positive control -- a kernel that writes a known value and
+is required to read back that value -- before any of its other results are believed. "The probe
+returned zeros" is indistinguishable from "the kernel did not run" unless the control passes.
+
 ## Guards now installed
 
 | guard | where |
@@ -955,3 +1067,10 @@ preference. And a recorded command is meant to be executed, not reconstructed.
 | scan formula verified before any port | `extra/rockchip/check_scan_formula.py` |
 | reproduce path: read the command from `receipt.json`, never retype flags | `AGENTS.md` "Reproduce paths" |
 | submit count differs from reference → wrong configuration, stop | `mistake.md` M22 |
+| a labelled-verbatim command must diff empty against its source file | `mistake.md` M52 |
+| before withdrawing a number, read its `runs`/`trials`/`N` scope fields | `mistake.md` M50 |
+| every comparison column names its instrument (wall / main-thread / total / device) | `mistake.md` M51 |
+| a timing run is exclusive: no compile, no benchmark, by anyone, while it runs | `mistake.md` M48 |
+| kernel file-scope data is at address 0; never park state in a jit-loaded kernel | `mistake.md` M49 |
+| a patch that changes compilation must assert its own hit count each run | `mistake.md` M49 |
+| no date-based filenames under `docs/rknpu/` | `AGENTS.md` "Markdown" |

@@ -50,6 +50,10 @@ def _source(tokens: int, capacity: int) -> str:
   body = (_HERE / "attn.c").read_text()
   if "#ifdef PROBE" in body:
     body = body[:body.index("#ifdef PROBE")]
+  from thread_split import pool_address
+  body = body.replace("RK_POOL_ADDR_ULL", f"{pool_address()}ULL")
+  # Four threads only pay from a few rows up; decode is TOK=1 and must stay serial.
+  body = body.replace("RK_SPLIT", "1" if tokens >= 8 else "0")
   body = body.replace("#define TOK 128", f"#define TOK {tokens}")
   body = body.replace("#define CAP 512", f"#define CAP {capacity}")
   return body

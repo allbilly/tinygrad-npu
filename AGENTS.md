@@ -263,6 +263,10 @@ Rules that follow:
 ### Markdown
 
 - All markdown table shd fix spacing to plan text view readability
+- **Never use a date in a filename under `docs/rknpu/`.** Name a document by what it contains
+  (`reference-qwen35-4b.md`, `compare-ours-vs-ref.md`, `decode-rea.md`), not by when it was
+  written. A dated name goes stale in the name itself, and two dated copies of the same subject
+  become two answers. Put chronology in the file's text if it matters.
 
 ### Opencode
 

@@ -2693,34 +2693,69 @@ dominant:
 that table, which is the reference's pool/async architecture, not any one kernel. The 182 ms
 transposed-gather item is real but requires a kernel layout rewrite to claim.
 
-## The deficit is per-call overhead: ~1.3 ms per CPU program x ~1,031 programs ~= the whole gap
+## CORRECTION: dispatch is ~4 us per program, not 1.3 ms; the graph is a chain, so threading is the lever
 
-Measured through tinygrad on the CPU device (sigmoid, median of 10):
+Dispatch is **not** the deficit. The earlier "1.3 ms per CPU program" figure was measured through
+`fast_sigmoid`, which rebuilds a Python graph per call (`reshape/contiguous/empty/custom_kernel`).
+None of that work exists inside a captured JIT, so an isolated-call figure was used as an in-model
+one -- the error rule 1 of `AGENTS.md` warns about. It is **withdrawn**.
 
-| n | time | throughput |
-| --: | --: | --: |
-| 1,024 | **1.307 ms** | 0.8 M elem/s |
-| 8,192 | 1.380 ms | 5.9 M elem/s |
-| 65,536 | 2.069 ms | 31.7 M elem/s |
-| 262,144 | 4.425 ms | 59.2 M elem/s |
-| 524,288 | 7.585 ms | 69.1 M elem/s |
-| 1,179,648 | 5.576 ms | 211.5 M elem/s |
-| 2,359,296 | 9.909 ms | 238.1 M elem/s |
+Measured in-model instead (`results/progcost/report.json`, `extra/rockchip/inmodel_program_cost.py`).
+Instrumented and bare prefills alternate, so the observer effect is a ratio, not an assumption:
 
-Reading it: a 1,024-element sigmoid still costs **1.307 ms**, i.e. there is a **~1.3 ms fixed cost per CPU
-program call**, and the mid-size points are dominated by it (which is why 524k appears *slower per element*
-than 1.18M -- those points are overhead + cache effects, not arithmetic; the large sizes approach the
-real rate, ~275 M elem/s).
+| trial | wall ms | CPU programs | inside compiled kernel | arg-buffer pack | everything else |
+| --- | --: | --: | --: | --: | --: |
+| instrumented-a | 4,768.5 | 1,006 | 2,425.1 | 5.2 | 2,338.2 |
+| **bare** | **2,542.0** | -- | -- | -- | -- |
+| instrumented-b | 2,549.7 | 1,006 | **2,391.3** | 4.3 | **154.2** |
 
-**Our prefill launches ~1,031 CPU programs.** At ~1.3 ms each that is **~1.34 s of per-call overhead** --
-almost exactly the 1,331 ms deficit to the reference. It also matches the profiler's separate
-`bookkeeping 0.38 s` plus the many small `E_*` kernels whose measured times (0.02-0.36 s) are consistent
-with overhead-dominated calls.
+Observer effect 7.7 ms (0.3%). So of a 2,542 ms prefill, **2,391 ms is inside the compiled kernels**
+and dispatch (packer + ctypes + `cpu_profile`) is **~4 us per program, ~4 ms per prefill**. Fusing
+elementwise expressions to remove programs is therefore worth microseconds, not seconds: the bound
+"216 calls x 1.3 ms ~= 280 ms" for elementwise fusion is withdrawn with it. (A separate 0.28 s
+projection, for merging NPU *submits*, is unaffected and was measured at -89 ms.)
 
-**The reference runs 1,597 CPU programs against our 1,031 and is still 2.1x faster**, because its programs
-are C functions dispatched from a pool, paying microseconds per call rather than 1.3 ms.
+### The graph has almost no inter-kernel parallelism either
 
-So the remaining lever is **fewer, larger CPU kernels**: fusing the elementwise chain per layer would cut
-program count several-fold, and at 1.3 ms each the saving scales directly. This is the "fuse boundaries,
-not arithmetic" lesson from the earlier work, now quantified: each removed CPU program is worth ~1.3 ms of
-prefill.
+`extra/rockchip/trace_deps.py` records every program's declared `ins`/`outs` pointers and duration,
+rebuilds sequential-consistency dependencies, and list-schedules the real graph:
+
+| workers | makespan | speedup | cores busy |
+| --: | --: | --: | --: |
+| 1 | 2,417.7 ms | 1.00 | 100% |
+| 2 | 2,094.2 ms | 1.15 | 58% |
+| 4 | 1,973.2 ms | **1.23** | 31% |
+| 6 | 1,955.2 ms | 1.24 | 21% |
+
+Critical path **1,742.3 ms** of 2,417.7 ms of work. An async dispatcher over *this* graph -- the
+reference's pool transplanted without changing the graph -- therefore floors at ~1.9 s and cannot
+reach 1,200 ms. The pool is not the mechanism.
+
+### What the reference's 4.26 cores actually are
+
+Their kernels split into four partitions inside a single call: `rockchip_norm_quantize` partitions
+rows 4 ways via the pool dispatcher, `rockchip_cpu_rmsnorm` spawns 4 pthreads when
+`rows*width >= 131072`, `rockchip_swiglu_pack` when `rows*depth >= 32768`. So 4.26 cores busy is
+**intra-kernel parallelism**, and it survives on a serial graph. Ours has none: every kernel is
+single-threaded.
+
+Where our 1,742.3 ms critical path goes, by kernel:
+
+| item | ms on chain | share | parallel dimension |
+| --- | --: | --: | --- |
+| GDN scan (`rockchip_scan_simd_*`) | **597.4** | 34% | heads; measured ceiling 1.21x |
+| elementwise `E_*` (excl. `E_128_16_64_4`) | **529** | 30% | 4 independent lanes, 3.45 ns/element |
+| NPU Linear | 336 | 19% | device side |
+| attention (`rockchip_attn_*`, `r_*`) | 229 | 13% | heads / rows |
+| `E_128_16_64_4` | 51.5 | 3% | rows |
+
+**Projection, with every factor named.** *If* the elementwise group scaled 4x (396 ms saved), the
+attention group 2x (114 ms) and the scan reached its **measured** 1.21x ceiling (97 ms), the chain
+falls to ~1,140 ms (rounding: the rows sum to 1,742.9), plus 154 ms of non-program work = **~1.3 s**.
+Only the scan's factor is measured; the elementwise 4x is the hypothesis the thread-split experiment
+tests, and the attention 2x is an assumption. Reaching 1,200 ms needs the same treatment on every
+row of that table, which is a per-kernel port, not an orchestration layer.
+
+**Our default path is unthreaded.** `extra/rockchip/thread_split.py` implements the four-way split at
+the compiler boundary and `extra/rockchip/bench_threaded.py` runs the protocol with it installed;
+neither is wired into `bench_llm.py`.

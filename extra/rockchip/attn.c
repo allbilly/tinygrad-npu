@@ -46,6 +46,30 @@ static inline float exp2_scalar(float x) {
 #define D_ 256
 
 static void attn_row(float *out, const float *q, const float *k, const float *v,
+                     int i, int pos, int bh_q, int bh_kv);
+/* Four-way split over heads through librkpool. Heads are independent: each writes its own
+ * (bh_q, i, :) output rows and reads only the cache, so the partition is exact.
+ * The dispatcher address is baked in as an integer because file-scope data in a jit_loader'd
+ * kernel resolves to address 0 on this tree (see thread_split.py). */
+typedef void rk_fn_t(void **, int, int);
+extern int rk_run(rk_fn_t *, void **, int);
+static void rockchip_attn_part(void *args, int group);
+static void rockchip_attn_group(void **ctx, int unused, int group);
+void rockchip_attn(void *args) {
+  void *ctx[1];
+  ctx[0] = args;
+#if RK_SPLIT
+  if (((int (*)(rk_fn_t *, void **, int))RK_POOL_ADDR_ULL)(rockchip_attn_group, ctx, 4) != 0)
+#endif
+    for (int g = 0; g < 4; g++) rockchip_attn_part(args, g);
+}
+
+static void rockchip_attn_group(void **ctx, int unused, int group) {
+  (void)unused;
+  rockchip_attn_part(ctx[0], group);
+}
+
+static void attn_row(float *out, const float *q, const float *k, const float *v,
                      int i, int pos, int bh_q, int bh_kv) {
   float scores[CAP];
   const int last = pos + i;                     /* absolute index of the last visible key */
@@ -74,14 +98,15 @@ static void attn_row(float *out, const float *q, const float *k, const float *v,
   }
 }
 
-void rockchip_attn(void *args) {
+static void rockchip_attn_part(void *args, int group) {
   float *out = *(float **)args;
   const float *q = *((const float **)args + 1);
   const float *kv = *((const float **)args + 2);
   const int pos = (int)(*(*((const float **)args + 3)));
   const float *k = kv;
   const float *v = kv + (size_t)KVH_ * CAP * D_;
-  for (int h = 0; h < H_; h++) {
+  const int first = H_ * group / 4, last = H_ * (group + 1) / 4;
+  for (int h = first; h < last; h++) {
     const int bh_q = h, bh_kv = h / (H_ / KVH_);
     for (int i = 0; i < TOK; i++) attn_row(out, q, k, v, i, pos, bh_q, bh_kv);
   }

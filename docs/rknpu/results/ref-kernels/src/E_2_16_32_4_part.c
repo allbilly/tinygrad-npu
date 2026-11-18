@@ -1,0 +1,143 @@
+typedef float float4 __attribute__((aligned(16),ext_vector_type(4)));
+static void E_2_16_32_4_part(float* restrict data0_4096, float* restrict data1_32768, unsigned char* restrict data2_131072, float* restrict data3_16,int group) {
+  for (int Lidx0_0 = 2*group/4; Lidx0_0 < 2*(group+1)/4; Lidx0_0++) {
+    for (int Lidx0_1 = 0; Lidx0_1 < 16; Lidx0_1++) {
+      float val0 = (*(data3_16+Lidx0_1));
+      int alu0 = (Lidx0_1<<7);
+      for (int Lidx1 = 0; Lidx1 < 32; Lidx1++) {
+        int alu1 = ((Lidx0_1<<11)+(Lidx1<<6));
+        unsigned char val1 = (*(data2_131072+(alu1+1)));
+        unsigned char val2 = (*(data2_131072+(alu1+10)));
+        unsigned char val3 = (*(data2_131072+(alu1+11)));
+        unsigned char val4 = (*(data2_131072+(alu1+12)));
+        unsigned char val5 = (*(data2_131072+(alu1+13)));
+        unsigned char val6 = (*(data2_131072+(alu1+14)));
+        unsigned char val7 = (*(data2_131072+(alu1+15)));
+        unsigned char val8 = (*(data2_131072+(alu1+16)));
+        unsigned char val9 = (*(data2_131072+(alu1+17)));
+        unsigned char val10 = (*(data2_131072+(alu1+18)));
+        unsigned char val11 = (*(data2_131072+(alu1+19)));
+        unsigned char val12 = (*(data2_131072+(alu1+2)));
+        unsigned char val13 = (*(data2_131072+(alu1+20)));
+        unsigned char val14 = (*(data2_131072+(alu1+21)));
+        unsigned char val15 = (*(data2_131072+(alu1+22)));
+        unsigned char val16 = (*(data2_131072+(alu1+23)));
+        unsigned char val17 = (*(data2_131072+(alu1+24)));
+        unsigned char val18 = (*(data2_131072+(alu1+25)));
+        unsigned char val19 = (*(data2_131072+(alu1+26)));
+        unsigned char val20 = (*(data2_131072+(alu1+27)));
+        unsigned char val21 = (*(data2_131072+(alu1+28)));
+        unsigned char val22 = (*(data2_131072+(alu1+29)));
+        unsigned char val23 = (*(data2_131072+(alu1+3)));
+        unsigned char val24 = (*(data2_131072+(alu1+30)));
+        unsigned char val25 = (*(data2_131072+(alu1+31)));
+        unsigned char val26 = (*(data2_131072+(alu1+32)));
+        unsigned char val27 = (*(data2_131072+(alu1+33)));
+        unsigned char val28 = (*(data2_131072+(alu1+34)));
+        unsigned char val29 = (*(data2_131072+(alu1+35)));
+        unsigned char val30 = (*(data2_131072+(alu1+36)));
+        unsigned char val31 = (*(data2_131072+(alu1+37)));
+        unsigned char val32 = (*(data2_131072+(alu1+38)));
+        unsigned char val33 = (*(data2_131072+(alu1+39)));
+        unsigned char val34 = (*(data2_131072+(alu1+4)));
+        unsigned char val35 = (*(data2_131072+(alu1+40)));
+        unsigned char val36 = (*(data2_131072+(alu1+41)));
+        unsigned char val37 = (*(data2_131072+(alu1+42)));
+        unsigned char val38 = (*(data2_131072+(alu1+43)));
+        unsigned char val39 = (*(data2_131072+(alu1+44)));
+        unsigned char val40 = (*(data2_131072+(alu1+45)));
+        unsigned char val41 = (*(data2_131072+(alu1+46)));
+        unsigned char val42 = (*(data2_131072+(alu1+47)));
+        unsigned char val43 = (*(data2_131072+(alu1+48)));
+        unsigned char val44 = (*(data2_131072+(alu1+49)));
+        unsigned char val45 = (*(data2_131072+(alu1+5)));
+        unsigned char val46 = (*(data2_131072+(alu1+50)));
+        unsigned char val47 = (*(data2_131072+(alu1+51)));
+        unsigned char val48 = (*(data2_131072+(alu1+52)));
+        unsigned char val49 = (*(data2_131072+(alu1+53)));
+        unsigned char val50 = (*(data2_131072+(alu1+54)));
+        unsigned char val51 = (*(data2_131072+(alu1+55)));
+        unsigned char val52 = (*(data2_131072+(alu1+56)));
+        unsigned char val53 = (*(data2_131072+(alu1+57)));
+        unsigned char val54 = (*(data2_131072+(alu1+58)));
+        unsigned char val55 = (*(data2_131072+(alu1+59)));
+        unsigned char val56 = (*(data2_131072+(alu1+6)));
+        unsigned char val57 = (*(data2_131072+(alu1+60)));
+        unsigned char val58 = (*(data2_131072+(alu1+61)));
+        unsigned char val59 = (*(data2_131072+(alu1+62)));
+        unsigned char val60 = (*(data2_131072+(alu1+63)));
+        unsigned char val61 = (*(data2_131072+(alu1+7)));
+        unsigned char val62 = (*(data2_131072+(alu1+8)));
+        unsigned char val63 = (*(data2_131072+(alu1+9)));
+        unsigned char val64 = (*(data2_131072+alu1));
+        int alu2 = (Lidx1<<2);
+        int alu3 = (alu0+alu2);
+        float4 val65 = (*((float4*)((data1_32768+(alu3+16384)))));
+        float4 val66 = (*((float4*)((data1_32768+(alu3+24576)))));
+        float4 val67 = (*((float4*)((data1_32768+(alu3+8192)))));
+        float4 val68 = (*((float4*)((data1_32768+alu3))));
+        float alu4 = ((val68[0]*((float)(((__fp16)(__builtin_bit_cast(float, (unsigned int)((((unsigned int)(val64))+(((unsigned int)(val1))<<8u)+(((unsigned int)(val12))<<16u)+(((unsigned int)(val23))<<24u)))))))))+(val67[0]*((float)(((__fp16)(__builtin_bit_cast(float, (unsigned int)((((unsigned int)(val34))+(((unsigned int)(val45))<<8u)+(((unsigned int)(val56))<<16u)+(((unsigned int)(val61))<<24u)))))))))+(val65[0]*((float)(((__fp16)(__builtin_bit_cast(float, (unsigned int)((((unsigned int)(val62))+(((unsigned int)(val63))<<8u)+(((unsigned int)(val2))<<16u)+(((unsigned int)(val3))<<24u)))))))))+(val66[0]*((float)(((__fp16)(__builtin_bit_cast(float, (unsigned int)((((unsigned int)(val4))+(((unsigned int)(val5))<<8u)+(((unsigned int)(val6))<<16u)+(((unsigned int)(val7))<<24u))))))))));
+        float alu5 = (alu4*-1.4426950216293335f);
+        _Bool alu6 = (alu5!=alu5);
+        float alu7 = ((alu5!=((float)(-__builtin_inff())))?alu5:0.0f);
+        float alu8 = (alu6?0.0f:alu7);
+        float alu9 = ((alu5!=((float)(__builtin_inff())))?alu8:0.0f);
+        float alu10 = ((alu9<0.0f)?-0.5f:0.5f);
+        int cast0 = ((int)((alu9+alu10)));
+        float alu11 = ((val68[1]*((float)(((__fp16)(__builtin_bit_cast(float, (unsigned int)((((unsigned int)(val8))+(((unsigned int)(val9))<<8u)+(((unsigned int)(val10))<<16u)+(((unsigned int)(val11))<<24u)))))))))+(val67[1]*((float)(((__fp16)(__builtin_bit_cast(float, (unsigned int)((((unsigned int)(val13))+(((unsigned int)(val14))<<8u)+(((unsigned int)(val15))<<16u)+(((unsigned int)(val16))<<24u)))))))))+(val65[1]*((float)(((__fp16)(__builtin_bit_cast(float, (unsigned int)((((unsigned int)(val17))+(((unsigned int)(val18))<<8u)+(((unsigned int)(val19))<<16u)+(((unsigned int)(val20))<<24u)))))))))+(val66[1]*((float)(((__fp16)(__builtin_bit_cast(float, (unsigned int)((((unsigned int)(val21))+(((unsigned int)(val22))<<8u)+(((unsigned int)(val24))<<16u)+(((unsigned int)(val25))<<24u))))))))));
+        float alu12 = (alu11*-1.4426950216293335f);
+        _Bool alu13 = (alu12!=alu12);
+        float alu14 = ((alu12!=((float)(-__builtin_inff())))?alu12:0.0f);
+        float alu15 = (alu13?0.0f:alu14);
+        float alu16 = ((alu12!=((float)(__builtin_inff())))?alu15:0.0f);
+        float alu17 = ((alu16<0.0f)?-0.5f:0.5f);
+        int cast1 = ((int)((alu16+alu17)));
+        float alu18 = ((val68[2]*((float)(((__fp16)(__builtin_bit_cast(float, (unsigned int)((((unsigned int)(val26))+(((unsigned int)(val27))<<8u)+(((unsigned int)(val28))<<16u)+(((unsigned int)(val29))<<24u)))))))))+(val67[2]*((float)(((__fp16)(__builtin_bit_cast(float, (unsigned int)((((unsigned int)(val30))+(((unsigned int)(val31))<<8u)+(((unsigned int)(val32))<<16u)+(((unsigned int)(val33))<<24u)))))))))+(val65[2]*((float)(((__fp16)(__builtin_bit_cast(float, (unsigned int)((((unsigned int)(val35))+(((unsigned int)(val36))<<8u)+(((unsigned int)(val37))<<16u)+(((unsigned int)(val38))<<24u)))))))))+(val66[2]*((float)(((__fp16)(__builtin_bit_cast(float, (unsigned int)((((unsigned int)(val39))+(((unsigned int)(val40))<<8u)+(((unsigned int)(val41))<<16u)+(((unsigned int)(val42))<<24u))))))))));
+        float alu19 = (alu18*-1.4426950216293335f);
+        _Bool alu20 = (alu19!=alu19);
+        float alu21 = ((alu19!=((float)(-__builtin_inff())))?alu19:0.0f);
+        float alu22 = (alu20?0.0f:alu21);
+        float alu23 = ((alu19!=((float)(__builtin_inff())))?alu22:0.0f);
+        float alu24 = ((alu23<0.0f)?-0.5f:0.5f);
+        int cast2 = ((int)((alu23+alu24)));
+        float alu25 = ((val68[3]*((float)(((__fp16)(__builtin_bit_cast(float, (unsigned int)((((unsigned int)(val43))+(((unsigned int)(val44))<<8u)+(((unsigned int)(val46))<<16u)+(((unsigned int)(val47))<<24u)))))))))+(val67[3]*((float)(((__fp16)(__builtin_bit_cast(float, (unsigned int)((((unsigned int)(val48))+(((unsigned int)(val49))<<8u)+(((unsigned int)(val50))<<16u)+(((unsigned int)(val51))<<24u)))))))))+(val65[3]*((float)(((__fp16)(__builtin_bit_cast(float, (unsigned int)((((unsigned int)(val52))+(((unsigned int)(val53))<<8u)+(((unsigned int)(val54))<<16u)+(((unsigned int)(val55))<<24u)))))))))+(val66[3]*((float)(((__fp16)(__builtin_bit_cast(float, (unsigned int)((((unsigned int)(val57))+(((unsigned int)(val58))<<8u)+(((unsigned int)(val59))<<16u)+(((unsigned int)(val60))<<24u))))))))));
+        float alu26 = (alu25*-1.4426950216293335f);
+        _Bool alu27 = (alu26!=alu26);
+        float alu28 = ((alu26!=((float)(-__builtin_inff())))?alu26:0.0f);
+        float alu29 = (alu27?0.0f:alu28);
+        float alu30 = ((alu26!=((float)(__builtin_inff())))?alu29:0.0f);
+        float alu31 = ((alu30<0.0f)?-0.5f:0.5f);
+        int cast3 = ((int)((alu30+alu31)));
+        int alu32 = (cast0>>1);
+        int alu33 = (cast1>>1);
+        int alu34 = (cast2>>1);
+        int alu35 = (cast3>>1);
+        float alu36 = (alu9-((float)(cast0)));
+        float alu37 = (((alu5<128.0f)!=1)?((float)(__builtin_inff())):(((((((((((((0.00015359208919107914f*alu36)+0.0013392627006396651f)*alu36)+0.009618384763598442f)*alu36)+0.055503472685813904f)*alu36)+0.24022644758224487f)*alu36)+0.6931471824645996f)*alu36)+1.0f)*__builtin_bit_cast(float, (int)(((alu32+127)<<23)))*__builtin_bit_cast(float, (int)((((cast0-alu32)+127)<<23)))));
+        float alu38 = ((alu5<-150.0f)?0.0f:alu37);
+        float alu39 = (alu6?((float)(__builtin_nanf(""))):alu38);
+        float alu40 = (alu16-((float)(cast1)));
+        float alu41 = (((alu12<128.0f)!=1)?((float)(__builtin_inff())):(((((((((((((0.00015359208919107914f*alu40)+0.0013392627006396651f)*alu40)+0.009618384763598442f)*alu40)+0.055503472685813904f)*alu40)+0.24022644758224487f)*alu40)+0.6931471824645996f)*alu40)+1.0f)*__builtin_bit_cast(float, (int)(((alu33+127)<<23)))*__builtin_bit_cast(float, (int)((((cast1-alu33)+127)<<23)))));
+        float alu42 = ((alu12<-150.0f)?0.0f:alu41);
+        float alu43 = (alu13?((float)(__builtin_nanf(""))):alu42);
+        float alu44 = (alu23-((float)(cast2)));
+        float alu45 = (((alu19<128.0f)!=1)?((float)(__builtin_inff())):(((((((((((((0.00015359208919107914f*alu44)+0.0013392627006396651f)*alu44)+0.009618384763598442f)*alu44)+0.055503472685813904f)*alu44)+0.24022644758224487f)*alu44)+0.6931471824645996f)*alu44)+1.0f)*__builtin_bit_cast(float, (int)(((alu34+127)<<23)))*__builtin_bit_cast(float, (int)((((cast2-alu34)+127)<<23)))));
+        float alu46 = ((alu19<-150.0f)?0.0f:alu45);
+        float alu47 = (alu20?((float)(__builtin_nanf(""))):alu46);
+        float alu48 = (alu30-((float)(cast3)));
+        float alu49 = (((alu26<128.0f)!=1)?((float)(__builtin_inff())):(((((((((((((0.00015359208919107914f*alu48)+0.0013392627006396651f)*alu48)+0.009618384763598442f)*alu48)+0.055503472685813904f)*alu48)+0.24022644758224487f)*alu48)+0.6931471824645996f)*alu48)+1.0f)*__builtin_bit_cast(float, (int)(((alu35+127)<<23)))*__builtin_bit_cast(float, (int)((((cast3-alu35)+127)<<23)))));
+        float alu50 = ((alu26<-150.0f)?0.0f:alu49);
+        float alu51 = (alu27?((float)(__builtin_nanf(""))):alu50);
+        *((float4*)((data0_4096+((Lidx0_0<<11)+alu0+alu2)))) = (float4){((alu4/((1.0f+alu39)*val0))*0.0078125f),((alu11/((1.0f+alu43)*val0))*0.0078125f),((alu18/((1.0f+alu47)*val0))*0.0078125f),((alu25/((1.0f+alu51)*val0))*0.0078125f)};
+      }
+    }
+  }
+}
+
+ typedef struct {float* data0_4096;float* data1_32768;unsigned char* data2_131072;float* data3_16;} PoolWork;
+ static void prep_callback(void **args,int unused,int group) {(void)unused;PoolWork *w=args[0];E_2_16_32_4_part(w->data0_4096,w->data1_32768,w->data2_131072,w->data3_16,group);}
+ void E_2_16_32_4(float* restrict data0_4096, float* restrict data1_32768, unsigned char* restrict data2_131072, float* restrict data3_16) {PoolWork work={data0_4096,data1_32768,data2_131072,data3_16};void *args[4]={&work,0,0,0};
+  if(((int(*)(void(*)(void**,int,int),void**,int))543132856320ULL)(prep_callback,args,0))
+   for(int group=0;group<4;group++)prep_callback(args,0,group);
+ }
+ 

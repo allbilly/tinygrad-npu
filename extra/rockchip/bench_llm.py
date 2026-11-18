@@ -123,7 +123,10 @@ def main() -> int:
     # per prefill on top of the 3.34 s of work). A real server creates its variable once.
     pos_zero = v_start.bind(0)
 
+    trial_index = 0
+
     def trial(tag: str = "") -> dict:
+        nonlocal trial_index
         npu_dev = Device["ROCKCHIP"] if args.npu else None
         begin = time.perf_counter()
         s0 = npu_dev.submit_count if npu_dev else 0
@@ -136,6 +139,10 @@ def main() -> int:
         prefill_npu_ms = (npu_dev.submit_seconds - w0) * 1000 if npu_dev else 0.0
         print(f"  {tag} prefill {ttft_ms/1000:.1f}s {prefill_submits} submits "
               f"{prefill_npu_ms/1000:.1f}s in npu", flush=True)
+        # Machine-readable prefill boundary. `trial_phase_probe.py` splits each window into
+        # main-thread CPU / total CPU / off-CPU by watching for exactly these events, so the
+        # same instrument can be applied to this tree as to the reference (720/5,140/486 ms).
+        print(json.dumps({"event": "first_token", "index": trial_index, "first_token_ms": ttft_ms}), flush=True)
         begin = time.perf_counter()
         s0 = npu_dev.submit_count if npu_dev else 0
         t0 = npu_dev.task_count if npu_dev else 0
@@ -155,6 +162,10 @@ def main() -> int:
         print(f"  {tag} done decode {rate:.2f} tok/s ({decode_seconds:.1f}s) "
               f"{decode_submits/args.gen:.1f} submits/token {decode_tasks/args.gen:.1f} tasks/token "
               f"npu {decode_npu_ms/args.gen:.1f} ms/token", flush=True)
+        print(json.dumps({"event": "run", "index": trial_index, "first_token_ms": ttft_ms,
+                          "decode_tps": rate, "prefill_submits": prefill_submits,
+                          "decode_submits": decode_submits}), flush=True)
+        trial_index += 1
         return {"ttft_ms": ttft_ms, "decode": rate, "generated_ids": generated, "prefill_submits": prefill_submits,
                 "prefill_tasks": prefill_tasks, "decode_submits_per_token": decode_submits / args.gen,
                 "decode_tasks_per_token": decode_tasks / args.gen,

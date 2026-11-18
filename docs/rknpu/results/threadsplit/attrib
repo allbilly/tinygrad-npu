@@ -1,0 +1,254 @@
+{
+  "checkpoint": "/home/orangepi/vlm-bench/baseline-20261021/checkpoints/Qwen3.5-4B/Qwen3.5-4B-Q8_0.gguf",
+  "npu_linears": 233,
+  "npu_weight_mib": 4010.0,
+  "load_seconds": 70.59,
+  "trials": [
+    {
+      "tag": "capture",
+      "instrumented": false,
+      "wall_ms": 8634.4,
+      "cpu_programs": 0,
+      "dispatch_outer_ms": 0.0,
+      "dispatch_pack_ms": 0.0,
+      "kernel_fxn_ms": 0.0,
+      "non_program_ms": 8634.4,
+      "npu_submits": 355,
+      "npu_seconds": 0.417,
+      "top": []
+    },
+    {
+      "tag": "instrumented-a",
+      "instrumented": true,
+      "wall_ms": 4795.5,
+      "cpu_programs": 1006,
+      "dispatch_outer_ms": 2457.1,
+      "dispatch_pack_ms": 5.0,
+      "kernel_fxn_ms": 2452.0,
+      "non_program_ms": 2338.4,
+      "npu_submits": 355,
+      "npu_seconds": 0.417,
+      "top": [
+        {
+          "name": "rockchip_scan_simd_1_32_128_128_128_1",
+          "calls": 24,
+          "outer_ms": 606.6,
+          "fxn_ms": 606.3
+        },
+        {
+          "name": "E_2_16_32_32_4_4",
+          "calls": 48,
+          "outer_ms": 310.3,
+          "fxn_ms": 310.0
+        },
+        {
+          "name": "rockchip_linear_64_9216_2560",
+          "calls": 64,
+          "outer_ms": 217.1,
+          "fxn_ms": 216.8
+        },
+        {
+          "name": "rockchip_linear_64_2560_4096",
+          "calls": 96,
+          "outer_ms": 193.5,
+          "fxn_ms": 193.1
+        },
+        {
+          "name": "E_32_32_128_4",
+          "calls": 24,
+          "outer_ms": 142.2,
+          "fxn_ms": 142.1
+        },
+        {
+          "name": "r_32_16_4_32_4",
+          "calls": 48,
+          "outer_ms": 141.3,
+          "fxn_ms": 141.2
+        },
+        {
+          "name": "E_1024_32_4_4",
+          "calls": 24,
+          "outer_ms": 136.9,
+          "fxn_ms": 136.7
+        },
+        {
+          "name": "E_393216_3",
+          "calls": 32,
+          "outer_ms": 135.0,
+          "fxn_ms": 134.8
+        },
+        {
+          "name": "rockchip_attn_128_145",
+          "calls": 8,
+          "outer_ms": 120.8,
+          "fxn_ms": 120.8
+        },
+        {
+          "name": "rockchip_linear_64_8192_2560",
+          "calls": 24,
+          "outer_ms": 67.4,
+          "fxn_ms": 67.3
+        },
+        {
+          "name": "E_128_16_64_4",
+          "calls": 8,
+          "outer_ms": 51.7,
+          "fxn_ms": 51.7
+        },
+        {
+          "name": "E_131072_4",
+          "calls": 72,
+          "outer_ms": 48.7,
+          "fxn_ms": 48.3
+        },
+        {
+          "name": "rockchip_linear_64_4096_2560",
+          "calls": 24,
+          "outer_ms": 40.0,
+          "fxn_ms": 40.0
+        },
+        {
+          "name": "E_32_640_4_4",
+          "calls": 64,
+          "outer_ms": 29.3,
+          "fxn_ms": 29.0
+        },
+        {
+          "name": "rockchip_linear_64_10240_2560",
+          "calls": 8,
+          "outer_ms": 26.9,
+          "fxn_ms": 26.9
+        },
+        {
+          "name": "rockchip_linear_64_32_2560",
+          "calls": 96,
+          "outer_ms": 23.7,
+          "fxn_ms": 23.3
+        }
+      ]
+    },
+    {
+      "tag": "bare",
+      "instrumented": false,
+      "wall_ms": 2540.9,
+      "cpu_programs": 0,
+      "dispatch_outer_ms": 0.0,
+      "dispatch_pack_ms": 0.0,
+      "kernel_fxn_ms": 0.0,
+      "non_program_ms": 2540.9,
+      "npu_submits": 355,
+      "npu_seconds": 0.417,
+      "top": []
+    },
+    {
+      "tag": "instrumented-b",
+      "instrumented": true,
+      "wall_ms": 2543.4,
+      "cpu_programs": 1006,
+      "dispatch_outer_ms": 2394.1,
+      "dispatch_pack_ms": 4.0,
+      "kernel_fxn_ms": 2390.1,
+      "non_program_ms": 149.3,
+      "npu_submits": 355,
+      "npu_seconds": 0.417,
+      "top": [
+        {
+          "name": "rockchip_scan_simd_1_32_128_128_128_1",
+          "calls": 24,
+          "outer_ms": 606.5,
+          "fxn_ms": 606.3
+        },
+        {
+          "name": "E_2_16_32_32_4_4",
+          "calls": 48,
+          "outer_ms": 308.8,
+          "fxn_ms": 308.5
+        },
+        {
+          "name": "rockchip_linear_64_9216_2560",
+          "calls": 64,
+          "outer_ms": 216.6,
+          "fxn_ms": 216.3
+        },
+        {
+          "name": "rockchip_linear_64_2560_4096",
+          "calls": 96,
+          "outer_ms": 193.2,
+          "fxn_ms": 192.9
+        },
+        {
+          "name": "E_32_32_128_4",
+          "calls": 24,
+          "outer_ms": 142.0,
+          "fxn_ms": 142.0
+        },
+        {
+          "name": "r_32_16_4_32_4",
+          "calls": 48,
+          "outer_ms": 140.9,
+          "fxn_ms": 140.8
+        },
+        {
+          "name": "E_1024_32_4_4",
+          "calls": 24,
+          "outer_ms": 136.9,
+          "fxn_ms": 136.8
+        },
+        {
+          "name": "E_393216_3",
+          "calls": 32,
+          "outer_ms": 132.7,
+          "fxn_ms": 132.6
+        },
+        {
+          "name": "rockchip_attn_128_145",
+          "calls": 8,
+          "outer_ms": 120.8,
+          "fxn_ms": 120.8
+        },
+        {
+          "name": "rockchip_linear_64_8192_2560",
+          "calls": 24,
+          "outer_ms": 66.9,
+          "fxn_ms": 66.8
+        },
+        {
+          "name": "E_128_16_64_4",
+          "calls": 8,
+          "outer_ms": 51.7,
+          "fxn_ms": 51.6
+        },
+        {
+          "name": "rockchip_linear_64_4096_2560",
+          "calls": 24,
+          "outer_ms": 38.7,
+          "fxn_ms": 38.7
+        },
+        {
+          "name": "E_32_640_4_4",
+          "calls": 64,
+          "outer_ms": 28.9,
+          "fxn_ms": 28.6
+        },
+        {
+          "name": "rockchip_linear_64_10240_2560",
+          "calls": 8,
+          "outer_ms": 27.0,
+          "fxn_ms": 27.0
+        },
+        {
+          "name": "rockchip_linear_64_32_2560",
+          "calls": 96,
+          "outer_ms": 23.1,
+          "fxn_ms": 22.9
+        },
+        {
+          "name": "rockchip_linear_128_2560_1024",
+          "calls": 32,
+          "outer_ms": 20.3,
+          "fxn_ms": 20.2
+        }
+      ]
+    }
+  ]
+}

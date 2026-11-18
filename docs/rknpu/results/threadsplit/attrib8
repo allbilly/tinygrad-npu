@@ -1,0 +1,254 @@
+{
+  "checkpoint": "/home/orangepi/vlm-bench/baseline-20261021/checkpoints/Qwen3.5-4B/Qwen3.5-4B-Q8_0.gguf",
+  "npu_linears": 233,
+  "npu_weight_mib": 4010.0,
+  "load_seconds": 66.44,
+  "trials": [
+    {
+      "tag": "capture",
+      "instrumented": false,
+      "wall_ms": 11863.4,
+      "cpu_programs": 0,
+      "dispatch_outer_ms": 0.0,
+      "dispatch_pack_ms": 0.0,
+      "kernel_fxn_ms": 0.0,
+      "non_program_ms": 11863.4,
+      "npu_submits": 355,
+      "npu_seconds": 0.419,
+      "top": []
+    },
+    {
+      "tag": "instrumented-a",
+      "instrumented": true,
+      "wall_ms": 3717.8,
+      "cpu_programs": 1006,
+      "dispatch_outer_ms": 1391.7,
+      "dispatch_pack_ms": 4.9,
+      "kernel_fxn_ms": 1386.8,
+      "non_program_ms": 2326.0,
+      "npu_submits": 355,
+      "npu_seconds": 0.42,
+      "top": [
+        {
+          "name": "rockchip_linear_64_9216_2560",
+          "calls": 64,
+          "outer_ms": 220.1,
+          "fxn_ms": 219.8
+        },
+        {
+          "name": "rockchip_linear_64_2560_4096",
+          "calls": 96,
+          "outer_ms": 195.4,
+          "fxn_ms": 195.0
+        },
+        {
+          "name": "rockchip_scan_simd_1_32_128_128_128_1",
+          "calls": 24,
+          "outer_ms": 178.9,
+          "fxn_ms": 178.7
+        },
+        {
+          "name": "rockchip_attn_128_145",
+          "calls": 8,
+          "outer_ms": 121.0,
+          "fxn_ms": 120.9
+        },
+        {
+          "name": "E_2_16_32_32_4_4",
+          "calls": 48,
+          "outer_ms": 91.4,
+          "fxn_ms": 91.1
+        },
+        {
+          "name": "rockchip_linear_64_8192_2560",
+          "calls": 24,
+          "outer_ms": 67.1,
+          "fxn_ms": 67.0
+        },
+        {
+          "name": "E_128_16_64_4",
+          "calls": 8,
+          "outer_ms": 51.8,
+          "fxn_ms": 51.7
+        },
+        {
+          "name": "r_32_16_4_32_4",
+          "calls": 48,
+          "outer_ms": 42.5,
+          "fxn_ms": 42.3
+        },
+        {
+          "name": "E_1024_32_4_4",
+          "calls": 24,
+          "outer_ms": 41.5,
+          "fxn_ms": 41.4
+        },
+        {
+          "name": "rockchip_linear_64_4096_2560",
+          "calls": 24,
+          "outer_ms": 39.6,
+          "fxn_ms": 39.5
+        },
+        {
+          "name": "E_32_32_128_4",
+          "calls": 24,
+          "outer_ms": 38.0,
+          "fxn_ms": 37.9
+        },
+        {
+          "name": "E_393216_3",
+          "calls": 32,
+          "outer_ms": 35.2,
+          "fxn_ms": 35.1
+        },
+        {
+          "name": "E_131072_4",
+          "calls": 72,
+          "outer_ms": 29.7,
+          "fxn_ms": 29.3
+        },
+        {
+          "name": "E_32_640_4_4",
+          "calls": 64,
+          "outer_ms": 29.4,
+          "fxn_ms": 29.1
+        },
+        {
+          "name": "rockchip_linear_64_10240_2560",
+          "calls": 8,
+          "outer_ms": 27.2,
+          "fxn_ms": 27.1
+        },
+        {
+          "name": "rockchip_linear_64_32_2560",
+          "calls": 96,
+          "outer_ms": 23.7,
+          "fxn_ms": 23.3
+        }
+      ]
+    },
+    {
+      "tag": "bare",
+      "instrumented": false,
+      "wall_ms": 1508.2,
+      "cpu_programs": 0,
+      "dispatch_outer_ms": 0.0,
+      "dispatch_pack_ms": 0.0,
+      "kernel_fxn_ms": 0.0,
+      "non_program_ms": 1508.2,
+      "npu_submits": 355,
+      "npu_seconds": 0.419,
+      "top": []
+    },
+    {
+      "tag": "instrumented-b",
+      "instrumented": true,
+      "wall_ms": 3018.4,
+      "cpu_programs": 1006,
+      "dispatch_outer_ms": 2664.4,
+      "dispatch_pack_ms": 9.3,
+      "kernel_fxn_ms": 2655.2,
+      "non_program_ms": 354.0,
+      "npu_submits": 355,
+      "npu_seconds": 0.425,
+      "top": [
+        {
+          "name": "rockchip_scan_simd_1_32_128_128_128_1",
+          "calls": 24,
+          "outer_ms": 504.6,
+          "fxn_ms": 504.4
+        },
+        {
+          "name": "rockchip_linear_64_9216_2560",
+          "calls": 64,
+          "outer_ms": 297.4,
+          "fxn_ms": 296.7
+        },
+        {
+          "name": "rockchip_linear_64_2560_4096",
+          "calls": 96,
+          "outer_ms": 284.0,
+          "fxn_ms": 283.1
+        },
+        {
+          "name": "rockchip_attn_128_145",
+          "calls": 8,
+          "outer_ms": 283.0,
+          "fxn_ms": 283.0
+        },
+        {
+          "name": "E_2_16_32_32_4_4",
+          "calls": 48,
+          "outer_ms": 220.2,
+          "fxn_ms": 219.7
+        },
+        {
+          "name": "r_32_16_4_32_4",
+          "calls": 48,
+          "outer_ms": 108.1,
+          "fxn_ms": 107.7
+        },
+        {
+          "name": "E_32_32_128_4",
+          "calls": 24,
+          "outer_ms": 104.9,
+          "fxn_ms": 104.7
+        },
+        {
+          "name": "E_32_640_4_4",
+          "calls": 64,
+          "outer_ms": 103.1,
+          "fxn_ms": 102.4
+        },
+        {
+          "name": "rockchip_linear_64_8192_2560",
+          "calls": 24,
+          "outer_ms": 97.7,
+          "fxn_ms": 97.5
+        },
+        {
+          "name": "E_128_16_64_4",
+          "calls": 8,
+          "outer_ms": 81.6,
+          "fxn_ms": 81.5
+        },
+        {
+          "name": "E_1024_32_4_4",
+          "calls": 24,
+          "outer_ms": 71.4,
+          "fxn_ms": 71.1
+        },
+        {
+          "name": "E_393216_3",
+          "calls": 32,
+          "outer_ms": 64.3,
+          "fxn_ms": 64.0
+        },
+        {
+          "name": "rockchip_linear_64_4096_2560",
+          "calls": 24,
+          "outer_ms": 61.4,
+          "fxn_ms": 61.2
+        },
+        {
+          "name": "E_81920_4",
+          "calls": 32,
+          "outer_ms": 59.8,
+          "fxn_ms": 59.4
+        },
+        {
+          "name": "rockchip_linear_64_32_2560",
+          "calls": 96,
+          "outer_ms": 51.5,
+          "fxn_ms": 50.6
+        },
+        {
+          "name": "r_128_640_4",
+          "calls": 64,
+          "outer_ms": 42.9,
+          "fxn_ms": 42.3
+        }
+      ]
+    }
+  ]
+}
