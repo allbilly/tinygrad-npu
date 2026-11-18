@@ -2394,3 +2394,33 @@ the faster arithmetic could save on a 0.14 s kernel.
 against two successes (SIMD scan 4.38x, NEON qz_row 3.02x).** The pattern: a custom kernel wins only
 when the generated code is *much* further from the hardware (scalar with a long loop body), and loses
 when the generated kernel is already short-bodied or small, because the launch/buffer overhead dominates.
+
+## MEASURED reference CPU/NPU decomposition -- and we are serial where they are 4.26 cores busy
+
+`docs/rknpu/results/ref-phase2` (phase probe wrapping their own config; native trials reproduced at
+**1,200.09 / 1,198.62 ms**, median 1,200.09, decode 6.486 tok/s):
+
+| phase | idx | wall_ms | main CPU ms | total CPU ms | cores busy | off-CPU ms | D% | S% |
+| --- | --: | --: | --: | --: | --: | --: | --: | --: |
+| prefill | 3 (native) | **1,206** | **720** | 5,140 | **4.26** | 486 | 18% | 0% |
+| decode | 3 (native) | 1,090 | 180 | 4,590 | 4.21 | 910 | 36% | 0% |
+
+Wall wait channels: `rknpu_submit_ioctl` -- the blocking ioctl, consistent with 486 ms off-CPU.
+
+**The mechanism, in our own copy of their kernel** (`recurrent.c`, last function):
+
+    int cpu_gated_delta_scan_pooled(..., scan_parallel_fn parallel, int *dispatch_status) {
+      if(!parallel||batch<1||heads<1||(size_t)batch*heads<4)
+        return cpu_gated_delta_scan(...);                  /* serial fallback */
+      ... int error=parallel(scan_pool_part,args,0);       /* 4 head-groups */
+
+Our `scan_native` calls `cpu_gated_delta_scan(..., NULL)` -- **the parallel hook is NULL, so every scan
+runs on one core.** Same for the other CPU kernels: their env sets `ONPU_CPU_POOL=1`,
+`ONPU_CPU_PREFILL_POOL=1`, `cpu_prefill_pool_requested: true`, which we do not have.
+
+**So the prefill gap is parallelism, not codegen quality.** Ours: ~1,790 ms of CPU work on one core +
+~720 ms blocked = 2,614 ms. Theirs: 720 ms of main-thread CPU across 4.26 cores + 486 ms blocked =
+1,206 ms. Spreading our CPU kernels over ~4 cores projects ~450 ms + 720 ms = **~1,170 ms, i.e. 1.2 s**.
+
+This supersedes the earlier "all kernels are ~2.5x slower" conclusion, which was inferred from a
+**rescaled** archive profile rather than measured.
