@@ -2468,3 +2468,27 @@ goes through the CPU device and is serialised.
 closed for our architecture unless the CPU work stops going through the tinygrad device. Combined with
 the earlier rejections (three custom kernels, descriptor merge path, scan chunking), there is no
 remaining single lever that closes the 2.18x gap.
+
+## The scan itself parallelises only 1.21x -- in pure C, with no tinygrad
+
+Harness calling `cpu_gated_delta_scan_part(..., group, 4)` directly (no tinygrad, no device, no graph),
+B=1 H=32 T=128 K=V=128, median of 5:
+
+    serial 4 groups :    30.29 ms
+    4 threads       :    25.02 ms  -> 1.21x
+
+So **intra-kernel parallelism of the scan is worth 1.21x, not 4x** -- the kernel is memory/latency-bound,
+not core-bound. That explains all three failed parallelism attempts without appeal to tinygrad's device:
+
+| attempt | result |
+| --- | --- |
+| per-call pthreads inside one kernel call | +100 ms |
+| 4 Python threads over head-slices (through the device) | 0.24x (serialised by CPUProgram) |
+| **pure C, 4 threads, no tinygrad** | **1.21x** |
+
+**Consequence for the decomposition:** the reference's 4.26-cores-busy does NOT come from parallelising a
+single kernel -- it must come from overlapping *different* kernels (attention, scan, elementwise) across
+a pool. That is an execution-architecture property. Reproducing it means a task pool over the CPU
+kernels in the graph, not a faster or parallel kernel.
+
+Best case for intra-kernel scan parallelism: 0.61 s -> 0.50 s, ~0.11 s of the 1,413 ms gap.
