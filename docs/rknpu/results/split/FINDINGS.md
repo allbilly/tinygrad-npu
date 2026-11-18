@@ -2575,3 +2575,22 @@ Consequences:
 
 **Next target is therefore the scan's inner loop**, not the elementwise kernels, and the method that has
 worked twice (far-from-hardware scalar code, rewritten bit-identically) applies to it.
+
+## The scan's 1,313 ms splits: ~730 ms kernel, ~580 ms per-call overhead
+
+Standalone C (no tinygrad), B=1 H=32 cap=128 K=V=128, median of 5:
+
+| build / call shape | per call |
+| --- | --: |
+| `clang -O2` native, 1 x rows=128 | **30.28 ms** |
+| `-mcpu=cortex-a76` | 29.08 ms (only 4%) |
+| reference shape: 4 x rows=32 (capacity still 128) | **33.73 ms** (worse) |
+| in-model (ablation: 1,313 ms / 24 calls) | **54.7 ms** |
+
+So the reference's call shape is **not** the answer (33.73 > 30.28), and CPU tuning is not either (4%). But
+the split is informative: the kernel is ~30 ms/call = **~730 ms** total, while in-model the scan costs
+**1,313 ms**. **~580 ms (44%) is per-call overhead around the kernel** -- `state.contiguous().clone()`
+(2 MB), a fresh 2 MB output allocation, and the `custom_kernel` launch, 24 times.
+
+That is a concrete, unexplored target: buffer reuse instead of clone-and-allocate per call. It is not a
+kernel rewrite and it is worth up to ~0.5 s of the 1,413 ms gap.
