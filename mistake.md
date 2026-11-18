@@ -861,6 +861,50 @@ framed it as groundwork.
 +-4% drift, or it is churn. "Additive" is not a safety argument. At the end of a budget, the correct
 action on a hot path is to leave it at the last verified commit.
 
+### M45. Fixed the same bug twice in two files, because I never grepped for the pattern
+
+**Claim:** the m-tile merge failed inside `_FusedInt8Plan` with `IndexError`, then `ValueError:
+Unsupported Rockchip INT8 matmul geometry (64, 8192, 2560)`.
+**Reality:** `int8_task_plan_multi` passed the **full `n`** as each body's width and stride. I had already
+diagnosed and fixed exactly this in the *descriptor* path (`d167e2a5c`: "the multi branch encoded n=2560
+where the single path encodes the part width"), and did not grep for other uses of the same call shape.
+The fused qkv's n=8192 then made it illegal (`n<=4096 when m>1`).
+*Caught by:* the geometry error naming `(64, 8192, 2560)`.
+**Cost:** one patch-and-run cycle, and a repeat of a bug already in the log.
+**Cause:** treating a fix as local to the function where it was found.
+**Guard:** after fixing a systematic mistake, grep for the same call/pattern elsewhere in the tree before
+running (`grep -n "_int8_matmul_body(" | wc -l`).
+
+### M46. Patched blind and ran, four times, instead of reading the four call sites once
+
+**Claim:** each merge failure needed a fresh hypothesis and a fresh benchmark run.
+**Reality:** the four faults were all visible by *reading*: `self.key = _FusedKey(...)` did not pass
+`m_rows`; the loop's `merge` condition ignored narrow `n`; `_fused_plan` passed `m_rows` positionally;
+`int8_task_plan_multi` used full `n`. Four patch/run cycles (~4 x 5 min) versus one pass over ~40 lines.
+*Caught by:* nothing automatic -- the last bug only fell out of printing the cached plan
+(`plans: [(64, m_rows=0, tasks=6)]`), which showed `m_rows=0` while `tasks=6`.
+**Cost:** most of the wall-clock time this work took, plus four reverts.
+**Cause:** the edit-fix-placeholder loop is faster to *start* than reading, so I kept starting it.
+**Guard:** when a change touches more than two sites, print all of them first and check the argument
+lists line up, before the first run. And when a plan/key object exists, **print its fields** -- that one
+line (`plans: [(m, m_rows, tasks)]`) located the fault instantly after four guesses had failed.
+
+### M47. Nearly shipped a silent-zero configuration as a speedup
+
+**Claim:** the merge was worth -304 ms (2,703 -> 2,399 ms, trials 2399/2403/2399, 0.17% spread).
+**Reality:** with `key.m_rows` unset, the generated C quantised only 64 rows and emitted one dequant
+region, so rows 64-127 were **zero**. The tree was fast because it computed **half the output**. The real,
+verified figure is **-89 ms** (2,703 -> 2,614 ms, bitwise identical). The 0.17% trial spread made the
+wrong configuration look *more* trustworthy, not less.
+*Caught by:* running the function-boundary parity check (`merged` vs two 64-row calls) *before* recording
+the win: `rel(merged,ref) 9.630e-01` vs `rel(sep,ref) 5.448e-03`, then `merged[64,:3] == [0,0,0]`.
+**Cost:** one discarded measurement and a corrected entry.
+**Cause:** I had a plausible explanation for the gain (fixed cost recovered) and a tight trial spread, and
+both are exactly the conditions that make a wrong result convincing.
+**Guard:** for any change that alters *what* is computed -- batching, fusion, tiling -- run the bitwise
+parity check before recording the timing, and never let a tight spread substitute for it. Tight spread
+measures the machine, not the maths.
+
 ---
 
 ## The one root cause
