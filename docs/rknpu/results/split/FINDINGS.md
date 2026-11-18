@@ -2367,3 +2367,30 @@ vectorisation target at 0.14 s.
 ~1.4 s must go -- roughly a halving of *every* kernel. The reference does it with **more** programs than
 us (2,072 vs 1,031), i.e. its kernels are individually faster, not fewer. Single 0.1 s wins do not
 close 1.4 s; only broad per-kernel efficiency does.
+
+## float4 SwiGLU: bit-identical, and +52 ms in-model -- rejected
+
+`E_393216_3` (0.14 s, 32 calls) turned out to be **elementwise**, not strided: the 3-lane form is an
+unrolling artifact and each index computes `out[j] = (x/(1+exp(-x))) * y` = `silu(gate)*up`, i.e. all of
+`gated_activation` when alpha==1 and up_bias==0.
+
+So a flat float4 kernel is possible, and it was written and proven **bit-identical** to tinygrad's own
+output on uniform and NaN/inf data (`maxdiff 0`, `ALL IDENTICAL`), replacing the WHOLE expression rather
+than a sub-expression -- which was the fix for the earlier sigmoid failure (+75 ms, added a pass).
+
+Measured (`docs/rknpu/results/swiglu-3plus3`, 3+3, complete:true):
+
+| arm | trials | median | decode |
+| --- | --- | --: | --: |
+| merged baseline | 2614 / 2612 / 2614 | **2,614 ms** | 3.15 tok/s |
+| + float4 SwiGLU | 2665 / 2666 / 2670 | **2,666 ms** | 3.13 tok/s |
+
+**+52 ms (+2.0%): rejected and reverted.** So the "fuse the boundary" rule was necessary but not
+sufficient: even a like-for-like replacement of an entire fused expression with verified-identical
+arithmetic loses, because the `custom_kernel` launch + fresh output buffer costs more than the ~0.09 s
+the faster arithmetic could save on a 0.14 s kernel.
+
+**This is now the third custom-kernel rejection (sigmoid +75 ms, attention +/-0 net, SwiGLU +52 ms)
+against two successes (SIMD scan 4.38x, NEON qz_row 3.02x).** The pattern: a custom kernel wins only
+when the generated code is *much* further from the hardware (scalar with a long loop body), and loses
+when the generated kernel is already short-bodied or small, because the launch/buffer overhead dominates.
