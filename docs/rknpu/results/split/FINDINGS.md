@@ -2223,3 +2223,30 @@ another case where isolation is not representative.
 
 **Consequence:** the 0.61 s scan item has no cheap lever left. Beating it needs a better algorithm than
 the reference kernel we already ported, not a different invocation.
+
+## MEASURED: the reference's native prefill is 1,201.4 ms (not an inference)
+
+`docs/rknpu/results/ref-profile/report.json` is a reference run with **`warmups: 2`, 7 trials**. Its
+`first_token_ms` per trial:
+
+    17219.1  9236.6  26274.4  1200.4  1201.4  1201.2  1203.1
+
+After three calls the reference sits at **1200-1203 ms for four consecutive trials** -- 0.2% spread.
+So:
+
+| | value |
+| --- | --- |
+| reference native prefill median | **1,201.4 ms** |
+| min / max (native) | 1200.4 / 1203.1 ms |
+| ours (baseline-recheck, 3+3) | **2,703 ms** |
+| ratio | **2.25x slower** |
+| reference native decode | 6.52-6.55 tok/s (trials 3-7) |
+
+This **supersedes** the earlier caveat that "the ~1,210 ms like-for-like median is an inference from a
+single native trial": the target is measured, tight, and reproducible. The 1.2 s goal is therefore not
+a best-case artefact -- it is what the reference does on every native call.
+
+**Consequence for the plan:** the 1,502 ms gap must come from the items already measured --
+0.79 s NPU submits (0.55 s fixed cost), 0.61 s scan, 0.61 s attention-adjacent, 0.35 s SwiGLU, 0.35 s
+elementwise, 0.22 s bookkeeping. The m-tile merge addresses 0.28 s of it; the remaining ~1.2 s needs
+the CPU-side work that has not been started.
