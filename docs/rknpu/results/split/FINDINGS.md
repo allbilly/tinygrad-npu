@@ -1948,3 +1948,24 @@ second source's plane base must be source a's *whole* region, i.e. `n*4` bytes o
 packed as `(m, n)`; if they are `(3, m, part)` stacked, the base is `3*m*4`. That distinction has not
 been verified and is the first thing to check, by dumping the raw int32 planes for a single source and
 confirming their layout in memory before assembling the merged buffer.
+
+## Merged submit: output IS written and deterministic; parity fault is in the inputs
+
+The sentinel pre-fill is not available here: `ROCKCHIP` has no renderer, so a fill can only arrive via
+`.to(DEV)`, and copy-then-`custom_kernel` fails `UOp` verification
+(`Ops.AFTER` over `COPY`+`CALL`). Replaced with a stronger test -- run the merged submit twice in one
+process:
+
+    RUN TWICE identical: True | differing ints: 0 of 5120
+    r1[:6] [-31492, 125348, 166376, 348943, -436117, -98846]
+    PARITY A: False maxdiff 0.8058053255081177
+    PARITY B: False maxdiff 0.703873872756958
+
+**The buffer is written, deterministically.** So the "output never written / stale empty" hypothesis is
+refuted, and the fault is in what the merged tasks compute or where they read it -- not in whether the
+submit happened.
+
+**Bisection to run next (one line):** build the *same* multi descriptor with `N=1` -- a single source
+through the new multi path -- and compare against `packed_matmul_int8`. If N=1 also fails, the bug is in
+the multi branch's own addressing (`lhs_off`/`rhs_off` handling in `prepare`); if N=1 passes, the bug is
+specific to the second source's `out_offset` or to which `(lhs, rhs)` pair the second task group binds.
