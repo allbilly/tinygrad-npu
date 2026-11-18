@@ -2070,3 +2070,28 @@ plus model wiring and a fallback -- roughly 60-80 lines -- before any A/B is pos
 
 **Status: correct and unused.** No integration has been written, so no A/B exists and `qz_row` has not
 been shown to fall from 0.790 s.
+
+## Integration finding: the model's Linears are on the OTHER submit path
+
+The verified multi-source descriptor lives in `RockchipMatmul` (the descriptor path that
+`packed_matmul_int8` uses). The model does not use that path -- its Linears are `NPULinear`, which
+submits through `_FusedInt8Plan`: one generated C function per geometry that quantises the activation,
+issues both ioctls itself, and dequantises in the same call.
+
+So an `NPULinearPair` cannot simply reuse `int8_task_plan_multi`'s verified plan; it needs the fused-C
+analogue:
+
+1. a `_fused_source_pair(key_a, key_b)` that quantises **the shared activation once** (the reason the
+   gate+up pair also saves ~9 ms) and emits one submit carrying both sources' task groups;
+2. `int8_task_plan_multi` supplies the chain (already proven: 6 tasks, `core_mask 0x7`,
+   `per_core=2`, bitwise column parity `maxdiff 0.0`);
+3. two dequant stages writing `gate` and `up` planes, `out_off` of the second at `n*4`;
+4. model wiring in `FFNBlock.__call__` behind `hasattr(self,'ffn_gateup_pair')` with the existing
+   `gated_activation` untouched, plus the `replace_linears`/`prepare_linears` post-pass that builds the
+   pair from two already-wrapped `NPULinear`s.
+
+That is the remaining work: roughly 100 lines of generated C plus Python wiring, and then adjacent 3+3
+arms to resolve a ~60 ms (2.2%) effect against the board's +-4% run-to-run drift.
+
+**Not written.** The lever is correct and unused; the reason it is still unused is this path
+mismatch, not the descriptor.
