@@ -271,6 +271,12 @@ class RockchipMatmul:
     self.split_k = bool(struct.unpack('<I',obj.lib[24:28])[0]) if len(obj.lib)>=28 else False
     self.int8 = bool(struct.unpack('<I',obj.lib[28:32])[0]) if len(obj.lib)>=32 else False
     self.itemsize = 1 if self.int8 else 2
+    # Multi-source descriptor: `<8I` header then N x `<5I` = (n, k, lhs_offset, rhs_offset, out_offset).
+    # Absent for every program emitted today, so the single-source path below is unchanged.
+    self.sources: tuple[tuple[int, int, int, int, int], ...] = ()
+    if len(obj.lib) > 32:
+      count = (len(obj.lib) - 32) // 20
+      self.sources = tuple(struct.unpack('<5I', obj.lib[32+20*i:52+20*i]) for i in range(count))
     self.parts:tuple[tuple[int,int],...]
     if self.split_k:
       if self.cores!=3 or self.k%96: raise ValueError('Invalid Rockchip K split')
@@ -289,7 +295,26 @@ class RockchipMatmul:
 
   def update_inputs(self, lhs:RockchipBuffer, rhs:RockchipBuffer): pass
 
-  def prepare(self, out:RockchipBuffer, lhs:RockchipBuffer, rhs:RockchipBuffer):
+  def prepare(self, out:RockchipBuffer, *ins:RockchipBuffer):
+    if self.sources:
+      # One submit carrying one matmul per source: each body already embeds its own lhs/rhs/dst, so
+      # only the bodies differ from the single-source case. `_encode_task_chain` needs no change.
+      for buf in (out,)+tuple(ins): self.dev.check_domain(buf, out, ins[0])
+      self.close()
+      self.bufs = (out,)+tuple(ins)
+      bodies = []
+      for i, (n_i, k_i, lhs_off, rhs_off, out_off) in enumerate(self.sources):
+        lhs_b, rhs_b = ins[2*i], ins[2*i+1]
+        bodies.extend(_int8_matmul_body(self.m, n_i, k_i, lhs_b.dma+lhs_off,
+                      rhs_b.dma+rhs_off+offset*k_i*self.itemsize,
+                      out.dma+out_off+offset*self.m*4, n_i)
+                      for offset, _ in _matmul_parts(self.m, n_i, k_i, self.cores, True))
+      self.tasks = len(bodies)
+      self.cmd, self.task, self.tasks, self.core_mask, self.subcores = _encode_task_chain(
+        self.dev, tuple(bodies), 1 if self.tasks == 1 else 3)
+      self.owned.extend((self.cmd, self.task))
+      return
+    lhs, rhs = ins
     self.dev.check_domain(out,lhs,rhs)
     if (out.size<self.m*self.n*4*(3 if self.split_k else 1) or lhs.size<self.lhs_offset+self.m*self.k*self.itemsize
         or rhs.size<self.rhs_offset+self.n*self.k*self.itemsize):
@@ -317,10 +342,11 @@ class RockchipMatmul:
     self.owned.append(self.task)
 
   def __call__(self, *args:RockchipBuffer, global_size=(1,1,1), local_size=(1,1,1), wait=False, timeout=None):
-    out,lhs,rhs = args
+    out, *ins = args
+    lhs, rhs = (ins[0], ins[1]) if self.sources else (ins[0], ins[1])
     with self.dev.lock:
       self.dev.check_healthy()
-      if (out,lhs,rhs) != self.bufs: self.prepare(out,lhs,rhs)
+      if (out,)+tuple(ins) != self.bufs: self.prepare(out, *ins)
       check = _finite_program()
       self.update_inputs(lhs,rhs)
       version = rhs.meta.obj_addr,rhs.meta.version

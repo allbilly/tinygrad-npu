@@ -1922,3 +1922,29 @@ Assert `merged[:, :n] == separate_a` and `merged[:, n:] == separate_b` bitwise a
 submit cannot be injected outside this descriptor path; the change has to be made here, in four places,
 and then dispatched once -- which is the step that can reboot the board and needs an untruncated
 session.
+
+## The merged submit now DISPATCHES (parity still wrong)
+
+The four-site multi-source descriptor is applied in `ops_rockchip.py` (additive: the branch is inert
+unless a descriptor longer than 32 bytes is present), and the single-source path is unaffected --
+`smoke_int8.py` is still 7/7 exact after the patch.
+
+First successful dispatch of a merged chain, `m=1, n=2560, k=2048`, two Linears with different
+activations, one 6-task 3-core submit writing to one (m, 2n) int32 plane buffer:
+
+    refs computed 0.20156772434711456 -0.3938932716846466
+    PARITY A: False  maxdiff 0.8058053255081177
+    PARITY B: False  maxdiff 0.703873872756958
+
+**No AssertionError, no timeout, no reboot** -- the mechanism works and the board accepted a 6-task
+chain with `per_core=2` chaining, which had never executed before. What is wrong is a layout detail,
+and `maxdiff ~0.8` on values of order ~0.4 says the planes are being read from the wrong offsets
+rather than the arithmetic being wrong.
+
+Most likely cause, for the next attempt: the plane regions of the two sources. For one source, the
+three cores write `(m, part)` planes at byte offset `offset*m*4` inside an `m*n` int32 buffer, and
+`_dequantize(..., parts, column_offset)` scatters them. For two sources sharing a `(m, 2n)` buffer the
+second source's plane base must be source a's *whole* region, i.e. `n*4` bytes only if a's planes are
+packed as `(m, n)`; if they are `(3, m, part)` stacked, the base is `3*m*4`. That distinction has not
+been verified and is the first thing to check, by dumping the raw int32 planes for a single source and
+confirming their layout in memory before assembling the merged buffer.
