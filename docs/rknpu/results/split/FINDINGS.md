@@ -2424,3 +2424,24 @@ runs on one core.** Same for the other CPU kernels: their env sets `ONPU_CPU_POO
 
 This supersedes the earlier "all kernels are ~2.5x slower" conclusion, which was inferred from a
 **rescaled** archive profile rather than measured.
+
+## Parallel scan via pthreads: correct, and +100 ms -- rejected
+
+Implemented `cpu_gated_delta_scan_pooled` with a real `scan_parallel_fn` (pthread_create/join, 4 head
+groups) -- the hook our wrapper was passing NULL for. It compiles (pthread declared extern, since the
+`-nostdlib` build cannot see system headers) and stays exact (`4.209e-07` vs fp64, unchanged).
+
+Measured (`docs/rknpu/results/parscan-3plus3`, 3+3, complete:true):
+
+| arm | trials | median | decode |
+| --- | --- | --: | --: |
+| serial (baseline) | 2614 / 2612 / 2614 | **2,614 ms** | 3.15 tok/s |
+| parallel scan | 2714 / 2724 / 2701 | **2,714 ms** | 2.93 tok/s |
+
+**+100 ms (+3.8%): rejected and reverted.** Creating 4 threads per kernel call (24+ calls per prefill)
+costs more than the head-level parallelism saves on a 25 ms call.
+
+**What this does NOT refute:** the reference's 4.26-cores-busy figure. It uses a *persistent* CPU pool
+(`ONPU_CPU_POOL=1`, `ONPU_CPU_PREFILL_POOL=1`, `wake_helper`, `host_event_wait`) whose workers are created
+once and woken per task, not four `pthread_create` per call. So the parallelism lead stands, but
+realising it needs a pool, not per-call threads.
