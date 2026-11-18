@@ -2179,3 +2179,25 @@ column.
 Open trade-off: the fused C exists because the descriptor path costs ~1.55 ms of host time over six
 launches per Linear versus one call. The merge removes ~half the submits but may add host overhead; the
 net needs a 3+3 A/B of one block paired Linears through both paths.
+
+## The descriptor route for the merge is REFUTED by measurement
+
+Isolated timing, same path both arms, median of 20:
+
+    m=64 k=2560: two packed_matmul_int8 132.003 ms | one packed_matmul_int8_multi 135.660 ms | +3.657 ms (+2.8%)
+    m=1  k=2560: two packed_matmul_int8 138.318 ms | one packed_matmul_int8_multi 132.351 ms | -5.967 ms (-4.3%)
+
+Two conclusions, the first decisive:
+
+1. The descriptor path costs ~66 ms per Linear in isolation against ~1.3 ms for the fused path in-model
+   (0.79 s / 603 submits) -- a ~50x gap. That is precisely why _FusedInt8Plan exists (one CALL instead
+   of six tinygrad launches). So packed_matmul_int8_multi is bitwise correct but CANNOT be wired into
+   the model: it would be a large regression.
+2. The +2.8% / -4.3% split is not trustworthy: both arms are dominated by the .numpy() sync in the
+   isolated loop, which the model never pays per op. This is the same isolation error made twice before
+   in this session (attention 252 ms/block; vectorised sigmoid +1.57x isolated -> +75 ms in-model).
+
+Therefore the m-tile merge must be implemented in the fused C after all -- m_rows (quantise extent 128)
+separate from per-task m=64, one sync, one 6-task submit via int8_task_plan_multi, one output sync,
+two dequant row ranges. packed_matmul_int8_multi stays as a correctness reference for the chain, not as
+a shipping path.
