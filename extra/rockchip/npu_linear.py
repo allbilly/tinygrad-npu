@@ -19,7 +19,7 @@ from tinygrad import Device, Tensor, dtypes, nn
 from tinygrad.helpers import Context, Target, round_up
 from tinygrad.renderer.cstyle import ClangRenderer
 from tinygrad.runtime.autogen import rockchip as rk
-from tinygrad.runtime.ops_rockchip import _int8_padded_depth, _matmul_parts, int8_task_plan
+from tinygrad.runtime.ops_rockchip import _int8_padded_depth, _matmul_parts, int8_task_plan, int8_task_plan_multi
 from tinygrad.uop.ops import KernelInfo, Ops, ProgramInfo, UOp
 
 TILE = 24576  # max packed columns per weight tile
@@ -334,6 +334,7 @@ class _FusedKey:
     core_mask: int
     subcores: tuple[int, ...]
     tasks: int
+    m_rows: int = 0
 
 
 # Vectorised INT8 row quantisation for the fused Linear. The scalar loop it replaces measured
@@ -425,18 +426,20 @@ def _fused_source(key: _FusedKey) -> str:
     syncs need.
     """
     quantize = f"""
-  for (int row = 0; row < {key.m}; row++) {{
+  for (int row = 0; row < {key.m_rows or key.m}; row++) {{
     const float *xr = x + (long)({key.row_offset}+row)*{key.row_stride} + {key.k_offset};
     signed char *o = codes + (long)row*{key.k};
     qz_row(xr, {key.depth_in}, {key.k}, o, scales + row);
   }}"""
+    regions = 2 if key.m_rows else 1
     planes = "".join(f"""
+  for (int g = 0; g < {regions}; g++) {{
   for (int row = 0; row < {key.m}; row++) {{
-    const int *src = raw + {offset * key.m} + (long)row*{width};
-    float *dst = out + (long)row*{key.n} + {offset};
-    float a = scales[row];
+    const int *src = raw + g*{key.m * key.n} + {offset * key.m} + (long)row*{width};
+    float *dst = out + (long)(g*{key.m}+row)*{key.n} + {offset};
+    float a = scales[g*{key.m}+row];
     for (int j = 0; j < {width}; j++) dst[j] = (float)src[j] * a * w_scale[{key.column_offset + offset} + j];
-  }}""" for offset, width in key.parts)
+  }}}}""" for offset, width in key.parts)
     subcores = ",".join(str(value) for value in key.subcores)
     return f"""#pragma clang fp contract(off)
 {_QZ_HELPER}
@@ -513,20 +516,29 @@ class _FusedInt8Plan:
     """
 
     def __init__(self, dev, m: int, n: int, k: int, depth_in: int, cores: int, column_offset: int,
-                 row_stride: int, row_offset: int, k_offset: int, weight_dma: int, w_scale_addr: int):
+                 row_stride: int, row_offset: int, k_offset: int, weight_dma: int, w_scale_addr: int, m_rows: int = 0):
         self.status = ctypes.c_int(0)
-        self.shape = (m, n)
-        header = round_up(m * 4, 64)
-        self.payload = _payload_buffer(dev, m, k)
-        self.out = _plane_buffer(dev, m, n)
-        cmd, task, tasks, core_mask, subcores, parts = int8_task_plan(
-            dev, m, n, k, cores, self.out.dma, self.payload.dma + header, weight_dma + column_offset * k)
+        rows_total = m_rows or m
+        self.shape = (rows_total, n)
+        header = round_up(rows_total * 4, 64)
+        self.payload = _payload_buffer(dev, rows_total, k)
+        self.out = _plane_buffer(dev, rows_total, n)
+        if m_rows and m_rows == 2 * m:
+          cmd, task, tasks, core_mask, subcores, parts = int8_task_plan_multi(dev, (
+              (m, n, k, self.payload.dma + header, weight_dma + column_offset * k, self.out.dma),
+              (m, n, k, self.payload.dma + header + m * row_stride,
+                          weight_dma + column_offset * k, self.out.dma + m * n * 4)))
+          parts = parts[0]
+        else:
+          cmd, task, tasks, core_mask, subcores, parts = int8_task_plan(
+              dev, m, n, k, cores, self.out.dma, self.payload.dma + header, weight_dma + column_offset * k)
         self.owned = (cmd, task)
         self.key = _FusedKey(
             m=m, n=n, k=k, depth_in=depth_in, header=header, row_stride=row_stride, row_offset=row_offset,
             k_offset=k_offset, column_offset=column_offset, parts=parts,
             payload_size=self.payload.size, out_size=self.out.size, domain=dev.domain,
-            core_mask=core_mask, subcores=tuple(value for pair in subcores for value in pair), tasks=tasks)
+            core_mask=core_mask, subcores=tuple(value for pair in subcores for value in pair), tasks=tasks,
+            m_rows=m_rows)
         self.program = _fused_program(self.key)
         # payload, planes, w_scale, status, task array, payload obj_addr, planes obj_addr, fd,
         # device counter block. A raw BUFFER, not Tensor.empty().realize(): the model's forward
@@ -601,14 +613,19 @@ def _fused_plan(dev, m: int, n: int, k: int, depth_in: int, cores: int, column_o
                 row_stride: int, row_offset: int, k_offset: int, weight: Tensor, w_scale: Tensor) -> _FusedInt8Plan:
     weight_dma = weight.uop.buffer._buf.dma
     w_scale_addr = w_scale.uop.buffer._buf
+    # Merge only when the tile really splits 3 ways: _matmul_parts collapses to a single part for
+    # narrow n (e.g. ssm_beta, n=num_v_heads=32), and the two-source chain needs 3 parts per source.
+    m_task, m_rows = ((64, m) if (m == 128 and k > 2048
+                                 and len(_matmul_parts(64, n, k, 3, True)) == 3) else (m, 0))
     key = (id(dev), m, n, k, depth_in, cores, column_offset, row_stride, row_offset, k_offset,
            weight_dma, w_scale_addr)
     if (plan := _FUSED_PLANS.get(key)) is None:
         # Building a plan allocates, so it needs the device; the first call happens inside the
         # model's @function capture, which forbids that. Once per shape, then cached.
         with Context(ALLOW_DEVICE_USAGE=1):
-            _FUSED_PLANS[key] = plan = _FusedInt8Plan(dev, m, n, k, depth_in, cores, column_offset,
-                                                      row_stride, row_offset, k_offset, weight_dma, w_scale_addr)
+            _FUSED_PLANS[key] = plan = _FusedInt8Plan(dev, m_task, n, k, depth_in, cores, column_offset,
+                                                      row_stride, row_offset, k_offset, weight_dma, w_scale_addr,
+                                                      m_rows=m_rows)
     return plan
 
 
@@ -729,8 +746,13 @@ class NPULinear:
         # of 2, which is why our prefill NPU time exceeds the reference's whole run.
         row_tile = (128 if k_max <= 2048 else 64) if self.int8 else max(1, min(64, 65536 // k_max))
         out_rows = []
-        for r0 in range(0, rows, row_tile):
-            part = dense[r0:r0 + row_tile]
+        # Only merge when the tile splits 3 ways: narrow n (e.g. ssm_beta, n=32) yields a single
+        # part, and a 128-row task is illegal at k>2048 anyway.
+        merge = (2 * row_tile if (self.int8 and rows == 2 * row_tile
+                                  and len(_matmul_parts(row_tile, self.columns, k_max, 3, True)) == 3) else 0)
+        step = merge or row_tile
+        for r0 in range(0, rows, step):
+            part = dense[r0:r0 + step]
             width = 24576 if part.shape[0] == 1 else 12288
             pieces = []
             for c0 in range(0, self.columns, TILE):

@@ -2309,3 +2309,38 @@ So program count is not the discriminator, and neither is prefill submit count (
 **So the submit-coalescing machinery belongs in decode, not prefill.** `int8_task_plan_multi` -- already
 verified (bitwise `maxdiff 0.0`, N=1 byte-identical, `per_core=2` chaining) -- is worth ~0.28 s in prefill
 but roughly a **doubling of decode throughput**, which is the bigger prize and the same mechanism.
+
+## m-tile merge LANDED: 603 -> 355 submits, 2,703 -> 2,614 ms, bitwise identical
+
+Four bugs had to be fixed in sequence, each found by a different failure:
+
+1. `_fused_plan` mapped `m==128` at `k>2048` to `m_task=64, m_rows=128`, but `m_rows` was **not passed
+   to `_FusedKey`**, so the generated C quantised only 64 rows and emitted one dequant region -> rows
+   64-127 came out **zero** (`rel(merged,ref) 9.6e-01` vs `rel(sep,ref) 5.4e-03`).
+2. `int8_task_plan_multi` passed the **full n** as the body width/stride instead of each part's width,
+   which made the fused qkv (n=8192) illegal: `n<=4096 when m>1`.
+3. The merge must be limited to shapes whose `_matmul_parts` really returns 3 parts: narrow `n`
+   (e.g. `ssm_beta`, n=32) collapses to one part and indexed out of range.
+4. `m_rows` had to be passed by keyword to `_FusedInt8Plan`, or the positional order silently dropped it.
+
+Verified:
+
+    plans: [(64, m_rows=128, tasks=6), (64, 0, 3)]
+    rel(merged,ref) 5.448e-03  |  rel(sep,ref) 5.448e-03
+    BITWISE merged == sep: True
+
+Measured (`docs/rknpu/results/merge-correct-3plus3/`, 3+3, complete:true):
+
+| | baseline | merged |
+| --- | --: | --: |
+| submits | 603 | **355** |
+| trials | 2703 / 2701 / 2710 | **2614 / 2612 / 2614** |
+| median | 2,703 ms | **2,614 ms** |
+| decode | 3.16 tok/s | 3.15 tok/s |
+
+**-89 ms (-3.3%)**, bitwise identical. Note the 2,399 ms seen mid-debug was with the zero-row bug and is
+**discarded** -- it was faster and wrong.
+
+The projected -0.28 s assumed the full 0.920 ms fixed cost would be recovered per merged submit; the
+measured recovery is ~0.36 ms (89 ms / 248 fewer submits), because a merged submit still performs both
+tiles' work and carries both planes through one sync.

@@ -225,8 +225,10 @@ def int8_task_plan_multi(dev:'RockchipDevice', sources:tuple[tuple[int,int,int,i
   part_tables: list[tuple[tuple[int, int], ...]] = []
   for m, n, k, lhs_dma, rhs_dma, out_dma in sources:
     parts = _matmul_parts(m, n, k, 3, int8=True)
-    per_source.append([_int8_matmul_body(m, n, k, lhs_dma, rhs_dma + offset*k,
-                                         out_dma + offset*m*4, n) for offset, _ in parts])
+    # The body takes this PART's width for both `n` and `stride` (the validator requires stride==n).
+    # Passing the full n made the fused qkv (n=8192) illegal: n<=4096 when m>1.
+    per_source.append([_int8_matmul_body(m, w, k, lhs_dma, rhs_dma + offset*k,
+                                         out_dma + offset*m*4, w) for offset, w in parts])
     part_tables.append(parts)
   # `_encode_task_chain` links task i -> i+1 while (i+1) % per_core, so bodies must be grouped BY CORE:
   # core 0's tasks for every source, then core 1's, ... Appending per source instead would chain two
