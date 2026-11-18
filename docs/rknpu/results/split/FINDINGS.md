@@ -2344,3 +2344,26 @@ Measured (`docs/rknpu/results/merge-correct-3plus3/`, 3+3, complete:true):
 The projected -0.28 s assumed the full 0.920 ms fixed cost would be recovered per merged submit; the
 measured recovery is ~0.36 ms (89 ms / 248 fewer submits), because a merged submit still performs both
 tiles' work and carries both planes through one sync.
+
+## Post-merge profile (2,614 ms tree) and how far it still is
+
+`docs/rknpu/results/prof-merged`: prefill row loop 2.89 s, kernel 2.51 s, bookkeeping 0.38 s, 1,031 programs.
+
+| kernel | calls | time | note |
+| --- | --: | --: | --- |
+| `qz_row` (NPU) | 355 | **0.720 s** | 2.03 ms/submit -- merged submits carry more work |
+| `cpu_gated_delta_scan` | 24 | **0.610 s** | the reference's own SIMD kernel |
+| `E_2_16_32_32_4_4` (SwiGLU) | 48 | 0.360 s | already 4-wide |
+| `E_1024_32_4_4` | 24 | 0.180 s | already 4-wide (9 float4 loads, 16 div/exp) |
+| `E_32_32_128_4` | 24 | 0.160 s | |
+| `r_32_16_4_32_4` | 48 | 0.160 s | already 4-wide |
+| **`E_393216_3`** | 32 | **0.140 s** | **SCALAR: flat 393,216-loop, 0 float4 loads, ~90 M elem/s** |
+| `exp2_scalar` | 8 | 0.120 s | our attention kernel |
+
+`E_393216_3` is three sigmoids over `H*T*32` per GDN block (32 calls), the clearest remaining
+vectorisation target at 0.14 s.
+
+**But the arithmetic has to be faced:** the kernel set sums to **2.51 s** and the target is 1.20 s, so
+~1.4 s must go -- roughly a halving of *every* kernel. The reference does it with **more** programs than
+us (2,072 vs 1,031), i.e. its kernels are individually faster, not fewer. Single 0.1 s wins do not
+close 1.4 s; only broad per-kernel efficiency does.
