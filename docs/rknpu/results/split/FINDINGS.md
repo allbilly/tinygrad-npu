@@ -2095,3 +2095,31 @@ arms to resolve a ~60 ms (2.2%) effect against the board's +-4% run-to-run drift
 
 **Not written.** The lever is correct and unused; the reason it is still unused is this path
 mismatch, not the descriptor.
+
+## The best merge is not gate+up -- it is the two m-tiles of every Linear
+
+The ~60 ms gate+up projection was based on pairing two *different* Linears. That is the wrong pair.
+
+At `m=128`, `row_tile = (128 if k_max <= 2048 else 64)` splits **every** Linear into two submits --
+rows 0..63 and rows 64..127 of the *same* activation. Those two halves are already:
+
+- reading the same tensor (different `row_offset`), so nothing new is live;
+- writing disjoint output rows, so `out_dma` differs only by `64*n`;
+- sharing one weight tile -- so no packing change, no reordering of the graph, no new pairing rules.
+
+Merging them as two sources of one submit is the same mechanism that already reaches bitwise parity for
+two different activations, and it halves the submit count **globally**:
+
+| configuration | submits | at 0.920 ms fixed cost |
+| --- | --: | --: |
+| today (2 per Linear) | 603 | 0.79 s |
+| both m-tiles in one submit | **~302** | -0.28 s |
+
+That is the 0.28 s that the cross-activation merge was supposed to buy, obtained without reordering any
+block and without a new module pairing rule -- just `out_off = 64*n` and `lhs_off = 64*row_stride` on the
+second source, inside the existing fused-C plan.
+
+It also explains why the fused-C pair plan is still required: the model's `NPULinear` submits through
+`_FusedInt8Plan`, so this is a change to the generated C (one sync, one submit with 6 tasks, one output
+sync, two dequant row ranges) plus `int8_task_plan_multi` for the chain -- the same ~100-line shape as the
+gate+up pair but with a ~5x larger prize.
