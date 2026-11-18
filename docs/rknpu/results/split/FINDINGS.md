@@ -2594,3 +2594,24 @@ the split is informative: the kernel is ~30 ms/call = **~730 ms** total, while i
 
 That is a concrete, unexplored target: buffer reuse instead of clone-and-allocate per call. It is not a
 kernel rewrite and it is worth up to ~0.5 s of the 1,413 ms gap.
+
+## Scan buffer reuse: 2,614 -> 2,532 ms (-82 ms, -3.1%)
+
+Two changes in `scan_native.gated_delta_scan_simd`, both bit-identical (`4.209e-07` vs fp64):
+
+1. **No `state.clone()`.** The kernel writes the state in place and the model stores the result straight
+   back into the same recurrent-state buffer (`model.py:830-832`), so the private copy was pure overhead.
+2. **Pooled output buffer** per `(batch, heads, tokens, value_dim)` instead of allocating 2 MB per call.
+
+| arm | trials | median | decode |
+| --- | --- | --: | --: |
+| baseline | 2614 / 2612 / 2614 | **2,614 ms** | 3.15 tok/s |
+| buffer reuse | **2529 / 2532 / 2535** | **2,532 ms** | 3.22 tok/s |
+
+-82 ms (-3.1%). Cumulative this session: 2,703 -> 2,532 ms (-171 ms, -6.3%), both changes bit-identical.
+
+Note the attribution: the ablation said ~580 ms of per-call overhead, but removing the clone and pooling
+the buffer recovered only 82 ms. The remaining ~500 ms is NOT clone/allocation -- that hypothesis is
+partly refuted. The scan still costs ~1,231 ms in-model against ~730 ms for the same C standalone, and the
+gap must lie in the generated build (flags/target) or in the `.contiguous()` copies of q/k/v (which are
+transposed, hence non-contiguous, 2 MB each per call).

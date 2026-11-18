@@ -89,6 +89,7 @@ void rockchip_cpu_gated_delta_scan(void *args) {{
                   UOp(Ops.BINARY, arg=renderer.compiler.compile_cached(source))))
 
 
+_OUT_POOL: dict = {}
 _PROGRAMS: dict[tuple[int, int, int, int, int, int], UOp] = {}
 
 
@@ -111,8 +112,14 @@ def gated_delta_scan_simd(q: Tensor, k: Tensor, v: Tensor, beta: Tensor, alpha: 
   alpha_dim = 1 if alpha.ndim == 3 else alpha.shape[-1]
   if not supported(batch, heads, tokens, value_dim, key_dim, alpha_dim):
     raise ValueError(f"unsupported scan geometry {(batch, heads, tokens, value_dim, key_dim, alpha_dim)}")
-  st = state.contiguous().clone()
-  out = Tensor.empty(batch * heads * tokens * value_dim, device="CPU", dtype=dtypes.float)
+  # No clone: the kernel writes the state in place, and the model stores the result straight back into
+  # the same recurrent-state buffer, so a private copy is pure overhead (2 MB per call, 24 calls).
+  st = state.contiguous()
+  # Reuse the output buffer per shape instead of allocating 2 MB on every call.
+  _key = (batch, heads, tokens, value_dim)
+  out = _OUT_POOL.get(_key)
+  if out is None:
+    out = _OUT_POOL[_key] = Tensor.empty(batch * heads * tokens * value_dim, device="CPU", dtype=dtypes.float)
   res = out.custom_kernel(q.contiguous().reshape(-1), k.contiguous().reshape(-1),
                           v.contiguous().reshape(-1), beta.contiguous().reshape(-1),
                           alpha.contiguous().reshape(-1), st.reshape(-1),
