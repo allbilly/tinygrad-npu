@@ -2445,3 +2445,26 @@ costs more than the head-level parallelism saves on a 25 ms call.
 (`ONPU_CPU_POOL=1`, `ONPU_CPU_PREFILL_POOL=1`, `wake_helper`, `host_event_wait`) whose workers are created
 once and woken per task, not four `pthread_create` per call. So the parallelism lead stands, but
 realising it needs a pool, not per-call threads.
+
+## Parallelism is refuted for this architecture: the CPU device serialises kernels
+
+Two independent measurements:
+
+1. **Python threads over head-slices** (ctypes releases the GIL, so the C call itself can overlap):
+
+       serial 1 call      :   39.03 ms
+       4 threads, 4 slices:  159.98 ms   -> 0.24x
+
+   Exactly 4x slower -- **zero overlap**. tinygrad's CPU device serialises kernel execution, so
+   splitting the scan across head groups just queues four calls.
+2. **C-level pthreads inside one kernel call** (`cpu_gated_delta_scan_pooled` with a real
+   `scan_parallel_fn`): correct (`4.209e-07` vs fp64) and **+100 ms** in-model.
+
+So the reference's 4.26-cores-busy figure cannot be reproduced by parallelising kernels this way: its
+workers run outside tinygrad's device (their own pool dispatching C work), whereas every kernel we launch
+goes through the CPU device and is serialised.
+
+**Consequence:** the parallelism lead -- the one mechanism the measured decomposition pointed at -- is
+closed for our architecture unless the CPU work stops going through the tinygrad device. Combined with
+the earlier rejections (three custom kernels, descriptor merge path, scan chunking), there is no
+remaining single lever that closes the 2.18x gap.
