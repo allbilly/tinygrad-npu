@@ -1811,3 +1811,79 @@ alone: prefill would land near **2.29 s**, ~1.11x from RKLLM's 2,069 ms.
 Caveat: tiling K at 2048 costs an extra K tile for the `k=2560` linears (2048+512), so the two effects
 partly cancel -- the ~150 figure assumes the merge is applied on top, and must be measured, not
 inferred.
+
+## The merged-submit address recipe (read off `_FusedInt8Plan`, not guessed)
+
+`npu_linear.py:519` builds the single-Linear plan as:
+
+    header = round_up(m * 4, 64)
+    int8_task_plan(dev, m, n, k, cores, self.out.dma, self.payload.dma + header, weight_dma + column_offset*k)
+
+so `lhs_dma` is the payload **past its fp32 scale header**, `rhs_dma` already includes the column
+offset, and `out_dma` is the int32 plane buffer. The merged form follows directly:
+
+    int8_task_plan_multi(dev, (
+        (m, n, k, payload_a.dma + header, weight_a.dma, out.dma),
+        (m, n, k, payload_b.dma + header, weight_b.dma, out.dma + n*4)))
+
+with one `(m, 2n)` plane buffer, two input `sync_mem` calls (payload_a, payload_b), one submit and one
+output `sync_mem`.
+
+What remains before dispatch, and nothing else:
+1. a submit-only C function (the ~25-line sync/submit/sync body of `_fused_source`, without the
+   quantize and dequant stages), since activations are pre-quantised via `int8_payload` and weights via
+   `pack_weight_int8`;
+2. dequantise the int32 planes as `out * a_scale[m] * w_scale[n]` in numpy;
+3. assert `merged[:, :n] == separate_a` and `merged[:, n:] == separate_b` bitwise;
+4. A/B against 2,711 ms and re-profile for `qz_row` 0.790 s -> ~0.5 s.
+
+Steps 1-2 were NOT written: the first dispatch of a 6-task heterogeneous chain is the operation that has
+already wedged this board, and there was no remaining budget to debug a failed submit or a parity
+mismatch. The tree is clean at 47217d41f, so this can be attempted without risk to the session's work.
+
+## Bug caught before dispatch: `int8_task_plan_multi` had the bodies in the wrong order
+
+`_encode_task_chain` links `next_task = i+1 if (i+1)%per_core else None`, so with `per_core = tasks/3`
+the chain runs task i -> i+1. That means bodies must be grouped **by core**, not by source.
+
+The first version appended per source -- `[A0,A1,A2,B0,B1,B2]` -- which under `per_core=2` chains
+`A0 -> A1`: two *column ranges of the same core*, i.e. a completely different task sequence from the
+intended "core 0 runs Linear A then Linear B". The subcores table looks identical either way
+(`((0,0),(0,0),(0,2),(2,2),(4,2))`), because it depends on the core count and mask rather than on body
+order, so this would not have been visible in the plan listing -- it would have produced wrong output
+at best, or a bad register sequence at worst.
+
+Fixed by building `per_source[core]` and interleaving:
+
+    bodies = [per_source[src][core] for core in range(3) for src in range(len(per_source))]
+
+giving `[A0,B0,A1,B1,A2,B2]`: core 0 chains A0 -> B0, core 1 A1 -> B1, core 2 A2 -> B2. Plan still
+verifies at 6 tasks / `core_mask=0x7` / `per_core=2`.
+
+**Note for whoever dispatches:** `per_core=2` has never executed in this tree before. Every existing
+path uses `tasks==cores` (`per_core=1`), so `per_core = 1` makes `next_task` always `None` -- the
+chaining tail in `_encode_task_chain` is *dead code* today. The merged submit is the first thing to
+exercise it, which is a second, independent reason to dispatch it carefully.
+
+## `per_core=2` chaining verified by decoding the command buffer (no dispatch)
+
+The merged chain was built at the safest first geometry -- `m=1, n=2560, k=2048` (smoke-exact, and
+`banks` is far from its floor at groups=4) -- and the command buffer decoded rather than submitted:
+
+    tasks 6  per_core 2  core_mask 0x7
+    PC_BASE_ADDRESS writes: 3
+    chain targets (register holds addr>>4): 0x5f7380, 0x5f7a80, 0x5f8180
+    expected body starts: 0xff5f7000 0xff5f7380 0xff5f7700 0xff5f7a80 0xff5f7e00 0xff5f8180
+
+The three chain writes land on bodies **1, 3 and 5**, i.e. `A0->B0`, `A1->B1`, `A2->B2`, and only three
+of the six tasks carry a link (the other three terminate). That is exactly the intended per-core
+layout, and it is the **first time `per_core = 2` chaining has been exercised at all** -- every existing
+path has `tasks == cores`, which makes `next_task` always `None`, so the chaining tail of
+`_encode_task_chain` was dead code until now.
+
+So before any dispatch: the body ordering is right (fixed in d167e2a5c), and the chaining that the
+ordering depends on is encoded correctly. Those were the two things that could go silently wrong and
+produce wrong output rather than an error.
+
+**Still not dispatched.** The submit-only C program, the two input syncs, the `out*a_scale*w_scale`
+dequant, and the column-for-column parity assertion are unwritten.
