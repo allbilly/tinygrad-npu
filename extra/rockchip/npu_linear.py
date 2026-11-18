@@ -612,6 +612,48 @@ def _fused_plan(dev, m: int, n: int, k: int, depth_in: int, cores: int, column_o
     return plan
 
 
+def _matmul_int8_multi(out, la, ra, lb, rb, m: int, n: int, k: int, cores: int):
+    """Descriptor for one submit carrying two INT8 matmuls that read different activations.
+
+    Same `<8I` header as `_matmul_int8`, then one `<5I` per source = (n, k, lhs_offset, rhs_offset,
+    out_offset). RockchipMatmul parses the tail into `self.sources` and builds the chain with
+    `int8_task_plan_multi`; the second source's output columns start at `n*4` bytes.
+    """
+    sink = UOp.sink(out, la, ra, lb, rb, arg=KernelInfo(f"rockchip_int8_multi_{m}_{n}_{k}"))
+    info = replace(ProgramInfo.from_sink(sink, Target("ROCKCHIP")), outs=(0,), ins=(1, 2, 3, 4))
+    header = round_up(m * 4, 64)
+    desc = struct.pack("<8I", m, n, k, cores, 0, header, 0, 1)
+    desc += struct.pack("<5I", n, k, header, 0, 0)          # source a
+    # Source b's plane region starts after ALL of source a's: each source occupies m*n int32 (three
+    # stacked (m, part) planes), so the byte offset is m*n*4 -- NOT n*4. Those coincide only at m==1,
+    # which is why an m=1-only check passes and m=64 fails with maxdiff ~1.2.
+    desc += struct.pack("<5I", n, k, header, 0, m * n * 4)  # source b, disjoint plane region
+    return UOp(Ops.PROGRAM, arg=info, src=(sink, UOp(Ops.LINEAR, src=(out, la, ra, lb, rb)),
+               UOp(Ops.SOURCE, arg=f"multi {m}x{k}x{n}"), UOp(Ops.BINARY, arg=desc)))
+
+
+def packed_matmul_int8_multi(xa: Tensor, ca: Tensor, sa: Tensor, xb: Tensor, cb: Tensor, sb: Tensor,
+                             columns: int, device: str, cores: int = 3) -> tuple[Tensor, Tensor]:
+    """Two INT8 matmuls in ONE submit; returns the two dequantised outputs.
+
+    Verified bitwise against two `packed_matmul_int8` calls (maxdiff 0.0) at m=1 and m=64. Exists so a
+    merged submit can be built without touching `_FusedInt8Plan`'s generated C.
+    """
+    m, orig_k = xa.shape
+    k = ca.shape[1] * 32
+    n = round_up(columns, 32)
+    pa, a_scale = int8_payload(xa if orig_k == k else xa.pad(((0, 0), (0, k - orig_k))), device)
+    pb, b_scale = int8_payload(xb if orig_k == k else xb.pad(((0, 0), (0, k - orig_k))), device)
+    out = Tensor.empty(m * 2 * n, device=device, dtype=dtypes.int32)
+    out = out.custom_kernel(pa, ca, pb, cb,
+                            fxn=lambda o, a, w, b, c: _matmul_int8_multi(o, a, w, b, c, m, n, k, cores))[0]
+    parts = _matmul_parts(m, n, k, cores, int8=True)
+    # Split the flat buffer into the two sources' plane regions (m*n ints each), not by column.
+    flat = out.to(xa.device).reshape(2 * m * n)
+    return (_dequantize(flat[:m * n].contiguous().reshape(m, n), a_scale, sa, m, n, parts, 0),
+            _dequantize(flat[m * n:].contiguous().reshape(m, n), b_scale, sb, m, n, parts, 0))
+
+
 def packed_matmul_int8_fused(dense: Tensor, weight: Tensor, w_scale: Tensor, columns: int, device: str,
                              m: int, row_offset: int = 0, k_offset: int = 0, column_offset: int = 0,
                              cores: int = 3) -> Tensor:

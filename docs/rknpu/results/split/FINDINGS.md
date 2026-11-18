@@ -2156,3 +2156,26 @@ whole change; everything else (chain construction, parity, ordering, part-width)
 Recorded because it is the one non-obvious design constraint left: without splitting `m` into
 `m_rows` and per-task `m`, the merged C would either exceed the m=64 limit or quantise only half the
 rows.
+
+## packed_matmul_int8_multi added and verified: the merge needs no fused-C surgery
+
+The descriptor path carries the merge, so the planned _FusedInt8Plan C rewrite is not needed to
+produce one. npu_linear.packed_matmul_int8_multi(xa, ca, sa, xb, cb, sb, columns, device) emits the
+2-source descriptor and returns both dequantised outputs.
+
+Bitwise vs two packed_matmul_int8 calls:
+
+    m=1   k=2560  A True maxdiff 0 | B True maxdiff 0
+    m=64  k=2560  A True maxdiff 0 | B True maxdiff 0
+
+k=9216 raises Unsupported Rockchip INT8 matmul geometry -- that depth must be K-split to <=4096, as
+ffn_down already is; documented wall, not a defect.
+
+Layout trap: the second source plane region starts at m*n*4 bytes, not n*4. Each source occupies m*n
+int32 (three stacked (m, part) planes) and the two coincide only at m==1, so an m=1-only check passes
+while m=64 fails with maxdiff ~1.2. Splitting must be by plane region (flat[:m*n], flat[m*n:]), not by
+column.
+
+Open trade-off: the fused C exists because the descriptor path costs ~1.55 ms of host time over six
+launches per Linear versus one call. The merge removes ~half the submits but may add host overhead; the
+net needs a 3+3 A/B of one block paired Linears through both paths.
