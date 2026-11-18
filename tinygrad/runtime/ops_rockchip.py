@@ -305,10 +305,14 @@ class RockchipMatmul:
       bodies = []
       for i, (n_i, k_i, lhs_off, rhs_off, out_off) in enumerate(self.sources):
         lhs_b, rhs_b = ins[2*i], ins[2*i+1]
-        bodies.extend(_int8_matmul_body(self.m, n_i, k_i, lhs_b.dma+lhs_off,
+        # The last argument is the STRIDE = this part's width, not the full n. The single-source
+        # path gets this by rebinding `n` in `for offset, n in parts`; passing the full width here
+        # encoded wrong channel counts (0x9ff instead of 0x35f), which gave wrong output at N=2 and
+        # an invalid submit -- NPU job timeout, soft reset num: 6 -- at N=1.
+        bodies.extend(_int8_matmul_body(self.m, w, k_i, lhs_b.dma+lhs_off,
                       rhs_b.dma+rhs_off+offset*k_i*self.itemsize,
-                      out.dma+out_off+offset*self.m*4, n_i)
-                      for offset, _ in _matmul_parts(self.m, n_i, k_i, self.cores, True))
+                      out.dma+out_off+offset*self.m*4, w)
+                      for offset, w in _matmul_parts(self.m, n_i, k_i, self.cores, True))
       self.tasks = len(bodies)
       self.cmd, self.task, self.tasks, self.core_mask, self.subcores = _encode_task_chain(
         self.dev, tuple(bodies), 1 if self.tasks == 1 else 3)

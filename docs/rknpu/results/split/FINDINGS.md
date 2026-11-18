@@ -1991,3 +1991,34 @@ program for N=1 is decoded and compared against the single-source path**, the wa
 was verified by decoding `PC_BASE_ADDRESS` writes.
 
 Do not run this probe again on this board without that offline check first.
+
+## Root cause of the merged-submit failure: the part width, found by word-diffing programs
+
+Decoding both emitted command buffers offline (no submits), with **shared** buffers so only encoding
+differences remain, showed 18 differing words for N=1. They are readable:
+
+    reg 0x1030   0x1b   vs 0x50
+    reg 0x1038   0x361  vs 0xa01      0x361 = 865,  0xa01 = 2561
+    reg 0x3018   0x35f  vs 0x9ff      0x35f = 863,  0x9ff = 2559
+    reg 0x4038   0xd7   vs 0x27f
+
+The multi branch encoded **n = 2560 (full width)** where the single-source path encodes the **part
+width** (864/832). The single path gets this by shadowing:
+
+    bodies = tuple(_int8_matmul_body(self.m, n, self.k, ..., n) for offset, n in parts)
+
+where the loop rebinds `n` to the part width, and `_int8_matmul_body` requires `stride == n`. The multi
+branch passed `n_i` (the full width) in both positions.
+
+**That one error explains both symptoms at once:** at N=2 it produced wrong values (wrong channel
+counts per task), and at N=1 it produced a submit the NPU never completed -- job timeout,
+`soft reset, num: 6` -- because the encoded task was invalid rather than merely wrong.
+
+**Fix applied** -- pass the part width `w` as both the width and the stride. Verified offline, no
+dispatch:
+
+    single vs multi1 identical: True | differing 0 of 336
+
+The N=1 multi-source descriptor now emits a command buffer **byte-identical** to the working
+single-source path. Parity and timing remain unmeasured; the next step is the N=2 column check, which
+was previously producing `maxdiff 0.8` and should now be exact.
