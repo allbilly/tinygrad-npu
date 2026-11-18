@@ -2663,3 +2663,32 @@ state buffer being a slice of a larger allocation.
 
 **Actionable item: feed the scan contiguous q/k/v** (produce them contiguous at the source rather than
 gathering per call) -- worth up to ~180 ms, bit-identical to verify.
+
+## CORRECTION: the scan is ~0.6-0.8 s (28%), not 1,231 ms (50%)
+
+Three independent measurements of the scan's in-model cost:
+
+| method | scan cost | what it measures |
+| --- | --: | --- |
+| profiler (`prof-merged`, 24 calls) | **0.610 s** | `rt(*args)` per kernel |
+| direct, transposed inputs (34.9 ms x 24) | **0.838 s** | the same call outside the model |
+| direct, contiguous (27.3 ms x 24) | 0.655 s | " |
+| ablation delta (stub the scan) | 1.231 s | includes downstream effects |
+
+**Two methods agree at ~0.6-0.8 s; the ablation is the outlier and is withdrawn.** Stubbing
+`gated_delta_scan_simd` also makes `model.py:831-833`'s store of `scan_state` a self-store and removes the
+conv-state dependencies, so part of that 1,313 ms delta is downstream work, not scan time.
+
+So the prefill decomposition is back to the profile's ranking, all items individually large and none
+dominant:
+
+| item | time | share |
+| --- | --: | --: |
+| NPU submits (`qz_row`, 355) | 0.72 s | 28% |
+| `cpu_gated_delta_scan` | 0.61-0.84 s | 24-33% |
+| SwiGLU + `E_1024` + attention + elementwise | ~1.0 s | 40% |
+| bookkeeping | ~0.1 s | 4% |
+
+**Consequence:** there is no single large item left. Reaching 1,201 ms requires ~2.1x across every row of
+that table, which is the reference's pool/async architecture, not any one kernel. The 182 ms
+transposed-gather item is real but requires a kernel layout rewrite to claim.
