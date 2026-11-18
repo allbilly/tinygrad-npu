@@ -1887,3 +1887,38 @@ produce wrong output rather than an error.
 
 **Still not dispatched.** The submit-only C program, the two input syncs, the `out*a_scale*w_scale`
 dequant, and the column-for-column parity assertion are unwritten.
+
+## The exact patch left to write (multi-source descriptor)
+
+Read off the working path, not inferred:
+
+1. **`npu_linear.py:179` `_matmul_int8`** -- today emits
+   `struct.pack("<8I", m, n, k, cores, column_offset*k, round_up(m*4,64), 0, 1)` with `ins=(1,2)`.
+   A multi variant appends `N` sources of `<5I` = `(n, k, lhs_offset, rhs_offset, out_offset)` and
+   sets `ins=tuple(range(1, 2+2N))`, with `lhs`/`rhs` device tensors as arguments 1..2N.
+2. **`ops_rockchip.py:268` `RockchipMatmul.__init__`** -- parses `obj.lib[:16]` as `<4I` (m,n,k,cores)
+   then `rhs/lhs/split_k/int8` from 16..32. Add: if `len(obj.lib) > 32`, parse
+   `self.sources = tuple(struct.unpack('<5I', obj.lib[32+20*i:52+20*i]) for i in range((len(obj.lib)-32)//20))`
+   and skip `_matmul_parts` for the single-source case.
+3. **`ops_rockchip.py:295` `prepare(self, out, lhs, rhs)`** -- builds the bodies **inline** (it does
+   not call `int8_task_plan`):
+   `bodies = tuple(_int8_matmul_body(self.m, n, self.k, lhs.dma+self.lhs_offset,
+    rhs.dma+self.rhs_offset+offset*self.k*self.itemsize, out.dma+offset*self.m*4, n)
+    for offset, n in parts)`
+   Change the signature to `prepare(self, out, *ins)`; when `self.sources` is set, iterate
+   `zip(self.sources, pairs(ins))` and extend `bodies` per source, using `out.dma+out_offset`.
+   The two buffer-size checks must be applied per source.
+4. **`ops_rockchip.py:318` `__call__(self, *args, ...)`** -- currently `out, lhs, rhs = args` and later
+   uses `lhs`/`rhs` for `update_inputs` and the weight-version check. Change to `out, *ins = args`,
+   keep the weight check on the last rhs (weights are immutable after packing), and compare
+   `(out,)+tuple(ins)` against `self.bufs`.
+
+`_encode_task_chain` needs no change -- it takes arbitrary bodies, which is why the plan-level merge
+already works. Dispatch target: `m=1, n=2560, k=2048` (smoke-exact; `banks` far from `0x1b`).
+Assert `merged[:, :n] == separate_a` and `merged[:, n:] == separate_b` bitwise against
+`packed_matmul_int8` before any timing.
+
+**Not written.** Three probe-level attempts failed on `AssertionError` at `device.py:139` because a
+submit cannot be injected outside this descriptor path; the change has to be made here, in four places,
+and then dispatched once -- which is the step that can reboot the board and needs an untruncated
+session.
