@@ -2022,3 +2022,28 @@ dispatch:
 The N=1 multi-source descriptor now emits a command buffer **byte-identical** to the working
 single-source path. Parity and timing remain unmeasured; the next step is the N=2 column check, which
 was previously producing `maxdiff 0.8` and should now be exact.
+
+## MERGED SUBMIT: column parity HOLDS bitwise
+
+After the part-width fix (`a4da75812`), the N=2 merged chain at `m=1, n=2560, k=2048` -- two Linears
+reading different activations, one `(m, 2n)` plane buffer, one 6-task 3-core submit:
+
+    RUN TWICE identical: True | differing ints: 0 of 5120
+    PARITY A: True maxdiff 0.0
+    PARITY B: True maxdiff 0.0
+
+So `merged[:, :n] == separate_a` and `merged[:, n:] == separate_b` **exactly**, against
+`packed_matmul_int8`. Combined with the earlier offline check that the N=1 program is byte-identical to
+the single-source program (0 of 336 words), the merged submit is now correct by both routes: the
+encoding matches for one source, and the output matches for two.
+
+Established so far, in order: plan construction, body ordering by core, `per_core=2` chaining
+(three `PC_BASE_ADDRESS` writes onto bodies 1/3/5), dispatch (no fault, board healthy), determinism
+(0 of 5,120 ints across runs), and now bitwise column parity.
+
+**Not yet done:** the lever is correct but not *used*. The model still issues 603 single-source submits;
+nothing yet pairs two of its Linears into a merged submit. So there is no 3+3 A/B against 2,711 ms and
+`qz_row` has not been shown to fall from 0.790 s. The next step is integration, not verification:
+choose a pair of same-`k` Linears per block whose activations are both live at the same point
+(e.g. `attn_output` and a second `k=2560` projection), emit the multi descriptor from
+`packed_matmul_int8`'s caller, and then measure with `--warmups 3 --runs 3` on both arms.
