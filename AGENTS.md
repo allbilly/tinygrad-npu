@@ -29,7 +29,14 @@ Results and logs belong in this checkout, under `docs/rknpu/results/`.
 | `~/vlm-bench` | **data only** — GGUF checkpoints under `baseline-20261021/` and run logs. No code |
 
 **Do not assume a single reproduce path.** Per-model detail is in
-`docs/rknpu/results/repro-paths-{a,b,c}.md`. Two facts that bite:
+`docs/rknpu/results/repro-paths-{a,b,c}.md`. Three facts that bite:
+
+- **Use the recorded command, verbatim.** Every archive run writes its exact argv to
+  `receipt.json` (`.command`). Read it from the run being reproduced; never retype a
+  flag list. A hand-built line that dropped five GDN flags made prefill run eager
+  (35,200 submits instead of 475) for five runs (`mistake.md` M22). **A submit count
+  that differs from the reference by more than a few percent means the configuration
+  is different, not the machine.**
 
 - **Source epochs are partly gone.** Each probe asserts `source_before ==
   manifest.source_sha256`; recomputing today, 26-33 pins per cohort differ. The
