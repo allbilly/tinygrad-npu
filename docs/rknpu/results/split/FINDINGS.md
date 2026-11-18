@@ -2641,3 +2641,25 @@ So the go-to explanation is dead twice over (build, and clone/allocation, which 
 **This is the sharpest open question in the work:** 500 ms of the 1,413 ms gap sits in the difference
 between "the same kernel call in a graph" and "the same kernel call alone", and no kernel rewrite addresses
 it.
+
+## Scan in-model overhead: layout accounts for 182 ms, ~320 ms still unexplained
+
+Same call, same data, three layouts (B=1 H=32 T=128 K=V=128, median of 6):
+
+| input layout | per call | x 24 |
+| --- | --: | --: |
+| contiguous (B,H,T,K) | **27.3 ms** | 655 ms |
+| transposed, as the model supplies it | **34.9 ms** | **838 ms** |
+| in-model (ablation delta, after buffer reuse) | ~51 ms | ~1,231 ms |
+
+So the `.contiguous()` gathers of the model's three transposed 2 MB tensors cost **+7.6 ms per call,
++182 ms per prefill**. Removing the clone and pooling the output (landed, -82 ms) plus this 182 ms accounts
+for ~264 ms of the ~580 ms previously attributed to per-call overhead.
+
+**~320 ms of in-model overhead remains unexplained** and is now bounded on all sides: not the compile flags
+(`-O2 -mcpu=native`), not clone/allocation (fixed), not the input layout (measured). What is left is
+graph-side -- the store ops at `model.py:831-833`, cache pressure from adjacent kernels, or the scan's own
+state buffer being a slice of a larger allocation.
+
+**Actionable item: feed the scan contiguous q/k/v** (produce them contiguous at the source rather than
+gathering per call) -- worth up to ~180 ms, bit-identical to verify.
