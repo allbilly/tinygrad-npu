@@ -2123,3 +2123,27 @@ It also explains why the fused-C pair plan is still required: the model's `NPULi
 `_FusedInt8Plan`, so this is a change to the generated C (one sync, one submit with 6 tasks, one output
 sync, two dequant row ranges) plus `int8_task_plan_multi` for the chain -- the same ~100-line shape as the
 gate+up pair but with a ~5x larger prize.
+
+## The m-tile merge needs one new key field: m for quantise/dequant vs m per task
+
+Working through `_FusedInt8Key` for the merged form, the blocking detail is that `m` means two
+different things and the current key has only one:
+
+- the **quantise pass** covers all rows it will submit, so for a merged plan it is 128 (both tiles);
+- each **task group** is still `m=64` rows, because `_int8_matmul_body` refuses `m>64` at `k>2048`
+  (banks -> 0x1b, the known-wedge geometry).
+
+`_FusedKey.m` currently serves both. So the merged key needs `m_rows` (quantise/dequant extent, 128)
+alongside `m` (per-task, 64), and `_fused_source` must emit:
+
+    quantise over m_rows                                  (payload header = round_up(m_rows*4, 64))
+    one sync_mem(payload), one submit with tasks = 6       (subcores from int8_task_plan_multi)
+    planes loop over (row_group, column_part)              (two row ranges: 0 and 64*row_stride)
+    one sync_mem(out)
+
+with source offsets `lhs_off = 64*row_stride` and `out_off = 64*n` for the second group. That is the
+whole change; everything else (chain construction, parity, ordering, part-width) is already proven.
+
+Recorded because it is the one non-obvious design constraint left: without splitting `m` into
+`m_rows` and per-task `m`, the merged C would either exceed the m=64 limit or quantise only half the
+rows.
