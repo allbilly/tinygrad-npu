@@ -2282,3 +2282,30 @@ the m-tile merge is worth. It wins because each submit carries far more work: 2.
 Consequence for the goal: the m-tile merge is worth ~0.28 s of the 1,502 ms prefill gap. Closing the rest
 requires making each prefill submit do more useful work per millisecond (CPU-side kernels), and decode
 requires ~15x submit reduction -- a different, larger change than any prefill lever.
+
+## Full decomposition: the reference coalesces decode programs ~9:1, we do 1:1
+
+`ref-profile/report.json` also carries `captured_calls`, per-device program counts for both phases:
+
+| | reference | ours (prof-2711) |
+| --- | --: | --: |
+| prefill programs | **2,072** (1,597 CPU + 475 NPU) | 1,359 |
+| prefill NPU submits | **475** (1:1 with NPU programs) | **603** |
+| prefill ms/submit | 2.53 | 4.48 |
+| decode programs | **1,289** (1,086 CPU + 203 NPU) | 1,032 |
+| decode NPU submits/token | **22.2** | **323** |
+| decode programs per submit | **~9:1** | **1:1** |
+| decode ms/submit | 6.9 | 0.98 |
+
+**The reference runs MORE programs than we do in prefill (2,072 vs 1,359) and is still 2.25x faster.**
+So program count is not the discriminator, and neither is prefill submit count (1.27x). What differs is:
+
+1. **prefill**: each of our submits costs 4.48 ms against their 2.53 ms -- work-bound, i.e. CPU-side kernel
+   time inside the submit, not launch count.
+2. **decode**: they coalesce ~9 NPU programs per submit; we issue 1 per program, 14.6x more submits per
+   token. At our measured ~0.56 ms/submit, 323 submits ~= 181 ms of the 316 ms/token. Coalescing 9:1
+   would give ~36 submits -> ~156 ms/token -> **~6.4 tok/s, i.e. parity with the reference's 6.52**.
+
+**So the submit-coalescing machinery belongs in decode, not prefill.** `int8_task_plan_multi` -- already
+verified (bitwise `maxdiff 0.0`, N=1 byte-identical, `per_core=2` chaining) -- is worth ~0.28 s in prefill
+but roughly a **doubling of decode throughput**, which is the bigger prize and the same mechanism.
