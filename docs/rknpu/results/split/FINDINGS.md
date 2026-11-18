@@ -2615,3 +2615,29 @@ the buffer recovered only 82 ms. The remaining ~500 ms is NOT clone/allocation -
 partly refuted. The scan still costs ~1,231 ms in-model against ~730 ms for the same C standalone, and the
 gap must lie in the generated build (flags/target) or in the `.contiguous()` copies of q/k/v (which are
 transposed, hence non-contiguous, 2 MB each per call).
+
+## The scan costs 2x more in-model than the same call outside it
+
+Measured three ways, B=1 H=32 T=128 K=V=128:
+
+| measurement | per call | x 24 |
+| --- | --: | --: |
+| standalone C, `-O2` native | 30.28 ms | 726 ms |
+| **through tinygrad, realized contiguous inputs** | **27.45 ms** | **659 ms** |
+| in-model (ablation delta, after buffer reuse) | ~51 ms | **~1,231 ms** |
+
+And the generated build is not the problem: the captured flags are
+`-O2 -fPIC -ffreestanding -fno-math-errno -nostdlib --target=arm64-none-unknown-elf -ffixed-x18 -mcpu=native`
+-- native-tuned `-O2`, i.e. the same optimisation level as the standalone build that measures 30 ms.
+
+So the go-to explanation is dead twice over (build, and clone/allocation, which gave only -82 ms). The scan is
+**~2x slower inside the model's graph than the identical call outside it**. Candidates that remain:
+
+- the model's q/k/v are **transposed** (`z.transpose(1,2)`), so `.contiguous()` gathers three 2 MB tensors
+  per call -- plausible but by traffic alone only ~30 ms over 24 calls;
+- the state in-model is a slice of a persistent buffer, so `.contiguous()` copies 2 MB per call;
+- the surrounding graph (store ops at `model.py:831-833`) or cache pressure from adjacent kernels.
+
+**This is the sharpest open question in the work:** 500 ms of the 1,413 ms gap sits in the difference
+between "the same kernel call in a graph" and "the same kernel call alone", and no kernel rewrite addresses
+it.
