@@ -2492,3 +2492,29 @@ a pool. That is an execution-architecture property. Reproducing it means a task 
 kernels in the graph, not a faster or parallel kernel.
 
 Best case for intra-kernel scan parallelism: 0.61 s -> 0.50 s, ~0.11 s of the 1,413 ms gap.
+
+## The trailing NPU wait cannot be dropped -- it is a data dependency
+
+Proposed lever: remove `sync_mem(fd,2,...)` from the fused INT8 Linear so NPU compute overlaps CPU
+work. **Not implementable as a bounded change**, because the very next statement reads the buffer that
+wait makes valid:
+
+    if (!err) err = sync_mem(fd,2,params[6],{key.out_size}ULL);   /* output wait */
+    if (err) { *status = err; return; }{planes}                   /* dequant READS those planes */
+
+Dropping it would let the dequant read planes before the NPU wrote them -- correct only when the NPU
+happens to have finished, i.e. the silent-wrongness class of M47 (where the wrong configuration had a
+*tighter* trial spread, 0.17%, than the correct one).
+
+Splitting submit from dequant would remove the dependency but adds a pass: ~300 MB of int32 planes across
+the model (~9 ms of traffic) plus 249 extra launches -- the shape that has lost every measurement this
+session (sigmoid +75 ms, SwiGLU +52 ms).
+
+**And there is no independent work to overlap.** Per layer the chain is
+`NPU(qkv) -> CPU(rope+attn) -> NPU(o) -> NPU(gate/up) -> CPU(swiglu) -> NPU(down)`; every step consumes
+the previous one's output, so the 0.72 s of blocking sits on the critical path. Deferring the wait would
+move the stall, not remove it.
+
+This closes the last bounded structural lever identified. What remains is the reference's async pool
+architecture, which schedules work from different stages concurrently -- not a change expressible in
+`model.py` or `npu_linear.py`.
