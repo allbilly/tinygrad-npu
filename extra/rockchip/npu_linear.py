@@ -62,21 +62,6 @@ class _Domains:
 _DOMAINS = _Domains()
 
 
-def _matmul(out: UOp, lhs: UOp, rhs: UOp, m: int, n: int, k: int, cores: int, column_offset: int) -> UOp:
-    sink = UOp.sink(out, lhs, rhs, arg=KernelInfo(f"rockchip_matmul_{m}_{n}_{k}"))
-    info = replace(ProgramInfo.from_sink(sink, Target("ROCKCHIP")), outs=(0,), ins=(1, 2))
-    return UOp(Ops.PROGRAM, arg=info, src=(sink, UOp(Ops.LINEAR, src=(out, lhs, rhs)),
-               UOp(Ops.SOURCE, arg=f"Rockchip FP16 {m}x{k}x{n}"),
-               UOp(Ops.BINARY, arg=struct.pack("<7I", m, n, k, cores, column_offset * k * 2, 0, 0))))
-
-
-def pack_weight(weight: Tensor, device: str) -> Tensor:
-    n, k = weight.shape
-    n, k = round_up(n, 32), round_up(k, 32)
-    return weight.half().pad(((0, n - weight.shape[0]), (0, k - weight.shape[1]))).reshape(n // 16, 16, k // 32, 32) \
-        .permute(0, 2, 1, 3).contiguous().to(device)
-
-
 def quantize_rows(x: Tensor) -> tuple[Tensor, Tensor]:
     """Symmetric per-row int8 quantization: x ~ codes * scales[:, None], codes in [-127, 127]."""
     scale = (x.float().abs().max(axis=-1, keepdim=True) / 127.0).maximum(1e-8)
@@ -126,7 +111,7 @@ def _cpu_renderer() -> ClangRenderer:
 def _quantize_source(rows: int, depth: int, padded: int, header: int) -> str:
   """`part` plus the entry point. The CPU kernel ABI is one packed argument buffer
   (ClangRenderer.packed_args), so the entry takes `void *args` and holds only the two buffer
-  addresses; the geometry is baked in, the way _matmul bakes it into its descriptor."""
+  addresses; the geometry is baked in, the way the INT8 matmul bakes it into its descriptor."""
   return _QUANTIZE_SOURCE + f'''
 void rockchip_quantize(unsigned char *args) {{
   part(*(unsigned char**)args, *((const float**)args + 1), 0, {rows}, {depth}, {padded}, {header});
@@ -795,48 +780,6 @@ def _fused_plan(dev, m: int, n: int, k: int, depth_in: int, cores: int, column_o
     return plan
 
 
-def _matmul_int8_multi(out, la, ra, lb, rb, m: int, n: int, k: int, cores: int):
-    """Descriptor for one submit carrying two INT8 matmuls that read different activations.
-
-    Same `<8I` header as `_matmul_int8`, then one `<5I` per source = (n, k, lhs_offset, rhs_offset,
-    out_offset). RockchipMatmul parses the tail into `self.sources` and builds the chain with
-    `int8_task_plan_multi`; the second source's output columns start at `n*4` bytes.
-    """
-    sink = UOp.sink(out, la, ra, lb, rb, arg=KernelInfo(f"rockchip_int8_multi_{m}_{n}_{k}"))
-    info = replace(ProgramInfo.from_sink(sink, Target("ROCKCHIP")), outs=(0,), ins=(1, 2, 3, 4))
-    header = round_up(m * 4, 64)
-    desc = struct.pack("<8I", m, n, k, cores, 0, header, 0, 1)
-    desc += struct.pack("<5I", n, k, header, 0, 0)          # source a
-    # Source b's plane region starts after ALL of source a's: each source occupies m*n int32 (three
-    # stacked (m, part) planes), so the byte offset is m*n*4 -- NOT n*4. Those coincide only at m==1,
-    # which is why an m=1-only check passes and m=64 fails with maxdiff ~1.2.
-    desc += struct.pack("<5I", n, k, header, 0, m * n * 4)  # source b, disjoint plane region
-    return UOp(Ops.PROGRAM, arg=info, src=(sink, UOp(Ops.LINEAR, src=(out, la, ra, lb, rb)),
-               UOp(Ops.SOURCE, arg=f"multi {m}x{k}x{n}"), UOp(Ops.BINARY, arg=desc)))
-
-
-def packed_matmul_int8_multi(xa: Tensor, ca: Tensor, sa: Tensor, xb: Tensor, cb: Tensor, sb: Tensor,
-                             columns: int, device: str, cores: int = 3) -> tuple[Tensor, Tensor]:
-    """Two INT8 matmuls in ONE submit; returns the two dequantised outputs.
-
-    Verified bitwise against two `packed_matmul_int8` calls (maxdiff 0.0) at m=1 and m=64. Exists so a
-    merged submit can be built without touching `_FusedInt8Plan`'s generated C.
-    """
-    m, orig_k = xa.shape
-    k = ca.shape[1] * 32
-    n = round_up(columns, 32)
-    pa, a_scale = int8_payload(xa if orig_k == k else xa.pad(((0, 0), (0, k - orig_k))), device)
-    pb, b_scale = int8_payload(xb if orig_k == k else xb.pad(((0, 0), (0, k - orig_k))), device)
-    out = Tensor.empty(m * 2 * n, device=device, dtype=dtypes.int32)
-    out = out.custom_kernel(pa, ca, pb, cb,
-                            fxn=lambda o, a, w, b, c: _matmul_int8_multi(o, a, w, b, c, m, n, k, cores))[0]
-    parts = _matmul_parts(m, n, k, cores, int8=True)
-    # Split the flat buffer into the two sources' plane regions (m*n ints each), not by column.
-    flat = out.to(xa.device).reshape(2 * m * n)
-    return (_dequantize(flat[:m * n].contiguous().reshape(m, n), a_scale, sa, m, n, parts, 0),
-            _dequantize(flat[m * n:].contiguous().reshape(m, n), b_scale, sb, m, n, parts, 0))
-
-
 def packed_matmul_int8_fused(dense: Tensor, weight: Tensor, w_scale: Tensor, columns: int, device: str,
                              m: int, row_offset: int = 0, k_offset: int = 0, column_offset: int = 0,
                              cores: int = 3) -> Tensor:
@@ -857,45 +800,29 @@ def packed_matmul_int8_fused(dense: Tensor, weight: Tensor, w_scale: Tensor, col
     return plan(dense)
 
 
-def packed_matmul(x: Tensor, weight: Tensor, columns: int, device: str, cores: int = 3, column_offset: int = 0) -> Tensor:
-    m, original_k = x.shape
-    k = weight.shape[1] * 32
-    n = round_up(columns, 32)
-    lhs = x.half().pad(((0, 0), (0, k - original_k))).reshape(m, k // 8, 8).permute(1, 0, 2).contiguous().to(device)
-    out = Tensor.empty(n // 4, m, 4, device=device, dtype=dtypes.float)
-    out = out.custom_kernel(lhs, weight, fxn=lambda o, a, w: _matmul(o, a, w, m, n, k, cores, column_offset))[0]
-    return out.to(x.device).permute(1, 0, 2).reshape(m, n)[:, :columns]
-
-
 class NPULinear:
     """Drop-in nn.Linear replacement; weights packed once, rows, columns and K tiled."""
 
-    def __init__(self, linear: nn.Linear, int8: bool = True):
+    def __init__(self, linear: nn.Linear):
         self.weight, self.bias = linear.weight, linear.bias
         self.columns, self.depth = self.weight.shape
-        self.packed: list[tuple[int, int, Tensor, Tensor | None]] = []
+        self.packed: list[tuple[int, int, Tensor, Tensor]] = []
         self.device = "ROCKCHIP"
-        self.int8 = int8
 
     def prepare(self, domains: _Domains) -> None:
         if self.weight is None:
             return
         self.packed.clear()
-        itemsize = 1 if self.int8 else 2
-        self.device = domains.place(round_up(self.columns, 32) * round_up(self.depth, 32) * itemsize)
+        self.device = domains.place(round_up(self.columns, 32) * round_up(self.depth, 32))
         for c0 in range(0, self.columns, TILE):
             n = min(TILE, self.columns - c0)
             for k0 in range(0, self.depth, K_TILE):
                 k = min(K_TILE, self.depth - k0)
                 tile = self.weight[c0:c0 + n, k0:k0 + k].contiguous()
-                if self.int8:
-                    # INT8 only accepts K on a 512 multiple, so a ragged K tile is padded.
-                    padded = _int8_padded_depth(k)
-                    codes, scales = pack_weight_int8(tile.pad(((0, 0), (0, padded - k))), self.device)
-                    self.packed.append((c0, k0, codes.realize(), scales.realize()))
-                else:
-                    # realize per tile: a lazy graph would hold every tile's temporaries at once
-                    self.packed.append((c0, k0, pack_weight(tile, self.device).realize(), None))
+                # INT8 only accepts K on a 512 multiple, so a ragged K tile is padded.
+                padded = _int8_padded_depth(k)
+                codes, scales = pack_weight_int8(tile.pad(((0, 0), (0, padded - k))), self.device)
+                self.packed.append((c0, k0, codes.realize(), scales.realize()))
         self.weight = None  # packed tiles carry everything; the source is the largest live copy
 
     def _row_key(self, x: Tensor):
@@ -934,11 +861,11 @@ class NPULinear:
         # m<=64 above that, exact at (64, 2560, 4096) in smoke_int8.py. Applying the
         # FP16 bound to INT8 made a 128-token prefill take 8 weight passes instead
         # of 2, which is why our prefill NPU time exceeds the reference's whole run.
-        row_tile = (128 if k_max <= 2048 else 64) if self.int8 else max(1, min(64, 65536 // k_max))
+        row_tile = 128 if k_max <= 2048 else 64
         out_rows = []
         # Only merge when the tile splits 3 ways: narrow n (e.g. ssm_beta, n=32) yields a single
         # part, and a 128-row task is illegal at k>2048 anyway.
-        merge = (2 * row_tile if (self.int8 and rows == 2 * row_tile
+        merge = (2 * row_tile if (rows == 2 * row_tile
                                   and len(_matmul_parts(row_tile, self.columns, k_max, 3, True)) == 3) else 0)
         step = merge or row_tile
         for r0 in range(0, rows, step):
@@ -953,17 +880,13 @@ class NPULinear:
                     for pc, pk, weight, scales in self.packed:
                         if pc != c0:
                             continue
-                        if self.int8:
-                            # One C call: quantize + direct ioctl + dequantize. Measured
-                            # 1.45-1.60 -> 0.150-0.208 ms of lazy construction per call
-                            # (8.3-9.7x) and Qwen2 0.5B paired decode 3.64 -> 7.95 tok/s.
-                            # Bit-exact at every 4B geometry (parity_shapes.py, 9/9).
-                            piece = packed_matmul_int8_fused(dense, weight, scales, w2, self.device,
-                                                             part.shape[0], row_offset=r0, k_offset=pk,
-                                                             column_offset=col)
-                        else:
-                            k = weight.shape[1] * 32
-                            piece = packed_matmul(part[:, pk:pk + k], weight, w2, self.device, column_offset=col)
+                        # One C call: quantize + direct ioctl + dequantize. Measured
+                        # 1.45-1.60 -> 0.150-0.208 ms of lazy construction per call (8.3-9.7x)
+                        # and Qwen2 0.5B paired decode 3.64 -> 7.95 tok/s. Bit-exact at every
+                        # 4B geometry (parity_shapes.py, 9/9).
+                        piece = packed_matmul_int8_fused(dense, weight, scales, w2, self.device,
+                                                         part.shape[0], row_offset=r0, k_offset=pk,
+                                                         column_offset=col)
                         acc = piece if acc is None else acc + piece
                     if acc is None:
                         raise RuntimeError("NPULinear.prepare() was not called")
