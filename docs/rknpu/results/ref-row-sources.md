@@ -7,7 +7,7 @@ Sources are the REA-authenticated dump `docs/rknpu/results/ref-kernels-all/` (ro
 | --- | --: | --: | --- | --- | --- |
 | NPU GEMM | 142.89 | 137.11 | `py/rockchip_bucketed_int8.py`, `py/rockchip_grouped_int8.py` | Its decode issues **203 submits** at widths 18432 / 12352 / 24384; ours issues **307** at ≤ 9216. Same bytes, fewer and larger submits. | yes — kernel names in its profile |
 | quantise / dequantise | 4.70 | 1.02 | **`py/rockchip_norm_quant.py:38` `_program`, `register_norm`** | It fuses **RMSNorm and INT8 quantise into one kernel**. **Caveat:** the module docstring scopes it to *"prepared 128-row, 896-wide CPU inputs"*, i.e. a prefill shape; whether its decode path uses this fusion is unverified. Our quantise runs inside every fused Linear (355 calls). | partial — fusion exists; decode applicability unverified |
-| elementwise | 14.74 | 6.57 | **`py/rockchip_cpu.py:641` `_swiglu_pack`** | One kernel reads both int32 plane sets, dequantises, applies `silu(gate)*up` and writes the next payload — replacing four passes (dequant gate, dequant up, elementwise, quantise). Profile: 32 calls, 1.771 ms. | yes |
+| elementwise | 14.74 | 6.57 | **`py/rockchip_cpu.py:641` `_swiglu_pack`** | **Corrected:** it takes `const float *src` (fp32), not int32 planes. It fuses `silu(gate)*up` + cast to `__fp16` + **the transpose into the next GEMM's packed layout** (`out[start*depth + (c/8*m+row-start)*8 + c%8]`), 4-way pthreads above 32768 elements. Profile: 32 calls, 1.771 ms. | yes — but see the layout note below |
 | state fills | 9.52 | ~0 | **not found in the dump** | Its profile contains no fill kernel at all. Whether that is persistent state, a fused zero, or a different GEP is **unverified** — this is the one row I cannot source. | **no** |
 | GDN scan | 5.23 | 4.16 | `py/rockchip_recurrent.py` + `c/rockchip_recurrent.c` | **Byte-identical source** (`diff` = 0 over 491 lines) and both call the pooled entry. The 1.26x is invocation/thermal, not code. | yes |
 | reduce | 2.68 | 0.79 | its graph shape | It emits **153** `r_*` calls per token where we emit **497**; same data, fewer reductions. | yes — call counts |
@@ -30,11 +30,28 @@ native replay removing the 6.45 ms of Python between segments.
 Three of those four are fusions we do not have; the fourth (fp16 cache width) was tested and is not
 the mechanism.
 
+## Correction and consequence: the pack is a layout contract, not just a fusion
+
+`_swiglu_pack` consumes **fp32** gate/up and emits a **packed `__fp16` payload** in the transposed
+layout that `rockchip_bucketed_int8` expects. Its speed comes from fusing the elementwise with the
+**layout conversion**, which only exists because the reference's GEMM reads packed fp16 payloads.
+
+Our fused Linear does the opposite: it takes a dense fp32 activation and quantises internally. So:
+
+- there is no packed-payload consumer on our side for the pack to feed;
+- a pack writing that layout would need a matching GEMM input format, i.e. the bucketed-INT8
+  contract, not just one kernel;
+- this is why the three FFN-pack forms tried here measured **22-31% slower** — each paid for a
+  layout conversion whose consumer did not exist.
+
+Porting `_swiglu_pack` in isolation therefore cannot close the elementwise row. It is only viable
+together with `rockchip_bucketed_int8`'s packed-input GEMM.
+
 ## What is worth porting, in table order
 
 | row | port | expected | risk |
 | --- | --- | --- | --- |
 | q/dq (+3.7) | fuse quantise into the norm (`register_norm` equivalent) | closes the row | our norm is a tinygrad kernel; needs a custom kernel and a scale layout change |
-| elementwise (+8.2) | `_swiglu_pack` | closes most of the row | the three FFN-pack forms tried here measured 22-31% slower, so it must be measured, not assumed |
+| elementwise (+8.2) | `_swiglu_pack` **plus** a packed-input GEMM | unknown without the GEMM half | it is a layout contract: the pack emits fp16 in the next layer's transposed layout, which our fp32-input fused Linear does not consume |
 | gaps (+6.45) | native replay | closes the row | we already have a replay; the 6.45 ms is between its segments |
 | fills (+9.5) | unknown | unknown | **no source found**; every implementation tried here made it worse |
