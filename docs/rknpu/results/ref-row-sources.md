@@ -1,17 +1,22 @@
 # Where each row of the 182-vs-152 table lives in the reference tree
 
-Sources are the REA-authenticated dump `docs/rknpu/results/ref-kernels-all/` (root
-`9c3beb78e586ea4c`, 79 entries, C/JSON/Python). Line numbers are from that dump.
+Sources are the **measured tree** `~/tg-qwen35-pack-signature-fix` (the one pinned by the receipt,
+dirty diff `7f87f221...`), verified by sha256 against the dump. **Four of six files differ from the
+dump** -- `rockchip_cpu.py` (`d0952f646368` live vs `8d5026c857d6` dump), `rockchip_int8.py`
+(`1eb8aa766a4a` vs `a1c6510c168f`), `rockchip_norm_quant.py` (`dc1b46365a0c` vs `a49c60c46a0e`),
+`rockchip_replay.py` (`29a5a701c29b` vs `e3d6b0f12b8a`); only `rockchip_greedy.py` and
+`rockchip_recurrent.py` match. Line numbers below are from the **live** files, and one conclusion
+changed because of it (q/dq).
 
 | row | ours | ref | reference source | mechanism, and why it is faster | verified |
 | --- | --: | --: | --- | --- | --- |
-| NPU GEMM | 142.89 | 137.11 | `py/rockchip_bucketed_int8.py`, `py/rockchip_grouped_int8.py` | Its decode issues **203 submits** at widths 18432 / 12352 / 24384; ours issues **307** at ≤ 9216. Same bytes, fewer and larger submits. | yes — kernel names in its profile |
-| quantise / dequantise | 4.70 | 1.02 | **`py/rockchip_norm_quant.py:38` `_program`, `register_norm`** | It fuses **RMSNorm and INT8 quantise into one kernel**. **Caveat:** the module docstring scopes it to *"prepared 128-row, 896-wide CPU inputs"*, i.e. a prefill shape; whether its decode path uses this fusion is unverified. Our quantise runs inside every fused Linear (355 calls). | partial — fusion exists; decode applicability unverified |
-| elementwise | 14.74 | 6.57 | **`py/rockchip_cpu.py:641` `_swiglu_pack`** | **Corrected:** it takes `const float *src` (fp32), not int32 planes. It fuses `silu(gate)*up` + cast to `__fp16` + **the transpose into the next GEMM's packed layout** (`out[start*depth + (c/8*m+row-start)*8 + c%8]`), 4-way pthreads above 32768 elements. Profile: 32 calls, 1.771 ms. | yes — but see the layout note below |
+| NPU GEMM | 142.89 | 137.11 | `rockchip_int8.py:148-150 _matmul` (`KernelInfo(f'rockchip_int8_{m}_{n}_{k}')`) | Its decode issues **203 submits** at widths 18432 / 12352 / 24384; ours issues **307** at ≤ 9216. Same bytes, fewer and larger submits. | yes — kernel names in its profile |
+| quantise / dequantise | 4.70 | 1.02 | **`rockchip_norm_quant.py:23-30 register_norm`** | RMSNorm **and** quantise fused in one kernel, and in the measured tree the gate is **generalised**: `(ONPU_NORM_QUANT or ONPU_NORM_QUANT_DECODE)` with `depth%4==0 and 4<=depth<=8192` and `rows>0`, so it **does** apply at decode. Our quantise runs inside every fused Linear (355 calls). | **yes — and applicable at m=1** |
+| elementwise | 14.74 | 6.57 | **`rockchip_cpu.py:677` `_swiglu_pack`** (dump said 641) | **Corrected:** it takes `const float *src` (fp32), not int32 planes. It fuses `silu(gate)*up` + cast to `__fp16` + **the transpose into the next GEMM's packed layout** (`out[start*depth + (c/8*m+row-start)*8 + c%8]`), 4-way pthreads above 32768 elements. Profile: 32 calls, 1.771 ms. | yes — but see the layout note below |
 | state fills | 9.52 | ~0 | **not found in the dump** | Its decode profile has 1,086 CPU calls/token and **none is a fill**. The one candidate mechanism in the dump is the replay's borrow mode: `py/rockchip_replay.py:158` `self.borrow_batch = bool(getenv('ONPU_REPLAY_BORROW_BATCH',0))` with `ONPU_REPLAY_NATIVE_FROM` — write into the caller's buffers instead of owning and zeroing fresh ones. Consistent but **unproven**: no dumped file shows state initialised once. | **no** |
 | GDN scan | 5.23 | 4.16 | `py/rockchip_recurrent.py` + `c/rockchip_recurrent.c` | **Byte-identical source** (`diff` = 0 over 491 lines) and both call the pooled entry. The 1.26x is invocation/thermal, not code. | yes |
 | reduce | 2.68 | 0.79 | its graph shape | It emits **153** `r_*` calls per token where we emit **497**; same data, fewer reductions. | yes — call counts |
-| attention | 2.26 | 0.45 | **`py/rockchip_cpu.py:286` `rockchip_cpu_attention(..., const __fp16 *cache)`**, driven by `:371 _cpu_attention(..., decode_only)` | fp16 cache reads and a decode-specialised entry. Matching the fp16 read in our kernel was bit-exact and measured **slower** (4.716 tok/s), so the win here is the decode specialisation, not the width. | yes |
+| attention | 2.26 | 0.45 | **`rockchip_cpu.py:70` `_decode_heads(...)`**, fp16 cache at **`:93 const __fp16 *keys=cache+kv*{context*dim}`** | fp16 cache reads and a decode-specialised entry. Matching the fp16 read in our kernel was bit-exact and measured **slower** (4.716 tok/s), so the win here is the decode specialisation, not the width. | yes |
 | Python / replay gaps | 6.45 (shipped) | ~0 | `py/rockchip_replay.py` | Native replay: one C call per linear, no Python between kernels. Ours has 16 segments and 6.45 ms between them. | yes |
 
 ## What the mapping says
@@ -30,20 +35,20 @@ native replay removing the 6.45 ms of Python between segments.
 Three of those four are fusions we do not have; the fourth (fp16 cache width) was tested and is not
 the mechanism.
 
-## The norm+quantise fusion cannot apply at decode
+## The norm+quantise fusion DOES apply at decode (corrected)
 
-`register_norm` (`py/rockchip_norm_quant.py:22-28`) is gated hard:
+An earlier version of this file said the fusion was gated to 128x896 and therefore unusable at m=1.
+That was read from the **dump**, whose `rockchip_norm_quant.py` (`a49c60c46a0e`) is not the measured
+file. The live measured tree (`dc1b46365a0c`) generalises it:
 
 ```python
-if (ONPU_NORM_QUANT and ... source.shape[-1]==896
-    and all(isinstance(n,int) for n in source.shape) and math.prod(source.shape[:-1])==128
-    and weight.shape==(896,) ...):
+if ((ONPU_NORM_QUANT or ONPU_NORM_QUANT_DECODE) and ... and isinstance((depth:=source.shape[-1]),int)
+    and depth%4==0 and 4<=depth<=8192 and all(isinstance(n,int) for n in source.shape)
+    and (rows:=math.prod(source.shape[:-1]))>0 ...
 ```
 
-and `_program` re-checks `x.shape!=(128,896) -> return None`. It is a **128-row, 896-wide**
-specialisation: prefill only, and not even this model's hidden width. At decode (one row) it never
-engages, so the q/dq row's reference figure is **not reachable by porting that kernel** — its 1.02 ms
-comes from a path we cannot use at m=1.
+with a dedicated decode flag. So the q/dq row (**+3.7 ms**) is a **live lever at m=1**, not an
+inapplicable one -- it is the largest closable row left and the next thing to port.
 
 ## Correction and consequence: the pack is a layout contract, not just a fusion
 

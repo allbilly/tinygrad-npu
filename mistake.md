@@ -1485,6 +1485,33 @@ moved the wall not at all).
 work strictly down the open deltas. The table is the plan; the ABBA is the judge. Both are now
 mandated in `AGENTS.md`.
 
+### M78. Mapped the reference to a dump that is not the measured tree, and drew a wrong conclusion from it
+
+I produced a file:line map of every row to the reference source using
+`docs/rknpu/results/ref-kernels-all/` -- without checking that the dump is the tree the numbers came
+from. It is not. Hashing the files I cited against `~/tg-qwen35-pack-signature-fix` (the tree pinned
+by the receipt's dirty diff `7f87f221...`):
+
+| file | live | dump |
+| --- | --- | --- |
+| `rockchip_cpu.py` | `d0952f646368` | `8d5026c857d6` |
+| `rockchip_int8.py` | `1eb8aa766a4a` | `a1c6510c168f` |
+| `rockchip_norm_quant.py` | `dc1b46365a0c` | `a49c60c46a0e` |
+| `rockchip_replay.py` | `29a5a701c29b` | `e3d6b0f12b8a` |
+| `rockchip_greedy.py` | `01ac04773462` | **match** |
+| `rockchip_recurrent.py` | `597df154b957` | **match** |
+
+Four of six differ, and the consequence was not cosmetic. From the dump's `register_norm` I concluded
+the norm+quantise fusion was gated to `128x896` and "never runs at m=1", and I **closed the q/dq row
+(+3.7 ms) as inapplicable** on that basis. The live file generalises the gate -- `depth%4==0 and
+4<=depth<=8192`, positive rows, and a dedicated `ONPU_NORM_QUANT_DECODE` flag -- so the fusion **is**
+available at decode, and the row is a live lever. A closed row was reopened by a hash.
+
+**Fix:** name the tree a source map came from, and **hash the cited files against the measured tree**
+before drawing a conclusion from them. A dump is evidence only if it is proven to be the same
+revision; `AGENTS.md` already says the measured configuration is identified by its dirty-diff sha,
+not by a path.
+
 ## Guards now installed
 
 | guard | where |
@@ -1521,6 +1548,7 @@ mandated in `AGENTS.md`.
 | a requested comparison is one table: both columns, same classes, units, deltas, provenance | `mistake.md` M74 |
 | fix the column set before answering; put protocol differences inside the table, not after it | `mistake.md` M76 |
 | build the class table before the first optimisation and work down its open deltas | `mistake.md` M77 |
+| hash the files a source map cites against the measured tree before concluding from them | `mistake.md` M78 |
 | a row is closed by a paired measurement, never by an isolation benchmark | `mistake.md` M77 |
 | an ablation writes to a path naming the ablation, never to the canonical artifact directory | `mistake.md` M75 |
 | encode a doc's trap into the tool in the same edit | `mistake.md` M67 |
