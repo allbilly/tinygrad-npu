@@ -34,6 +34,7 @@ _HERE = Path(__file__).resolve().parent
 H_, KVH_, D_ = 16, 4, 256
 
 _PROGRAM: dict[tuple[int, int], UOp] = {}
+SPLIT_DECODE = False   # ABBA-only; see ab_attn.py
 
 
 def _renderer() -> ClangRenderer:
@@ -52,8 +53,9 @@ def _source(tokens: int, capacity: int) -> str:
     body = body[:body.index("#ifdef PROBE")]
   from thread_split import pool_address
   body = body.replace("RK_POOL_ADDR_ULL", f"{pool_address()}ULL")
-  # Four threads only pay from a few rows up; decode is TOK=1 and must stay serial.
-  body = body.replace("RK_SPLIT", "1" if tokens >= 8 else "0")
+  # Four threads only pay from a few rows up; decode is TOK=1 and was left serial. SPLIT_DECODE
+  # exposes it as an ABBA arm: the four groups write disjoint output rows, so the flip is exact.
+  body = body.replace("RK_SPLIT", "1" if (tokens >= 8 or SPLIT_DECODE) else "0")
   body = body.replace("#define TOK 128", f"#define TOK {tokens}")
   body = body.replace("#define CAP 512", f"#define CAP {capacity}")
   return body

@@ -150,6 +150,21 @@ Reverted (both the enablement and the guard), parity re-verified, decode back to
 submits. (The 1+1 restore run reports 3,883 ms prefill because a one-warm-up protocol puts warm-up
 in the measured trial; the 3+3 baseline is 1,197.7 ms.)
 
+## ABBA: the attention split is 9.4% SLOWER at the wall
+
+The split made the attention kernel 27% faster in isolation (428 -> 314 us/call), which the harness
+could never resolve. In-process ABBA with the arms verified by their generated `#if RK_SPLIT` line:
+
+| arm | ms/token blocks | median | ratio |
+| --- | --- | --: | --: |
+| A split 4 (`#if 1`) | 199.6, 201.9, 184.4, 203.2, 222.3, 201.1 | 201.46 | — |
+| B serial (`#if 0`) | 202.2, 183.3, 183.8, 183.5, 203.3, 183.7 | **183.77** | **median 1.0940** |
+
+**Serial is 9.4% faster.** The four pooled workers compete with the scan and the elementwise kernels
+for the same four big cores, and that costs more than the kernel saves. The shipped configuration was
+already serial, so nothing changes -- but the "27% faster kernel" is now correctly recorded as a
+decode regression, not a pending win.
+
 ## ABBA status: greedy confirmed, fills measured and rejected
 
 The first fills run reported `memset_fills=0` in every arm. That was **my measurement bug**: the
