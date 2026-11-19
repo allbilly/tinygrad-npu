@@ -87,8 +87,23 @@ int gpt2_decode_loop(int *out,int token,int position,int count,U64 *stats,U64 *d
 ```
 
 `replay` is `RockchipCapturedJit` (`rockchip_replay.py:956`), the native replay of the captured
-graph. So **one C call drives N tokens**: no Python between tokens, no Python between kernels, and
-the sampled token is read from a fixed buffer address rather than returned to the interpreter.
+graph. So **one C call drives up to 32 tokens** (`self.tokens` accumulates per call;
+`rockchip_gpt2_decode.py:45`): no Python between tokens, no Python between kernels, and the sampled
+token is read from a fixed buffer address rather than returned to the interpreter.
+
+**Verified against the report**, not inferred from the code:
+
+```json
+// benchmark.json for the measured 4B run
+scalar_decode_loop: {"batch": 4, "tokens": 249}
+native_execution.decode: runs 249, borrow_outputs_enabled True, borrowed_outputs 65
+native_execution.prefill: runs 1, borrow_outputs_enabled True, borrowed_outputs 233
+```
+
+`borrowed_outputs` is `len(native.output_copies)` -- **65 output copies identified** in decode, which
+the borrow path then handles in place (`rockchip_replay.py:608 if self.borrow_outputs:`). That the
+absence of fill kernels follows from this borrow path is **consistent but not proven**: nothing in
+the dump ties those 65 copies to the state buffers.
 
 That single fact explains two rows at once:
 
