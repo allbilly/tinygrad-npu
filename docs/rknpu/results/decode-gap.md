@@ -124,6 +124,25 @@ Neither is a `Tensor.*` allocation (that count is 0 during decode), so they are 
 scheduler for buffers it treats as read-write state. 120 MB/token is 2.9% of the 4.2 GB of weights,
 but 10% of the step time.
 
+## Borrow instead of stage: tested, no effect
+
+The reference's borrow semantics were tried directly: `BORROW_ALIASED = True` in
+`tinygrad/engine/jit.py`, which makes `aliased` empty so no staging buffer is created for a written
+input.
+
+| | fills | wall | parity |
+| --- | --: | --: | --- |
+| staged (shipped) | 48 | 193.57 ms | `895365e27ed4255b` |
+| borrowed | **48** | **193.77 ms** | `895365e27ed4255b` |
+
+Identical. So the staging path is **not** the producer either, and the change was reverted rather
+than shipped as a no-op semantic change.
+
+The allocation site is instead `tinygrad/engine/realize.py:205`, which allocates a buffer per
+`call.src[1:]` when a linear call is materialised — i.e. the fills are the **outputs** of the
+decode linear being allocated and zeroed, not its inputs. That is the next place to look, and it
+is engine-internal.
+
 ## Retraction: "67 µs vs 15 µs per call" compares different shapes
 
 The elementwise rows were compared as if the two trees ran the same kernels. They do not:
