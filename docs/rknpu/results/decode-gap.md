@@ -124,6 +124,32 @@ Neither is a `Tensor.*` allocation (that count is 0 during decode), so they are 
 scheduler for buffers it treats as read-write state. 120 MB/token is 2.9% of the 4.2 GB of weights,
 but 10% of the step time.
 
+## Gate/up fusion at m=1: measured, decode unchanged, prefill regressed
+
+The directed change: fuse `ffn_gate`/`ffn_up` (19456 columns, under the 24576 m=1 submit limit) so
+decode issues one submit and one quantise instead of two. The model already had the consumer branch
+(`hasattr(self, "ffn_gateup")`); the fusion was disabled by `if False`, and enabling it exposed a
+latent bug in the `merge` pre-check, which validated the Linear's whole column count (19456) against
+the 12288 per-call limit and raised. Guarded, then measured, full 3+3:
+
+| | baseline | gate/up fused |
+| --- | --: | --: |
+| prefill | **1,197.7 ms** | **1,656.5 ms** (+38%) |
+| decode | 4.94-5.07 tok/s | **5.05 tok/s** |
+| submits/token | 307 | **275** |
+| tasks/token | 825 | 729 |
+| device | 142.6-145.5 ms | 142.4 ms |
+| parity | `895365e27ed4255b` | `895365e27ed4255b` |
+
+So the fusion does exactly what it was supposed to structurally — 32 fewer submits and 96 fewer
+tasks per token — and decode does not move. **Submits are not the bottleneck.** Prefill regresses
+by 459 ms, as the original +14.7% warning predicted (worse here because the fused tile is packed as
+one 24576-column tile).
+
+Reverted (both the enablement and the guard), parity re-verified, decode back to 5.05 tok/s at 307
+submits. (The 1+1 restore run reports 3,883 ms prefill because a one-warm-up protocol puts warm-up
+in the measured trial; the 3+3 baseline is 1,197.7 ms.)
+
 ## Skipping the fills entirely: no decode improvement
 
 The last hypothesis was that the 19.33 ms of zero-fills was on the critical path. Tested by
