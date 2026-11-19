@@ -150,6 +150,50 @@ Reverted (both the enablement and the guard), parity re-verified, decode back to
 submits. (The 1+1 restore run reports 3,883 ms prefill because a one-warm-up protocol puts warm-up
 in the measured trial; the 3+3 baseline is 1,197.7 ms.)
 
+## Host profile (py-spy) and the kernel dump artifact
+
+`flameox` is unavailable on this host (`AGENTS.md`: rea-agents 6.7.0 predates it; 6.8+ needs
+Node >= 24.22.1, which would repoint `nvm` away from the 24.12.0 that `dsh`/`dst` need), and the REA
+MCP server is not connected in this session. The documented substitute is `py-spy`, which was not
+used until now.
+
+`py-spy record -f speedscope --rate 200` over 60 decode steps, 24,252 samples. Filtering to samples
+whose stack is inside the replay's call path (`Compiled.run` / `CapturedJit.__call__`):
+
+| frame | share of decode samples |
+| --- | --: |
+| `Compiled.run` (self, i.e. inside the generated C) | **97.1%** |
+| everything else in Python | 2.9%, each frame < 0.2% |
+
+So there is **no Python overhead left to remove**: the replay has collapsed the host path to one
+C call per segment, and 97% of the sampled time is inside the generated C. This independently
+confirms the trace's 6.45 ms of between-segment time and rules out the "host-path structure" as
+Python work.
+
+Because the profile covers the whole process, the unfiltered top frame (`CPUProgram.__call__`,
+43.6%) is the **weight packing at model load**, not decode — a trap worth recording.
+
+### Kernel dump
+
+`extra/rockchip/dump_decode_kernels.py` writes `docs/rknpu/results/decode-kernels/`: one `.c` per
+kernel (the exact source clang compiled) plus `MANIFEST.md` with calls, total ms, us/call, submit ms
+and cpu ms per kernel, and a class rollup. One warm decode token, `MAX_CALLS_PER_SEG = 1`:
+
+| kernel | class | calls | ms | us/call | submit ms | cpu ms |
+| --- | --- | --: | --: | --: | --: | --: |
+| `rockchip_linear_1_9216_2560` | fused Linear | 64 | 49.75 | 777 | 48.62 | 1.13 |
+| `rockchip_linear_1_2560_4096` | fused Linear | 96 | 39.94 | 416 | 38.56 | 1.38 |
+| `rockchip_linear_1_24576_2560` | fused Linear | 10 | 20.22 | 2023 | 19.95 | 0.28 |
+| `rockchip_linear_1_8192_2560` | fused Linear | 24 | 16.63 | 693 | 16.17 | 0.46 |
+| `E_131072_4` | fill | 48 | 8.87 | 185 | 0.00 | 8.87 |
+| `E_62080_4` | elementwise | **1** | **8.48** | 8478 | 0.00 | 8.48 |
+| `rockchip_scan_simd` | scan | 24 | 5.61 | 234 | 0.00 | 5.61 |
+| `rockchip_attn_1_160` | attention | 8 | 2.26 | 282 | 0.00 | 2.26 |
+
+`E_62080_4` is 62,080 float4 = **248,320 floats, exactly the logits width** (`presample_logits
+shape (1, 248320)`), with 14 buffers — the Gumbel-max sampling expression building a full-vocabulary
+random tensor per token. The reference's sampler is `gpt2_argmax` at 0.085 ms.
+
 ## Collapsing to a single replay segment: slower
 
 The trace showed 6.45 ms between 16 segments, so the obvious question was whether segment
