@@ -70,6 +70,19 @@ So the 48 fills are fixed 2 MB intermediates inside the decode graph, and they a
 `Tensor.zeros`, not `.clone()`, not `pad_to`, not staging, and not the caches. The remaining
 candidate is allocator-side zeroing of a buffer that the graph treats as read-write state.
 
+## Third pass: the 2 MB buffers are allocated at decode capture
+
+| test | result |
+| --- | --- |
+| instrument `UOp.new_buffer` during decode capture | **24 allocations of 524,288 f32 (2 MB)** — exactly the fill size, one per recurrent-state block |
+| instrument `Tensor.zeros` / `empty` / `full` during decode | **0** — the allocations are not tensor creation |
+| run decode eagerly (bypass the JIT) | **1,982 ms/token** vs 200 — the JIT is essential, so staging cannot simply be dropped |
+
+So the picture is: at decode capture, 24 state buffers of 2 MB are allocated by the JIT layer
+(`UOp.new_buffer`, not `Tensor.*`), and each replay emits a 2 MB zero-fill of that state — 48 fills
+because both the allocation and the state update are materialised. This is the JIT treating the
+recurrent state as a read-write captured constant.
+
 ## Next, in order
 
 1. Confirm the staging hypothesis: instrument the JIT's staging allocation to report buffer
