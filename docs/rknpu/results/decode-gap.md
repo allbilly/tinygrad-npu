@@ -124,6 +124,26 @@ Neither is a `Tensor.*` allocation (that count is 0 during decode), so they are 
 scheduler for buffers it treats as read-write state. 120 MB/token is 2.9% of the 4.2 GB of weights,
 but 10% of the step time.
 
+## Skipping the fills entirely: no decode improvement
+
+The last hypothesis was that the 19.33 ms of zero-fills was on the critical path. Tested by
+skipping them at replay build time (`SKIP_PREFIXES = ("E_131072", "E_81920")` in
+`replay_c.build`), then running the real harness, full protocol, replay healthy
+(`fell_back: 0`, 49 segments, 2,923 calls):
+
+| | prefill | decode | submits/token |
+| --- | --: | --: | --: |
+| baseline (fills emitted) | 1,197.7 ms | **4.89-5.07 tok/s** | 307 |
+| fills skipped | 1,197.7 ms | **4.89 tok/s** | 307 |
+
+No change, in either phase. Parity also unchanged (`895365e27ed4255b`), which proves the fills are
+redundant writes — but removing 120 MB/token of zeroing buys nothing, so the fills are **not on the
+critical path** in the real harness.
+
+That is the strongest result of this investigation and it is negative: the timed cost of a kernel
+(19.33 ms) is not the cost of removing it (0 ms here, 6.21 ms in the earlier isolated ablation).
+The decode gap is not any single identified component.
+
 ## Borrow instead of stage: tested, no effect
 
 The reference's borrow semantics were tried directly: `BORROW_ALIASED = True` in
