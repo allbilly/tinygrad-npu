@@ -150,6 +150,21 @@ Reverted (both the enablement and the guard), parity re-verified, decode back to
 submits. (The 1+1 restore run reports 3,883 ms prefill because a one-warm-up protocol puts warm-up
 in the measured trial; the 3+3 baseline is 1,197.7 ms.)
 
+## Threading the fills makes them slower
+
+`thread_split` is an allowlist of five kernel names, and the `_4` in names like `E_131072_4` is
+tinygrad's shape encoding, not a thread count — so the fills were running single-threaded (2.3 and
+11.6 GB/s). Adding them to the allowlist (a fill writes disjoint output, so it is trivially safe)
+and re-tracing one decode token:
+
+| | seg0 | seg1 | CPU inside segments | wall | decode 3+3 |
+| --- | --: | --: | --: | --: | --: |
+| single-threaded fills | 5.85 | 7.60 | 43.95 ms | 193.29 ms | 4.94-5.07 tok/s |
+| four-way fills | **7.68** | **9.48** | 47.07 ms | **201.97 ms** | **4.975 tok/s** |
+
+Slower. A 2 MB fill across 4 threads at 85 calls/token cannot amortise the dispatch. Reverted
+(parity unchanged throughout: `895365e27ed4255b`).
+
 ## Wall-clock trace of one decode token: the bound is CPU, not device
 
 Timestamped every replay segment and read the submit counter around each, on a warm decode step:
