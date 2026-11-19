@@ -199,16 +199,16 @@ trees share **one kernel name out of 31 and 36**, so a per-kernel join is imposs
 
 **Reference basis, corrected:** the archived `ref-profile` gives 6.48-6.56 tok/s (152.59 ms), but the
 measured tree's own retime receipt reports `median_decode_tps: 6.355455` = **157.34 ms** over 1+3 at
-128/64. Against our ABBA headline of 182.70 ms the gap is therefore **+25.36 ms against the receipt**
+128/64. Against our ABBA headline of ~200 ms the gap is therefore **~+43 ms against the receipt**
 and +30.11 against the archive; both are quoted, and the receipt is the like-for-like one.
 
 Two reconciliations, both stated because they are different protocols:
 
 - the greedy column is the dump column with the sampler at its measured 0.41 instead of 8.48, giving
   190.97; the measured greedy dump is **190.39**, a 0.6 ms agreement.
-- the ABBA headline of **182.70** is 8.3 ms below the dump's 190.97 because the dump runs one call
+- the ABBA headline of **~200** sits ~9 ms above the dump's 190.97 because the dump runs one call
   per segment (958 ctypes calls) to attribute per kernel, and the ABBA runs the shipped 64-call
-  segments. So: class shares come from the dump; the 182.70 total comes from the ABBA; neither
+  segments. So: class shares come from the dump; the ABBA total (~200) comes from the ABBA; neither
   number is quoted in place of the other.
 
 Reference columns sum to 152.585 as published. Our classes sum to the dump wall with a 8.95 ms gap
@@ -249,23 +249,23 @@ time removed in isolation does not reach the wall. Toggle ships off.
 
 The greedy arm is confirmed (below) and kept.
 
-## In-process ABBA: greedy sampling is 5.1% faster (confirmed)
+## In-process ABBA: greedy sampling is NOT faster (retracted)
 
-The harness cannot resolve 8 ms (three trials, 63 s per arm, ~1%/C), so both arms were run in **one
-process**, alternating A,B,B,A with the JIT re-captured per arm and temperature read per block
-(`extra/rockchip/ab_decode.py`). Six blocks per arm, five timed steps each:
+**Retracted.** The first run used 3 rounds (6 pairs) and gave median 0.9491, which I reported as
+"confirmed" despite a sign test of p = 0.344. Re-run with 8 rounds (16 pairs):
 
-| arm | ms/token blocks | median | tok/s |
-| --- | --- | --: | --: |
-| A greedy argmax | 183.3, 181.9, 182.0, 200.8, 182.1, 234.5 | **182.70** | **5.473** |
-| B Gumbel noise | 192.6, 232.9, 192.3, 192.1, 192.7, 192.4 | 192.48 | 5.195 |
+| arm | median |
+| --- | --: |
+| A greedy argmax | **202.83 ms** |
+| B Gumbel noise | **199.26 ms** |
+| paired ratio | median **1.0065**, **8 of 16** pairs favour greedy |
 
-Paired ratios (A/B): `0.9517, 0.7808, 0.9464, 1.0453, 0.9453, 1.2187`, **median 0.9491** — a 5.1%
-win, 9.8 ms/token, matching the 8.48 ms kernel that disappears. The two outlier pairs are whole-block
-stalls (0.78 and 1.22), which is why the median ratio is the statistic to quote.
+No gain. The sampler kernel genuinely falls from 8.48 to 0.41 ms and two calls leave the graph, but
+the wall does not move -- the same pattern as the fills, the attention split and the submit
+reduction: removing CPU work here does not reach the wall.
 
-This is the first decode change confirmed to move the wall, and it validates the method: the same
-ABBA is what the fills, submit and attention changes needed and never had.
+Consequence: our decode is **~199-203 ms**, not the 182.70 I had been quoting from the underpowered
+6-pair run. GREEDY_SAMPLING was reverted; it changed behaviour and bought nothing.
 
 ## The decisive split: submit disabled gives 60.17 ms
 
