@@ -150,12 +150,22 @@ Reverted (both the enablement and the guard), parity re-verified, decode back to
 submits. (The 1+1 restore run reports 3,883 ms prefill because a one-warm-up protocol puts warm-up
 in the measured trial; the 3+3 baseline is 1,197.7 ms.)
 
-## ABBA status: greedy confirmed, fills not measurable yet
+## ABBA status: greedy confirmed, fills measured and rejected
 
-`ab_fills.py` (both arms, `MEMSET_FILLS` toggled per arm) reported **`memset_fills=0` in every
-arm** — the replacement never fired, so the 0.9933 ratio it printed is noise and is not used. The
-counter is what caught it; without it the run would have read as a neutral result. The toggle stays
-off and the arm needs the fill-identification path fixed.
+The first fills run reported `memset_fills=0` in every arm. That was **my measurement bug**: the
+counter increments at *capture*, and the harness read it after the warm-up steps. Verified properly
+with a multi-step run — `built=1 calls_c=900 memset_fills=56` — so the replacement does fire.
+
+Re-run with the counter captured before warm-up, arms verified per block:
+
+| arm | ms/token blocks | median |
+| --- | --- | --: |
+| A memset fills (`memset_fills=56`) | 198.4, 241.2, 244.5, 198.7, 210.4, 178.1 | 204.54 |
+| B kernel fills (`memset_fills=0`) | 207.6, 183.4, 201.8, 183.3, 207.1, 201.5 | 201.62 |
+
+Paired ratios `0.9554, 1.3152, 1.2117, 1.0838, 1.0159, 0.884`, **median 1.0498**. The spread is
+wide (0.88-1.32), so the honest reading is **no gain** rather than 5% slower — the 15 ms of fill
+time removed in isolation does not reach the wall. Toggle ships off.
 
 The greedy arm is confirmed (below) and kept.
 

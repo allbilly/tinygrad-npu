@@ -35,7 +35,7 @@ def temp_c() -> float: return float(TEMP.read_text()) / 1000
 def arm(flag: bool) -> tuple[float, float, float, int]:
   RC.MEMSET_FILLS = flag
   model.prefill_jit.reset(); model.rollout_jit.reset()
-  before = RC.stats.get("memset_fills", 0)
+  before = RC.stats.get("memset_fills", 0)      # before capture: the counter increments at build
   pos = 128
   def step():
     nonlocal pos
