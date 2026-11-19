@@ -150,6 +150,26 @@ Reverted (both the enablement and the guard), parity re-verified, decode back to
 submits. (The 1+1 restore run reports 3,883 ms prefill because a one-warm-up protocol puts warm-up
 in the measured trial; the 3+3 baseline is 1,197.7 ms.)
 
+## The decisive split: submit disabled gives 60.17 ms
+
+The device-vs-host question was settled by removing the submission itself (`SKIP_SUBMIT = True`,
+results garbage, timing valid), same protocol as the dump:
+
+| configuration | wall |
+| --- | --: |
+| full | 199.04 ms |
+| **submit disabled** | **60.17 ms** |
+
+So **device = 138.9 ms, host = 60.2 ms**, and the wall is additive after all — the earlier
+"device-occupancy-bound ~190 ms" inference was wrong.
+
+Reference: 137.1 device + 15.5 host. Our device is within 2 ms of it; our host is **60 vs 15.5**.
+
+That makes the host gap the whole story (44.5 ms), and it makes the four failed transfers
+(fills, submits, attention split, sampler) a *measurement* problem rather than evidence that host
+time does not matter: the harness cannot resolve an 8 ms effect against this board's thermal
+scatter, since a 3 C shift moves the median by ~3%.
+
 ## Greedy sampling: the sampler kernel falls 20x, wall 199 -> 190 ms
 
 The dump identified `E_62080_4` as 62,080 float4 = **248,320 floats, the logits width** — the
