@@ -62,6 +62,31 @@ Our fused Linear does the opposite: it takes a dense fp32 activation and quantis
 Porting `_swiglu_pack` in isolation therefore cannot close the elementwise row. It is only viable
 together with `rockchip_bucketed_int8`'s packed-input GEMM.
 
+## The fills are not emitted at the allocation site
+
+The last directed hypothesis was that the 48 x 2 MB fills come from the buffer allocation, so a
+borrow could be installed there. Reading that path eliminates it:
+
+```python
+# tinygrad/uop/ops.py:820
+def new_buffer(device, size, dtype, num=None):
+    buf = MultiBuffer(...) if isinstance(device, tuple) else Buffer(device, size * dtype.itemsize)
+    return UOp._buffer(size, dtype, slot, device=device, buffer=buf)
+
+# tinygrad/device.py:157
+def allocate(self, opaque=None, external_ptr=None) -> Buffer:
+```
+
+`Buffer(...)` allocates; there is **no initialising store and no poison** anywhere in this tree
+(`grep -r poison tinygrad/` -> nothing). So nothing at the allocation site can emit a zero-fill, and
+a borrow installed there would be a no-op by construction -- the experiment was not run.
+
+That leaves the fills as **graph nodes**: `Tensor.zeros(1,32,128,128)` fires 24 times during capture,
+so its store is captured and replayed. Cutting that producer chain was attempted three ways
+(realise-at-creation 193.49 ms, realise-once-after-first-forward 193.57, eager-init-before-capture
+254.02) and every one left 48 fills. The row stays open with its mechanism unidentified, and it is
+the only row where I have no verified lever.
+
 ## Decision: the packed-payload contract cannot pay at decode
 
 The contract's only lever on our side is the quantise the pack would pre-empt. Measured per call at
