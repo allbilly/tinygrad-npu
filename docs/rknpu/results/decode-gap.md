@@ -168,10 +168,23 @@ cannot change the result. The reference samples with `gpt2_argmax` at 0.085 ms.
 
 The sampler loses 20x its cost and two calls disappear from the graph.
 
-The full-harness 3+10 could not confirm it: it ran at **77.6-82.2 C** against the baseline's
-67.5-71.2 C, and this board moves ~1%/C, so the 13 C gap (about 13%) swamps an 8 ms (4%) gain,
-reading 4.75 tok/s. A temperature-matched re-run is needed for the wall number; the kernel change
-itself is measured under identical conditions and is unambiguous.
+The full harness does **not** confirm it. Re-run at matched temperature, both arms hot:
+
+| arm (both hot) | decode median | trial temps (start) |
+| --- | --: | --- |
+| greedy argmax | 4.7548 tok/s | 77.6-82.2 C |
+| Gumbel noise (baseline) | 4.7593 tok/s | 80.4-84.1 C |
+
+Removing an 8.48 ms kernel does not move the wall. So the one-step dump's 199 -> 190 was not
+transferable — most likely its two runs differ thermally and it measures a single step rather than
+64. Reverted.
+
+**This is the fourth CPU reduction that fails to transfer** (fills, submits, attention split,
+sampler). That consistency is the strongest evidence yet that the wall is *not* the sum of the CPU
+kernels: the trace's 142.89 + 43.95 + 6.45 = 193.29 is numerically additive but not causal. The
+model that fits all four results is that the NPU submit is asynchronous, `submit_seconds` (143 ms)
+is only the ioctl call, and the true device occupancy is ~190 ms with the CPU work overlapped
+inside it.
 
 ## Host profile (py-spy) and the kernel dump artifact
 
