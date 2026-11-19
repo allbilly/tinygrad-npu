@@ -100,7 +100,7 @@ That points at a **data-dependent** divergence, which is plausible for this kern
 path branches on `scan_disjoint` and on `direct`, and NaN changes comparisons) and unacceptable to
 ignore, because a model can produce extreme values.
 
-**Resolution: the pooled scan entry stays disabled (`scan_native.py` calls the serial function).**
+**Resolution (superseded):** this originally concluded that the pooled entry stays disabled. `scan_native.py` now calls `cpu_gated_delta_scan_pooled`, and the paired run above records `status=1` (all four groups completed) at 3.86x over serial, so the dispatch is live.
 The next test is `parity4` with finite inputs; if it passes, the divergence is confined to
 non-finite inputs and the decision becomes whether the model can produce them; if it fails, the
 partition is wrong in a way `parityplan` does not model.

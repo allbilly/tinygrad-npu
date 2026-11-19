@@ -150,6 +150,24 @@ Reverted (both the enablement and the guard), parity re-verified, decode back to
 submits. (The 1+1 restore run reports 3,883 ms prefill because a one-warm-up protocol puts warm-up
 in the measured trial; the 3+3 baseline is 1,197.7 ms.)
 
+## Scan dispatch: confirmed live (status=1, four groups)
+
+The scan's pooled dispatch was the open question. Two independent pieces of evidence answer it:
+
+| evidence | value |
+| --- | --- |
+| paired serial vs pooled, same source (`splitcheck/README.md:11`) | serial 6.78 ms/call, pooled 1.76 ms/call, **3.86x** |
+| dispatch status from the paired run (`splitcheck/README.md:90`) | `rc=0 status=1` — **all four groups completed** |
+| our in-model decode scan | 278 us/call (14 GB/s on a 2 MB state) |
+| reference in-model decode scan | 173 us/call (23 GB/s) |
+
+So the scan is not falling back to serial: status 1 with a 3.86x paired speedup means the four
+workers run. The remaining 1.6x against the reference is memory efficiency at `tokens=1`, not
+dispatch — and the kernel source is byte-identical, so it is not the code either.
+
+Note: `splitcheck/README.md` previously concluded the pooled entry "stays disabled"; that is stale
+and has been corrected — `scan_native.py` calls the pooled entry.
+
 ## The scan kernel is the reference's, byte for byte
 
 The last unoptimised component was the scan (278 us/call vs the reference's 173). Diffed against the
