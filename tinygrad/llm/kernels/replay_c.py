@@ -197,6 +197,7 @@ def build(linear, inputs):
   # per call in isolation (19.33 -> 4.21 ms of fill time), but only the in-process ABBA can tell
   # whether that reaches the wall -- so this ships off and is toggled by ab_fills.py.
   _ANSI = __import__("re").compile(r"\x1b\[[0-9;]*m")
+  _KNOWN_FILL_BYTES = (("E_131072", 131072*16), ("E_81920", 81920*8))
   _FILL_NBYTES: dict[str, int] = {}
   def _fill_nbytes(name: str, ast) -> int:
     if name in _FILL_NBYTES: return _FILL_NBYTES[name]
@@ -211,6 +212,14 @@ def build(linear, inputs):
           nb = st[0].src[0].max_numel() * bufs[0].dtype.itemsize
     except Exception:
       nb = 0
+    # The AST walk above does not recognise these in this tree (measured: memset_fills stayed 0),
+    # so fall back to the two known state fills by name. Sizes are the emitted stores' widths:
+    # 131072 float4 of f32 and 81920 float4 of f16.
+    if nb == 0:
+      for _pre, _sz in _KNOWN_FILL_BYTES:
+        if name.startswith(_pre):
+          nb = _sz
+          break
     _FILL_NBYTES[name] = nb
     return nb
   for call in linear.src:
