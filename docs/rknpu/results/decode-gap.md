@@ -264,8 +264,23 @@ No gain. The sampler kernel genuinely falls from 8.48 to 0.41 ms and two calls l
 the wall does not move -- the same pattern as the fills, the attention split and the submit
 reduction: removing CPU work here does not reach the wall.
 
-Consequence: our decode is **~199-203 ms**, not the 182.70 I had been quoting from the underpowered
-6-pair run. GREEDY_SAMPLING was reverted; it changed behaviour and bought nothing.
+Three independent ABBAs, with their bands (the third re-run retained the per-block temperatures that
+the second discarded):
+
+| run | band | pairs | median ratio | A | B |
+| --- | --- | --: | --: | --: | --: |
+| 1 (6 pairs) | 70-72 C | 6 | 0.9491 | 182.70 | 192.48 |
+| 2 (16 pairs) | not recorded | 16 | 1.0065 | 202.83 | 199.26 |
+| **3 (16 pairs, temps kept)** | **64.7-70.2 C** | 16 | **0.9991** | **192.09** | **192.24** |
+| 3, restricted to the reference's band 69.3-76.7 C | 69.3-70.2 C | 5 | 0.9789 | 192.8 | 196.0 |
+
+Verdict: **the sampler has no effect** (0.9491, 1.0065, 0.9991 -- no consistent direction, and the
+one band-matched subset is n=5). GREEDY_SAMPLING stays reverted.
+
+The third run is also the most stable absolute measurement of the session: 14 of 16 blocks are
+191.9-192.3 ms, so **our decode is ~192 ms at 64.7-70.2 C**. Against the reference's 157.34 ms at
+69.3-76.7 C that is a gap of **~+35 ms**, and unlike the earlier numbers this one is stable enough
+to compare.
 
 ## The decisive split: submit disabled gives 60.17 ms
 
