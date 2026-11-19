@@ -104,6 +104,26 @@ device plus host to within a millisecond, so the host work *is* serial with the 
 ablation would have to preserve finite values in the dropped buffer (write zeros, not skip the
 segment) before its delta could be believed.
 
+## The elementwise class is half zero-fills: 19.3 ms, 120 MB per token
+
+Two kernels in the elementwise row are not elementwise at all. Read from their generated sources:
+
+| kernel | body | bytes/call | calls | MB/token | ms |
+| --- | --- | --: | --: | --: | --: |
+| `E_131072_4` | `for Lidx0<131072: *(float4*)(dst+Lidx0*4) = {0,0,0,0}` | 2,097,152 | 48 | 96 | 8.63 |
+| `E_81920_4` | `for Lidx0<81920: *(__fp164*)(dst+Lidx0*4) = {0,0,0,0}` | 655,360 | 37 | 24 | 10.70 |
+
+So **19.33 ms of the 30.84 ms elementwise row is zeroing 120 MB per token**. Real elementwise
+compute is ~11.5 ms, close to the reference's 6.57.
+
+`E_81920_4` writes 655 KB in 289 µs = **2.3 GB/s**, an order of magnitude below the 23.8 GB/s
+ceiling, and the second fill is likewise ~11 GB/s. These are not bandwidth-limited passes; they are
+materialisation of buffers that the graph then overwrites.
+
+Neither is a `Tensor.*` allocation (that count is 0 during decode), so they are emitted by the
+scheduler for buffers it treats as read-write state. 120 MB/token is 2.9% of the 4.2 GB of weights,
+but 10% of the step time.
+
 ## Retraction: "67 µs vs 15 µs per call" compares different shapes
 
 The elementwise rows were compared as if the two trees ran the same kernels. They do not:
