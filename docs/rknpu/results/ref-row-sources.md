@@ -150,7 +150,11 @@ Replacing it with a Python-level select when the position is known:
 | | fills | calls | parity |
 | --- | --: | --: | --- |
 | baseline | **56** | 956 | `895365e27ed4255b` |
-| select at Python level | **8** | 908 | **`c693475255158a69`** |
+| **A:** `rolling_window` known-position path, alone | **56** | 956 | `895365e27ed4255b` |
+| A + **B:** `model.py:819 where -> select` | **8** | 908 | **`c693475255158a69`** |
+
+The control matters: A was measured at 56 fills **on its own**, so the 48-fill drop belongs to B and
+not to A+B together; parity is neutral for A and only moves when B is added.
 
 So the fills disappear — and the result changes. **The copy is semantically load-bearing**: the scan
 stores into the buffer `where` produced, so `where` is the copy-on-write step that leaves the
