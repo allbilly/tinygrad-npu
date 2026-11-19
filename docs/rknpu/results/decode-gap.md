@@ -150,6 +150,29 @@ Reverted (both the enablement and the guard), parity re-verified, decode back to
 submits. (The 1+1 restore run reports 3,883 ms prefill because a one-warm-up protocol puts warm-up
 in the measured trial; the 3+3 baseline is 1,197.7 ms.)
 
+## Wall-clock trace of one decode token: the bound is CPU, not device
+
+Timestamped every replay segment and read the submit counter around each, on a warm decode step:
+
+| row | ms | share |
+| --- | --: | --: |
+| device (`submit_seconds`) | **142.89** | 73.9% |
+| CPU inside segments | **43.95** | 22.7% |
+| between segments (Python / replay) | 6.45 | 3.3% |
+| **wall** | **193.29** | |
+
+142.89 + 43.95 + 6.45 = 193.29, additive to the millisecond. So decode is **CPU-bound at 44 ms**,
+not device-bound — my earlier inference from "removing host work changes nothing" was wrong, and
+this trace is the instrument that settles it.
+
+The largest CPU segments are the first two (5.85 + 7.60 ms), which is where the fills live, plus
+`seg15` at 9.48 ms. Note those two segments hold only 13.4 ms of CPU between them, so the 19.33 ms
+the 1-call-per-segment attribution assigned to the fills alone was itself inflated — consistent with
+the memset replacement saving only 5 ms at the wall.
+
+The reference's host total is 15.5 ms against our 43.95 + 6.45 = 50.4 ms. That 35 ms is the target,
+and it is CPU, not the NPU.
+
 ## The GEMM partitioning is already the reference's: nothing to port
 
 The last open lever was the reference's 203-submit / 2-domain GEMM partitioning. Measured on our

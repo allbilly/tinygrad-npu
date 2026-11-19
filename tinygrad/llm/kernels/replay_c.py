@@ -50,6 +50,7 @@ def _probe_rt(rt) -> None:
         attrs[a] = f"<{type(exc).__name__}>"
   addr_probe[name] = attrs
 
+TRACE = None   # set to a list to record (segment, ms, submit_ms) per call
 stats = {"linear": 0, "c_ms": 0.0, "py_ms": 0.0, "arr_ms": 0.0, "segs": 0, "by_seg": {}, "built": 0, "fell_back": 0, "segments": 0, "calls_c": 0,
          "calls_py": 0, "compile_ms": 0.0, "exec_ms": 0.0, "reasons": {}}
 
@@ -111,9 +112,23 @@ class Compiled:
     for kind, payload in self.plan:
       if kind == "c":
         _c0 = _t.perf_counter()
+        _s0 = 0
+        try:
+          from tinygrad import Device as _D
+          _s0 = _D["ROCKCHIP:0"].hw.fused_stats[0]
+        except Exception:
+          pass
         fn = getattr(self.lib, payload)
         fn.restype = ctypes.c_int
         rc = fn(in_arr, v_arr)
+        if TRACE is not None:
+          _s1 = 0
+          try:
+            from tinygrad import Device as _D2
+            _s1 = _D2["ROCKCHIP:0"].hw.fused_stats[0]
+          except Exception:
+            pass
+          TRACE.append((payload, (_t.perf_counter()-_c0)*1e3, (_s1-_s0)/1e6))
         _dt = (_t.perf_counter() - _c0) * 1e3
         stats["c_ms"] += _dt
         # keyed by object: segment names repeat across JITs, so a bare name collides
