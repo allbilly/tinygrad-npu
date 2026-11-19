@@ -150,6 +150,28 @@ Reverted (both the enablement and the guard), parity re-verified, decode back to
 submits. (The 1+1 restore run reports 3,883 ms prefill because a one-warm-up protocol puts warm-up
 in the measured trial; the 3+3 baseline is 1,197.7 ms.)
 
+## The scan kernel is the reference's, byte for byte
+
+The last unoptimised component was the scan (278 us/call vs the reference's 173). Diffed against the
+dumped reference source:
+
+```
+$ wc -l ref-kernels-all/c/rockchip_recurrent.c extra/rockchip/recurrent.c
+  491 .../rockchip_recurrent.c
+  491 extra/rockchip/recurrent.c
+$ diff ref-kernels-all/c/rockchip_recurrent.c extra/rockchip/recurrent.c | wc -l
+0
+```
+
+**Identical, 491 lines, zero differences.** So the 1.6x per-call difference cannot be the inner loop
+or the vectorisation — the code is the same. It is invocation (thread count) or measurement basis.
+Threading it was measured before: the `bh` split's ceiling is 1.21x (about 1.2 ms of 193) and
+pthreads cost +100 ms, so it cannot pay.
+
+With that, every component of the decode budget has been either matched to the reference's code or
+measured to be at parity: weights, domains, per-byte GEMM rate, submit geometry, fills, attention,
+and now the scan.
+
 ## The attention split at matched temperature: no gain (the 5.05 was thermal)
 
 3 warm-ups + 10 measured, three arms. The first split run looked like a 2.5% win; it had started
