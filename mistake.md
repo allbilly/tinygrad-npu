@@ -1533,6 +1533,26 @@ the others fail. If two models produce the same total, the number has no informa
 match is with a quantity you measured yourself, check that your own instrument agrees with the model
 you are fitting (here it did not).
 
+### M80. Counted the same call twice through two wrappers and invented a factor of two
+
+Explaining why the decode replay holds 48 fill kernels while only 24 `Tensor.zeros` calls appear
+during capture, I wrote "24 state initialisations, each emitting two fill kernels (`full` + `zeros`)".
+
+That is a double count. `Tensor.zeros` **calls** `Tensor.full` (`mixin/creation.py:128`:
+`return cls.full(argfix(*shape), 0.0, **kwargs)`), so instrumenting both APIs counted **the same 24
+calls twice**. There was never a second kernel from that path.
+
+The result was a tidy, confident explanation (`24 x 2 = 48`) built entirely from my own instrumentation
+artefact -- the same defect as M69's overlapping rows and M55's fused wall, in a new place: the
+measurement double-counted because two hooks observed one call.
+
+The real relationship remains unknown: 24 captures and 48 kernels are both measured, and no verified
+explanation connects them (`conv_state` is 96 KB, so "2 states x 24 blocks" is out too).
+
+**Fix:** when two instrumented APIs can call each other, count at **one** level only, or assert the
+call graph is disjoint before adding counters. A factor that appears "for free" from two hooks is a
+double-count until proven otherwise.
+
 ## Guards now installed
 
 | guard | where |
@@ -1571,6 +1591,7 @@ you are fitting (here it did not).
 | build the class table before the first optimisation and work down its open deltas | `mistake.md` M77 |
 | hash the files a source map cites against the measured tree before concluding from them | `mistake.md` M78 |
 | a numeric match is evidence only if the candidate decompositions are exhaustive and exclusive | `mistake.md` M79 |
+| instrument one call level only; two hooks that can call each other count the same event twice | `mistake.md` M80 |
 | a row is closed by a paired measurement, never by an isolation benchmark | `mistake.md` M77 |
 | an ablation writes to a path naming the ablation, never to the canonical artifact directory | `mistake.md` M75 |
 | encode a doc's trap into the tool in the same edit | `mistake.md` M67 |

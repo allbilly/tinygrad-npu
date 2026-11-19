@@ -107,12 +107,18 @@ the borrow path then handles in place (`rockchip_replay.py:608 if self.borrow_ou
 and `24 recurrent + 24 conv + 16 KV + 1`. Because `2x24 == 24+24`, the arithmetic cannot tell them
 apart, so it is not evidence that the borrows are the state buffers.
 
-What our side actually says (allocation counter, decode capture):
-`{('full',24), ('zeros',24)}` at 524,288 elements -- i.e. **24 state initialisations, each emitting
-two fill kernels** (24 x 2 = 48 fills). `conv_state` is `(1,3,channels)` and cannot be one of them.
-So the honest reading is: our 48 fills are 24 recurrent-state initialisations doubled by codegen,
-and the reference's 65 output copies are of unknown composition. The borrow hypothesis stays a
-hypothesis.
+What our side actually says:
+
+- **24** `Tensor.zeros(1,32,128,128)` calls during the decode capture (allocation counter);
+- **48** f32 fill kernels in the decode replay (kernel names);
+- `conv_state` is `(1,3,channels)` ~= 96 KB, so it cannot be one of the 2 MB fills.
+
+**Why 48 and not 24 is not established.** Two explanations I offered are both wrong: "24 x 2 because
+`zeros` emits `full` as well" is a double count (`Tensor.zeros` *calls* `Tensor.full` -- creation.py:128,
+so my two wrappers counted the same call twice), and "2 states x 24 blocks" fails because `conv_state`
+is far too small. The honest position is two measured numbers with an unexplained factor of two
+between them, and the reference's 65 output copies of unknown composition. The borrow hypothesis
+stays a hypothesis.
 
 That single fact explains two rows at once:
 
