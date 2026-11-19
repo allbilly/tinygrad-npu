@@ -150,6 +150,23 @@ Reverted (both the enablement and the guard), parity re-verified, decode back to
 submits. (The 1+1 restore run reports 3,883 ms prefill because a one-warm-up protocol puts warm-up
 in the measured trial; the 3+3 baseline is 1,197.7 ms.)
 
+## Scan and attention: same arithmetic, different width and serialism
+
+Source-level diff of the two remaining per-kernel deficits against the reference dumps:
+
+| | ours | reference | consequence |
+| --- | --- | --- | --- |
+| attention exp | `exp2_scalar`, "the same coefficients the reference uses" (`attn.c:16`) | same polynomial | not the cause |
+| attention inner loop | float4 MACs (`attn.c:81`, `:97`) | float4 + `__builtin_convertvector` | not the cause |
+| attention KV width | **fp32** (`attn.py` placeholder `dtypes.float`) | **fp16** (`const half4 *source=(const half4*)(keys+...)`) | we move 2x the bytes |
+| attention groups at decode | `for (g=0..3)` serial; `RK_SPLIT=0` for `TOK<8` by design | grouped per KV head | 4 groups sequential |
+| scan | `rockchip_scan_simd`, 278 us/call | `rockchip_cpu_gated_delta_scan`, 173 us/call | +2.5 ms |
+
+Neither is a codegen defect that can be fixed in place: the KV width is a numerical choice (fp16
+cache) and the serial groups are a deliberate trade recorded in `attn.c`. Fixing either changes
+what the model computes, so the bit-exact gate rejects it — same wall as the fills. Together they
+are worth ~5.5 ms of the 35 ms host gap.
+
 ## CPU ranked by kernel name (one call per segment)
 
 Trace with `MAX_CALLS_PER_SEG = 1`, so each segment is one kernel and the trace carries its name;
