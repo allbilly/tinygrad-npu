@@ -1460,6 +1460,31 @@ look like a different story.
 provenance per column) and state any protocol difference *inside the table*, not in a later
 paragraph. If two totals exist for the same configuration, the table carries both and names why.
 
+### M77. Built instruments and optimised components before building the table that says which component matters
+
+The class decomposition table existed only after twenty-odd turns. Before it, the order of work came
+from whatever had just been measured, and it was wrong in both directions:
+
+| what I worked on | its row in the table | was it the lever? |
+| --- | --: | --- |
+| device/GEMM partitioning (domains, submits, byte-identical weights) | +5.8 | no -- at parity with the reference |
+| attention split ("27% faster kernel") | +1.8 | no -- **9.4% slower at the wall** |
+| fills (memset, four-way, skip) | +9.5 | no -- ratio 1.0498, below noise |
+| **greedy sampler** | **+8.2 of the elementwise row** | **yes, 5.1%** -- and it was found by accident, in the kernel dump, not by the table |
+
+The sampler is the indictment: 8.48 ms/token, the single largest removable item, discovered only
+because a per-kernel dump happened to list it. A table built on day one would have pointed at it
+immediately.
+
+The second half of the lesson is that a table without a closing rule is still not enough: two of the
+three biggest rows turned out to be unclosable, and a row only becomes a decision when a **paired**
+measurement closes it -- isolation numbers were wrong every time they were used (fills 19.3 -> 4.2 ms
+moved the wall not at all).
+
+**Fix:** build the class table **before** the first optimisation, re-derive it after every change, and
+work strictly down the open deltas. The table is the plan; the ABBA is the judge. Both are now
+mandated in `AGENTS.md`.
+
 ## Guards now installed
 
 | guard | where |
@@ -1495,6 +1520,8 @@ paragraph. If two totals exist for the same configuration, the table carries bot
 | a documented command must succeed with its defaults, once, before it is written down | `mistake.md` M67 |
 | a requested comparison is one table: both columns, same classes, units, deltas, provenance | `mistake.md` M74 |
 | fix the column set before answering; put protocol differences inside the table, not after it | `mistake.md` M76 |
+| build the class table before the first optimisation and work down its open deltas | `mistake.md` M77 |
+| a row is closed by a paired measurement, never by an isolation benchmark | `mistake.md` M77 |
 | an ablation writes to a path naming the ablation, never to the canonical artifact directory | `mistake.md` M75 |
 | encode a doc's trap into the tool in the same edit | `mistake.md` M67 |
 | prove a toggle took effect via a counter only that path increments | `mistake.md` M59 |
