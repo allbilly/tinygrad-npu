@@ -169,6 +169,18 @@ not to A+B together; parity is neutral for A and only moves when B is added.
 So any copy of that 2 MB state buffer carries the fills -- the where's zero-select is not a
 separable cost.
 
+**Correction (second):** the fills do not track allocation either. Measured per buffer:
+
+| buffer | allocations at capture | fill kernels | ratio |
+| --- | --: | --: | --: |
+| f32 524,288 (2 MB recurrent state) | 24 | 48 | **2:1** |
+| f16 655,360 (655 KB window) | 1 | 8 | **8:1** |
+
+Two different ratios rule out any per-allocation or fixed-factor model. The count scales with the
+number of **consumers** of the buffer -- one re-materialisation per use -- which is also why
+realising the state at creation (three ways, all measured) changed nothing: the buffer is written by
+the scan, so it is not const and the compiler re-emits its producer per consumer.
+
 **Correction:** an earlier version of this paragraph also said "the copy's layout is part of the
 numerics". That was a confound: the clone variant had swapped **both** branches, so prefill capture
 used `zeros_like()` instead of `where(True, 0, state)`. Isolating the decode branch only:
