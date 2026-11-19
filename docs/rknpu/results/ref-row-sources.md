@@ -30,6 +30,21 @@ native replay removing the 6.45 ms of Python between segments.
 Three of those four are fusions we do not have; the fourth (fp16 cache width) was tested and is not
 the mechanism.
 
+## The norm+quantise fusion cannot apply at decode
+
+`register_norm` (`py/rockchip_norm_quant.py:22-28`) is gated hard:
+
+```python
+if (ONPU_NORM_QUANT and ... source.shape[-1]==896
+    and all(isinstance(n,int) for n in source.shape) and math.prod(source.shape[:-1])==128
+    and weight.shape==(896,) ...):
+```
+
+and `_program` re-checks `x.shape!=(128,896) -> return None`. It is a **128-row, 896-wide**
+specialisation: prefill only, and not even this model's hidden width. At decode (one row) it never
+engages, so the q/dq row's reference figure is **not reachable by porting that kernel** — its 1.02 ms
+comes from a path we cannot use at m=1.
+
 ## Correction and consequence: the pack is a layout contract, not just a fusion
 
 `_swiglu_pack` consumes **fp32** gate/up and emits a **packed `__fp16` payload** in the transposed
