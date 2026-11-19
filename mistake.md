@@ -1512,6 +1512,27 @@ before drawing a conclusion from them. A dump is evidence only if it is proven t
 revision; `AGENTS.md` already says the measured configuration is identified by its dirty-diff sha,
 not by a path.
 
+### M79. Presented a non-unique arithmetic match as strong evidence
+
+Challenged with "u sure?", I answered that the reference's `borrowed_outputs: 65` decomposes exactly
+into its state buffers -- `2x24 GDN + 2x8 KV + 1 logits = 65` -- matching our own 48 fills
+(`2x24`), and said that was "hard to call a coincidence".
+
+It is not evidence at all. `2x24 == 24 + 24`, so `24 recurrent + 24 conv + 16 KV + 1` also gives 65,
+and so does any pairing that spreads 48 across two categories of 24. The match cannot discriminate
+between the state models, which is the only thing it was being used for.
+
+Worse, my own instrument contradicted the premise: the allocation counter reported
+`{('full', 24), ('zeros', 24)}` at 524,288 elements -- **24 state initialisations, each emitting two
+fill kernels** -- and `conv_state` is `(1, 3, channels)`, far too small to be one of the 2 MB fills.
+So "48 = 2 states x 24 blocks" was wrong before the reference side was even considered.
+
+**Fix:** an arithmetic agreement is only evidence if the candidate decompositions are **exhaustive
+and mutually exclusive**. Before calling a number a match, enumerate the alternatives and say why
+the others fail. If two models produce the same total, the number has no information -- and when the
+match is with a quantity you measured yourself, check that your own instrument agrees with the model
+you are fitting (here it did not).
+
 ## Guards now installed
 
 | guard | where |
@@ -1549,6 +1570,7 @@ not by a path.
 | fix the column set before answering; put protocol differences inside the table, not after it | `mistake.md` M76 |
 | build the class table before the first optimisation and work down its open deltas | `mistake.md` M77 |
 | hash the files a source map cites against the measured tree before concluding from them | `mistake.md` M78 |
+| a numeric match is evidence only if the candidate decompositions are exhaustive and exclusive | `mistake.md` M79 |
 | a row is closed by a paired measurement, never by an isolation benchmark | `mistake.md` M77 |
 | an ablation writes to a path naming the ablation, never to the canonical artifact directory | `mistake.md` M75 |
 | encode a doc's trap into the tool in the same edit | `mistake.md` M67 |

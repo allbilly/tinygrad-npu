@@ -101,9 +101,18 @@ native_execution.prefill: runs 1, borrow_outputs_enabled True, borrowed_outputs 
 ```
 
 `borrowed_outputs` is `len(native.output_copies)` -- **65 output copies identified** in decode, which
-the borrow path then handles in place (`rockchip_replay.py:608 if self.borrow_outputs:`). That the
-absence of fill kernels follows from this borrow path is **consistent but not proven**: nothing in
-the dump ties those 65 copies to the state buffers.
+the borrow path then handles in place (`rockchip_replay.py:608 if self.borrow_outputs:`).
+
+**65 is not a discriminating number.** At least two state models give it: `2x24 GDN + 2x8 KV + 1`
+and `24 recurrent + 24 conv + 16 KV + 1`. Because `2x24 == 24+24`, the arithmetic cannot tell them
+apart, so it is not evidence that the borrows are the state buffers.
+
+What our side actually says (allocation counter, decode capture):
+`{('full',24), ('zeros',24)}` at 524,288 elements -- i.e. **24 state initialisations, each emitting
+two fill kernels** (24 x 2 = 48 fills). `conv_state` is `(1,3,channels)` and cannot be one of them.
+So the honest reading is: our 48 fills are 24 recurrent-state initialisations doubled by codegen,
+and the reference's 65 output copies are of unknown composition. The borrow hypothesis stays a
+hypothesis.
 
 That single fact explains two rows at once:
 
