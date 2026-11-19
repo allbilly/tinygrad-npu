@@ -150,6 +150,24 @@ Reverted (both the enablement and the guard), parity re-verified, decode back to
 submits. (The 1+1 restore run reports 3,883 ms prefill because a one-warm-up protocol puts warm-up
 in the measured trial; the 3+3 baseline is 1,197.7 ms.)
 
+## fp16 attention: bit-exact, and slower
+
+The reference reads its KV cache as `half4` while we made an fp32 copy every call
+(`kv.float().contiguous()`). Converting our kernel to read `half4` via
+`__builtin_convertvector` and dropping the copy is **exact** — parity stayed `895365e27ed4255b` —
+and removes 2x the bytes plus one cast kernel per call. Measured, full 3+3:
+
+| | prefill | decode | parity |
+| --- | --: | --: | --- |
+| fp32 cache + cast (baseline) | 1,197.7 ms | 4.94-5.07 tok/s | `895365e27ed4255b` |
+| **half4 cache, no cast** | 1,203.6 ms | **4.716 tok/s** | `895365e27ed4255b` |
+
+**Slower by ~0.3 tok/s**, despite moving half the bytes. The in-kernel half->float conversion
+costs more than the fp32 copy it removed on these cores. Reverted.
+
+So the fp16 difference is real but not a lever either: it is a numerical/layout property that,
+when matched, makes the kernel slower here.
+
 ## Scan and attention: same arithmetic, different width and serialism
 
 Source-level diff of the two remaining per-kernel deficits against the reference dumps:
