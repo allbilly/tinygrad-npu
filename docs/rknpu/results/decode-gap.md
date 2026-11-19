@@ -150,6 +150,15 @@ Reverted (both the enablement and the guard), parity re-verified, decode back to
 submits. (The 1+1 restore run reports 3,883 ms prefill because a one-warm-up protocol puts warm-up
 in the measured trial; the 3+3 baseline is 1,197.7 ms.)
 
+## ABBA status: greedy confirmed, fills not measurable yet
+
+`ab_fills.py` (both arms, `MEMSET_FILLS` toggled per arm) reported **`memset_fills=0` in every
+arm** — the replacement never fired, so the 0.9933 ratio it printed is noise and is not used. The
+counter is what caught it; without it the run would have read as a neutral result. The toggle stays
+off and the arm needs the fill-identification path fixed.
+
+The greedy arm is confirmed (below) and kept.
+
 ## In-process ABBA: greedy sampling is 5.1% faster (confirmed)
 
 The harness cannot resolve 8 ms (three trials, 63 s per arm, ~1%/C), so both arms were run in **one
