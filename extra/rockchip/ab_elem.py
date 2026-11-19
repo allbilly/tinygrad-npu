@@ -9,6 +9,7 @@ import pathlib, statistics as st, sys, time
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import thread_split as TS
+import tinygrad.codegen as CG
 TS.install()
 from tinygrad.llm.kernels import replay_c as RC
 RC.install()
@@ -36,6 +37,10 @@ def temp_c() -> float: return float(TEMP.read_text()) / 1000
 
 def arm(on: bool) -> tuple[float, float, float, int]:
   TS.THREAD_SPLIT.clear(); TS.THREAD_SPLIT.update(FULL if on else {})
+  # `to_program_cache` memoises the PROGRAM uop *including the compiled binary*, so resetting the
+  # JIT is not enough: without this, arm B silently reuses arm A's transformed binaries and the
+  # ABBA compares an arm against itself. Both arms clear it, so both recompile.
+  CG.to_program_cache.clear()
   model.prefill_jit.reset(); model.rollout_jit.reset()
   before = sum(TS.HITS.values()) if hasattr(TS, "HITS") else 0
   pos = 128
@@ -51,12 +56,20 @@ def arm(on: bool) -> tuple[float, float, float, int]:
   return st.median(ts), t0, temp_c(), hits
 
 res = {"A": [], "B": []}
+hits_a, hits_b = [], []
 for r in range(ROUNDS):
   for name, on in (("A", True), ("B", False), ("B", False), ("A", True)):
     ms, t0, t1, hits = arm(on)
     res[name].append(ms)
+    (hits_a if name == "A" else hits_b).append(hits)
     print(f"round {r+1} arm {name} ({'4-way' if on else 'serial'}): {ms:.2f} ms/token "
           f"({1000/ms:.3f} tok/s) temp {t0:.1f}->{t1:.1f} C  transform_hits={hits}", flush=True)
+
+# Arm verification: without a recompile both arms report 0 and the comparison is a placebo.
+if all(h == 0 for h in hits_a):
+  raise SystemExit("ARM A DID NOT TRANSFORM ANYTHING -- comparison is a placebo")
+if any(h != 0 for h in hits_b):
+  raise SystemExit("ARM B TRANSFORMED SOMETHING -- arms are not distinct")
 
 a, b = res["A"], res["B"]
 print(f"\nA 4-way : {[round(x,1) for x in a]}  median {st.median(a):.2f} ms ({1000/st.median(a):.3f} tok/s)")

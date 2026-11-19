@@ -12,6 +12,7 @@ import thread_split; thread_split.install()
 from tinygrad.llm.kernels import replay_c as RC
 RC.install()
 import attn_native as AN
+import tinygrad.codegen as CG
 from tinygrad import Tensor
 from tinygrad.llm.gguf import gguf_parse
 from tinygrad.llm.model import Transformer
@@ -36,6 +37,10 @@ def temp_c() -> float: return float(TEMP.read_text()) / 1000
 def arm(flag: bool) -> tuple[float, float, float, str]:
   AN.SPLIT_DECODE = flag
   AN._PROGRAM.clear()                     # force a rebuild with the new #if
+  # Rebuilding the source is not enough: `to_program_cache` memoises the PROGRAM uop *including
+  # the compiled binary*, keyed on a structurally identical ast, so without this the second arm
+  # runs the first arm's binary. Both arms clear it.
+  CG.to_program_cache.clear()
   model.prefill_jit.reset(); model.rollout_jit.reset()
   src = AN._source(1, 160)
   line = next((l for l in src.splitlines() if l.strip().startswith("#if RK_SPLIT") or

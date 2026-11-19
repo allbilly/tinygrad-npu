@@ -715,6 +715,64 @@ element* than ours. The reference is not faster at elementwise; it does less of 
 That is a graph-structure difference (fusion), not a kernel-quality difference, which is why the
 per-call framing never produced a lever.
 
+
+## The host rows, measured with arms that actually fire
+
+Every in-process ABBA in this tree reset the JIT between arms but not `to_program_cache`
+(`tinygrad/codegen/__init__.py:539`), which memoises the PROGRAM uop **including the compiled
+binary** and is keyed on a structurally identical ast. So an arm that changed only the emitted
+source ran the *other* arm's binary: the comparison was an arm against itself, and it could only
+ever return ~1.0. Both harnesses now clear it, and `ab_elem` raises if arm A transforms nothing.
+
+### 1. Fused-call CPU split: corrected, and it is not the 19 us/call I said
+
+Timers around both `sync_mem` ioctls in the emitted C, over one decode step, 307 fused calls:
+
+| component | ms/token | us/call |
+| --- | --: | --: |
+| submit (device) | 142.65 | 464.7 |
+| quantise | 0.83 | 2.7 |
+| both syncs | 0.87 | 2.8 |
+| dequantise | 1.20 | 3.9 |
+| **CPU inside the fused call** | **2.90** | **9.4** |
+
+So the fused call's host half is **2.9 ms/token**, not the ~7.7 ms implied by a "19 us/call
+remainder": the two cache-maintenance ioctls cost 2.8 us/call combined, not ~14. Nothing in this
+row is worth attacking -- the largest item is 3.9 us/call of dequantise.
+
+### 2. Elementwise four-way split: null (valid measurement)
+
+| arm | blocks (ms/token) | median |
+| --- | --- | --: |
+| A 4-way (7 transforms fired) | 206.7, 210.2, 193.1, 194.0, 208.8, 193.5, 193.4, 194.6, 193.0, 220.7, 209.5, 193.9 | **194.31** |
+| B serial (0 transforms) | 197.6, 222.9, 192.6, 193.4, 192.4, 203.6, 192.6, 211.2, 192.8, 218.8, 241.4, 192.5 | 195.49 |
+
+Paired ratio median **1.0031**, 8 of 12 pairs favouring serial. The decode kernels on the
+allowlist (`E_2_16_32_4` 90.5 us/call, `E_62080_4` 2634.6, `E_8192_4` 70.7, `E_3072_3` 49.6,
+`E_8_32_4_4` 60.5, `E_16_64_4` 68.7) totalled 12.3 ms of CPU time, and splitting them four ways
+moved nothing: at 20-90 us per call the four-way dispatch costs about what the work costs. The
+allowlist additions are reverted. Log: `results/threadsplit/decode-split-verified.log`.
+
+### 3. Attention group split: unresolved, not shipped
+
+The arm was rejected earlier at 1.0940, but `attn_native._PROGRAM` is keyed `(tokens, capacity)`
+and the flag was not in the key, and `to_program_cache` was not cleared -- that arm could not fire.
+Re-measured with both fixed:
+
+| arm | median | pairs |
+| --- | --: | --- |
+| A split 4 | **192.57** | 9 of 12 favouring split |
+| B serial | 194.08 | |
+
+Paired ratio median **0.9918**; sign test p = 0.073. Directionally positive at ~0.8% (1.5 ms) and
+not resolvable at 12 pairs, so the shipped configuration stays serial. Log:
+`results/threadsplit/attn-split-verified.log`.
+
+**Scope of the defect:** `ab_decode` and `ab_fills` change the graph, so their keys differ and
+their results stand. `ab_elem` and `ab_attn` changed only emitted source and are re-measured above.
+`ab_scan` has the same shape as `ab_attn` and its conclusion should be treated as unmeasured until
+re-run.
+
 ## Next, in order
 
 ## Next, in order
