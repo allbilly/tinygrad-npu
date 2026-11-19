@@ -150,6 +150,27 @@ Reverted (both the enablement and the guard), parity re-verified, decode back to
 submits. (The 1+1 restore run reports 3,883 ms prefill because a one-warm-up protocol puts warm-up
 in the measured trial; the 3+3 baseline is 1,197.7 ms.)
 
+## The GEMM partitioning is already the reference's: nothing to port
+
+The last open lever was the reference's 203-submit / 2-domain GEMM partitioning. Measured on our
+tree with the same checkpoint:
+
+| quantity | ours | reference | delta |
+| --- | --: | --: | --: |
+| packed weight bytes | **4,204,789,760 (4010.0 MiB)** | 4010.0 MiB (`npu_weight_mib`) | **0.0** |
+| IOMMU domains | **2** (2.99 + 0.92 GiB) | 2 (`ROCKCHIP`, `ROCKCHIP:1`) | 0 |
+| per-byte GEMM rate, m=1 | 30.9 GB/s (23.6 MB in 0.764 ms) | 31.1 GB/s (47 MB in 1.512 ms) | 0.6% |
+| submits/token | 307 | 203 | +104 |
+| tasks/token | 825 | — | — |
+
+Our packing is byte-identical in total to the reference's, the domain assignment already matches,
+and the per-byte device rate differs by 0.6%. The submit count is the only difference, and it was
+already falsified as a lever: gate/up fusion cut it to 275 and decode did not move.
+
+So the "142.7 vs 137.1 ms device gap" is not a partitioning difference — it is the two numbers
+being measured on different bases (our `submit_seconds` counts the ioctl only; the reference's
+137.1 is its profile's device row). There is nothing in that port to take.
+
 ## Contradiction resolved: fill time falls 15 ms, the wall falls 5 ms
 
 The earlier confusion was measuring only the wall. Re-applying the parity-verified memset
