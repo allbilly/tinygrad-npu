@@ -104,6 +104,33 @@ device plus host to within a millisecond, so the host work *is* serial with the 
 ablation would have to preserve finite values in the dropped buffer (write zeros, not skip the
 segment) before its delta could be believed.
 
+## Retraction: "67 µs vs 15 µs per call" compares different shapes
+
+The elementwise rows were compared as if the two trees ran the same kernels. They do not:
+
+| | count |
+| --- | --: |
+| reference kernel names in its decode profile | 31 |
+| our kernel names in the decode attribution | 36 |
+| **names present in both** | **1** (`E`, the trivial 0.1 µs one) |
+
+So the per-call ratio is meaningless: it divides our 32,768-element kernels by their 1,024-element
+ones. Read from the generated sources, our kernels are **ALU-bound, not bandwidth-bound**:
+
+| kernel | elements (from loop bounds) | µs/call | ns/element |
+| --- | --: | --: | --: |
+| `E_2_16_32_32_4_4` | 2×16×32×32 = 32,768 | 124 | 3.8 |
+| `E_1024_32_4_4` | 1024×32 = 32,768 | 48 | 1.5 |
+| `E_81920_4` | 81,920 | 289 | 3.5 |
+| `E_131072_4` (fill) | 131,072 ×4 | 180 | 0.34 per float |
+
+Same element count, 2.6× different cost — that is op count per element, not codegen quality. And the
+reference's `E_2_16_32_4` is **44 µs for 1,024 elements = 43 ns/element**, i.e. 11× *slower per
+element* than ours. The reference is not faster at elementwise; it does less of it.
+
+That is a graph-structure difference (fusion), not a kernel-quality difference, which is why the
+per-call framing never produced a lever.
+
 ## Next, in order
 
 ## Next, in order
