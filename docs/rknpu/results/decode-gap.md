@@ -150,6 +150,20 @@ Reverted (both the enablement and the guard), parity re-verified, decode back to
 submits. (The 1+1 restore run reports 3,883 ms prefill because a one-warm-up protocol puts warm-up
 in the measured trial; the 3+3 baseline is 1,197.7 ms.)
 
+## Collapsing to a single replay segment: slower
+
+The trace showed 6.45 ms between 16 segments, so the obvious question was whether segment
+boundaries were the cost. One segment for the whole linear (`MAX_CALLS_PER_SEG = 1 << 30`),
+bit-exact (parity unchanged), 3+10:
+
+| | decode median | trial temps |
+| --- | --: | --- |
+| 16 segments (baseline) | 4.9294 tok/s | 67.5-71.2 C |
+| **1 segment** | **4.8841 tok/s** | 63.8-69.3 C |
+
+Slower, while running ~4 C cooler. So the between-segment time is not boundary overhead — merging
+it away does not help — and the 6.45 ms is not recoverable there. Reverted.
+
 ## Scan dispatch: confirmed live (status=1, four groups)
 
 The scan's pooled dispatch was the open question. Two independent pieces of evidence answer it:
