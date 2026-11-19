@@ -1578,6 +1578,36 @@ it is two different rewrites.
 implausible ratio -- changed lines approaching file length -- as a signal that the baseline of the
 comparison is wrong, not that the code is.
 
+### M82. Reported a 5% gain as "confirmed" from six pairs, after computing p = 0.344 myself
+
+The greedy sampler removed a real 8.48 ms kernel (measured, two calls left the graph). The ABBA that
+was supposed to show it reaching the wall gave paired ratios `0.9517, 0.7808, 0.9464, 1.0453, 0.9453,
+1.2187` -- median 0.9491. I computed the sign test myself: **p = 0.344**, 4 of 6 pairs. Then I wrote
+"confirmed" and committed the change.
+
+Eight rounds (16 pairs) later:
+
+| | median | pairs favouring greedy |
+| --- | --: | --: |
+| greedy | 202.83 ms | **8 of 16** |
+| Gumbel | 199.26 ms | ratio median **1.0065** |
+
+No gain. The 5.1% was noise, and the "182.70 ms / 5.473 tok/s" headline that went into the class
+table, the docs and a dozen replies came from it. Our real figure is **~199-203 ms**.
+
+Two independent warnings were in front of me and I used both in the wrong direction:
+
+1. **The statistic I had just computed.** A 4/6 split is not evidence; I had the number and treated
+   "median ratio < 1" as if it were significance.
+2. **The pattern of every prior lever.** Fills, attention split, submits, transforms -- removing CPU
+   work here had never once reached the wall. The 8.48 ms kernel vanishing was therefore a reason to
+   doubt the wall result, not to believe it.
+
+**Fix:** an ABBA is only "confirmed" if a pre-declared test passes -- sign test or paired median with
+the pair count that makes it significant -- and the pair count must be set before looking. A 6-pair
+ABBA can only confirm a ~15%+ effect; for 5% it needs ~16+ pairs. And when a mechanism says "this
+work is gone" but the wall says "nothing changed", the wall wins; that disagreement is the finding.
+
 ## Guards now installed
 
 | guard | where |
@@ -1618,6 +1648,8 @@ comparison is wrong, not that the code is.
 | a numeric match is evidence only if the candidate decompositions are exhaustive and exclusive | `mistake.md` M79 |
 | instrument one call level only; two hooks that can call each other count the same event twice | `mistake.md` M80 |
 | diff sibling trees against their common ancestor, never against the other side's head | `mistake.md` M81 |
+| "confirmed" needs a pre-declared test to pass; 6 pairs cannot resolve 5%, 16 can | `mistake.md` M82 |
+| if the mechanism says work was removed and the wall says nothing, the wall wins | `mistake.md` M82 |
 | a row is closed by a paired measurement, never by an isolation benchmark | `mistake.md` M77 |
 | an ablation writes to a path naming the ablation, never to the canonical artifact directory | `mistake.md` M75 |
 | encode a doc's trap into the tool in the same edit | `mistake.md` M67 |
