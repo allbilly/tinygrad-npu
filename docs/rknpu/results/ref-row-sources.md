@@ -62,6 +62,32 @@ Our fused Linear does the opposite: it takes a dense fp32 activation and quantis
 Porting `_swiglu_pack` in isolation therefore cannot close the elementwise row. It is only viable
 together with `rockchip_bucketed_int8`'s packed-input GEMM.
 
+## Decision: the packed-payload contract cannot pay at decode
+
+The contract's only lever on our side is the quantise the pack would pre-empt. Measured per call at
+the decode geometry (`m=1, n=9216, k=2560`), from the fused C's own counters and the per-kernel dump:
+
+| phase | per call | 64 calls/token |
+| --- | --: | --: |
+| whole fused call | 789 us | 50.5 ms |
+| — of which device submit | 763 us | 48.9 ms |
+| — of which CPU (quantise + dequantise + syncs) | 25 us | 1.6 ms |
+| — of which **quantise alone** | **2 us** | **0.13 ms** |
+
+So a packed input that removes quantise entirely is worth **0.13 ms/token**; even granting it the
+whole CPU share (quantise *and* dequantise *and* syncs, which it cannot) it is **1.6 ms/token**.
+Adding the entire device gap against the reference (+5.8 ms, already at per-byte parity) gives a
+best-conceivable total of **~7.4 ms against a 30.1 ms gap**.
+
+At m=1 there is simply nothing for the pack to save: the activation is one row, so quantising it is
+2 us. The reference's pack pays because at **m=128** a quantise pass is material and its GEMM
+consumes the packed layout directly — a prefill optimisation.
+
+**Decision: do not port the contract for decode.** Building the GEMM entry first, as planned, would
+have measured a difference bounded at 0.13 ms. This is the table doing its job one level down: the
+elementwise row (+8.2) looked like the pack's target, but the pack's *mechanism* is layout+quantise,
+and our quantise is already 2 us.
+
 ## What is worth porting, in table order
 
 | row | port | expected | risk |
