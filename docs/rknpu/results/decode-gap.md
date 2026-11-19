@@ -150,6 +150,23 @@ Reverted (both the enablement and the guard), parity re-verified, decode back to
 submits. (The 1+1 restore run reports 3,883 ms prefill because a one-warm-up protocol puts warm-up
 in the measured trial; the 3+3 baseline is 1,197.7 ms.)
 
+## Elementwise row: the transform arm was a placebo
+
+The elementwise ABBA toggled `thread_split.THREAD_SPLIT` between its full table and empty. It read
+4-way 197.01 vs serial 210.81 ms (ratio 0.8864), which looks like a 13 ms win -- but the arm check
+said `transform_hits=0` in **both** arms, and the reason is decisive:
+
+```
+THREAD_SPLIT entries: ['E_2_16_32_32_4_4', 'E_1024_32_4_4', 'E_32_32_128_4',
+                       'r_32_16_4_32_4', 'E_393216_3']
+decode kernels covered by the transform table: NONE   (of 35 in the dump)
+```
+
+The table holds **prefill shapes only**. Both arms therefore ran identical code, the ratios scattered
+0.68-1.64 as noise, and the 0.8864 is not a result. The elementwise row (+8.2) stays **open**, and its
+lever is not "turn the transforms on" -- they never apply in decode -- but "transform decode shapes",
+which the fills experiment already showed is not free (adding `E_131072_4` made the fills slower).
+
 ## The 182 vs 152 table
 
 Our column is the shipped configuration; the reference column is
@@ -160,13 +177,13 @@ trees share **one kernel name out of 31 and 36**, so a per-kernel join is imposs
 | --- | --: | --: | --: | --: |
 | NPU GEMM (device submit) | 142.89 | 142.89 | 137.11 | +5.8 |
 | quantise / dequantise / syncs (inside the fused call) | 4.70 | 4.70 | 1.02 | +3.7 |
-| elementwise (incl. sampler) | 22.81 | 14.74 | 6.57 | +8.2 |
+| elementwise (incl. sampler) | 22.81 | 14.74 | 6.57 | **+8.2 (open: no decode-shape transform coverage)** |
 | — of which the sampler | 8.48 | 0.41 | 0.09 | +0.3 |
 | state fills | 9.52 | 9.52 | ~0 | +9.5 |
 | GDN scan | 5.23 | 5.23 | 4.16 | +1.1 |
 | reduce | 2.68 | 2.68 | 0.79 | +1.9 |
 | attention | 2.26 | 2.26 | 0.45 | +1.8 |
-| Python / replay gaps | 8.95 | 8.95 | ~0 | +9.0 |
+| Python / replay gaps | 8.95 | 8.95 | ~0 | **+9.0 (open; provenance suspect -- shipped 64-call protocol reads 6.45)** |
 | **total** | **199.04** | **190.97** | **152.59** | **+38.4** |
 
 Two reconciliations, both stated because they are different protocols:
