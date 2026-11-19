@@ -540,14 +540,8 @@ static void rockchip_linear_dq(void **ctx,int unused,int group) {{
     rkq_dispatch_t *dfp = (rkq_dispatch_t *)daddr;
     if (dfp(rockchip_linear_dq,dctx,{QZ_THREADS}) != 0) {{{planes_serial}}} else stats[5] += 1;
   }}"""
-    sync_to = "" if SKIP_SYNCS else f"""  if (!err) {{ long y0[2], y1[2]; clock_gettime(1,y0);
-    err = sync_mem(fd,1,params[5],{key.payload_size}ULL);
-    clock_gettime(1,y1);
-    stats[3] += (U64)(y1[0]-y0[0])*1000000000ULL + (U64)(y1[1]-y0[1]); }}"""
-    sync_from = "" if SKIP_SYNCS else f"""  if (!err) {{ long z0[2], z1[2]; clock_gettime(1,z0);
-    err = sync_mem(fd,2,params[6],{key.out_size}ULL);
-    clock_gettime(1,z1);
-    stats[3] += (U64)(z1[0]-z0[0])*1000000000ULL + (U64)(z1[1]-z0[1]); }}"""
+    sync_to = "" if SKIP_SYNCS else f"  if (!err) err = sync_mem(fd,1,params[5],{key.payload_size}ULL);"
+    sync_from = "" if SKIP_SYNCS else f"  if (!err) err = sync_mem(fd,2,params[6],{key.out_size}ULL);"
     subcores = ",".join(str(value) for value in key.subcores)
     submit_block = "" if SKIP_SUBMIT else f"""
   if (!err) {{

@@ -1608,6 +1608,38 @@ the pair count that makes it significant -- and the pair count must be set befor
 ABBA can only confirm a ~15%+ effect; for 5% it needs ~16+ pairs. And when a mechanism says "this
 work is gone" but the wall says "nothing changed", the wall wins; that disagreement is the finding.
 
+### M83. Every in-process ABBA that toggled emitted source compared an arm against itself
+
+The harnesses reset the JIT between arms and assumed that was enough to swap the code under test.
+It is not. `tinygrad/codegen/__init__.py:539` keeps `to_program_cache`, keyed on
+`to_program_key(ast, renderer)`, and its value is the PROGRAM uop **including the compiled binary**.
+An arm that changes only the *emitted source* -- a `#define` flip, a `thread_split` table entry, a
+flag substituted inside a hand-written C string -- produces a structurally identical ast, so it
+computes the same key and gets the first arm's binary back.
+
+`transform_hits=0` in **both** arms was the tell, printed by the harness itself for months of runs:
+zero compiles per arm means nothing was recompiled, so the two arms executed the same object code.
+The elementwise split arm was re-run with `to_program_cache.clear()` in both arms:
+
+| arm | median | transform hits |
+| --- | --: | --: |
+| 4-way | 194.31 ms | 7 |
+| serial | 195.49 ms | 0 |
+| paired ratio | **1.0031** (8/12 favouring serial) | |
+
+Same verdict as before, but now for a real reason: at 20-90 us per call the four-way dispatch costs
+about what the work costs. The attention split, which had been *rejected* at 1.0940 on the same
+broken harness, re-measured at **0.9918 (9/12, p = 0.073)** -- a rejection that should have been an
+"unresolved", and a reminder that the defect cuts both ways.
+
+Two arms were immune because they change the graph rather than the source text (`ab_decode` flips a
+sampling op, `ab_fills` removes fills), so their keys differ and their results stand. `ab_scan` is
+the same shape as `ab_attn` and its conclusion is now marked unmeasured.
+
+**Fix:** an ABBA arm must clear `to_program_cache` as well as the JIT, and the harness must *assert*
+that the arms did different compilation (a hit counter, or the emitted `#if` line) rather than print
+it. A harness that cannot distinguish its arms will report ~1.0 and look like a clean null.
+
 ## Guards now installed
 
 | guard | where |
@@ -1650,6 +1682,8 @@ work is gone" but the wall says "nothing changed", the wall wins; that disagreem
 | diff sibling trees against their common ancestor, never against the other side's head | `mistake.md` M81 |
 | "confirmed" needs a pre-declared test to pass; 6 pairs cannot resolve 5%, 16 can | `mistake.md` M82 |
 | if the mechanism says work was removed and the wall says nothing, the wall wins | `mistake.md` M82 |
+| an ABBA arm must clear `to_program_cache`, not just the JIT, and must assert the arms compiled differently | `mistake.md` M83 |
+| a source-only arm that reports ~1.0 is the defect, not the answer | `mistake.md` M83 |
 | a row is closed by a paired measurement, never by an isolation benchmark | `mistake.md` M77 |
 | an ablation writes to a path naming the ablation, never to the canonical artifact directory | `mistake.md` M75 |
 | encode a doc's trap into the tool in the same edit | `mistake.md` M67 |

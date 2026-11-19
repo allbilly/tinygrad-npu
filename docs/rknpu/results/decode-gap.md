@@ -740,6 +740,11 @@ So the fused call's host half is **2.9 ms/token**, not the ~7.7 ms implied by a 
 remainder": the two cache-maintenance ioctls cost 2.8 us/call combined, not ~14. Nothing in this
 row is worth attacking -- the largest item is 3.9 us/call of dequantise.
 
+These timers were temporary and are not shipped: all seven `fused_stats` slots are live counters
+(0 submit, 1 calls, 2 tasks, 3 quantise successes, 4 quantise ns, 5 dequantise successes,
+6 dequantise ns), so the sync measurement needs an eighth slot, and writing past seven would run
+into the adjacent buffer on a device path. Re-measuring means adding that slot, not reusing one.
+
 ### 2. Elementwise four-way split: null (valid measurement)
 
 | arm | blocks (ms/token) | median |
