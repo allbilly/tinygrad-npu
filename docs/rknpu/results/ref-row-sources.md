@@ -67,6 +67,40 @@ Our fused Linear does the opposite: it takes a dense fp32 activation and quantis
 Porting `_swiglu_pack` in isolation therefore cannot close the elementwise row. It is only viable
 together with `rockchip_bucketed_int8`'s packed-input GEMM.
 
+## The orchestration row: its decode loop is generated C
+
+The row I had been calling "replay gaps (6.45 ms)" is not a tuning difference. The reference does not
+run a Python loop over tokens at all:
+
+```c
+// rockchip_gpt2_decode.py:11  DecodeLoop -> generated source
+int gpt2_decode_loop(int *out,int token,int position,int count,U64 *stats,U64 *done) {
+  for(int i=0;i<count;i++) {
+    int error=((int(*)(long long,long long,U64*)){replay}ULL)(position+i,token,current);
+    for(int j=0;j<{stat_count};j++) stats[j]+=current[j];
+    if(error) return error;
+    token=*((volatile int*){address}ULL);     // sampled token read from the output buffer
+    out[i]=token; (*done)++;
+  }
+  return 0;
+}
+```
+
+`replay` is `RockchipCapturedJit` (`rockchip_replay.py:956`), the native replay of the captured
+graph. So **one C call drives N tokens**: no Python between tokens, no Python between kernels, and
+the sampled token is read from a fixed buffer address rather than returned to the interpreter.
+
+That single fact explains two rows at once:
+
+| row | reference | ours |
+| --- | --- | --- |
+| Python / replay gaps | ~0 -- the loop is C | **6.45 ms/token** -- 16 replay segments plus a Python `model()` call per token |
+| sampler | 0.085 ms -- the loop reads the token directly from the buffer | 0.41 ms after our greedy fix |
+
+It also explains why its 1,086 CPU calls/token contain no fill: the captured program's buffers are
+created once and the loop reuses them, which is the same persistent-state property that our
+`model.py:819 initial.where(0, state)` copy-on-write defeats.
+
 ## The fills: emitter found, and it is load-bearing (row closed)
 
 The emitter is one line, found by counting `Tensor.where` results by size during the decode capture
