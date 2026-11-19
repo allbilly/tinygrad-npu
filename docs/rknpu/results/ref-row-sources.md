@@ -62,6 +62,37 @@ Our fused Linear does the opposite: it takes a dense fp32 activation and quantis
 Porting `_swiglu_pack` in isolation therefore cannot close the elementwise row. It is only viable
 together with `rockchip_bucketed_int8`'s packed-input GEMM.
 
+## The fills: emitter found, and it is load-bearing (row closed)
+
+The emitter is one line, found by counting `Tensor.where` results by size during the decode capture
+(`{('where', 524288): 24}`):
+
+```python
+# tinygrad/llm/model.py:819  (GatedDeltaNetBlock.__call__)
+state = initial.where(0, self.recurrent_state.float())
+```
+
+At decode the condition (`pos == 0`) is statically false, so `where` allocates a **fresh 2 MB
+buffer** and copies the state into it — 24 blocks, twice per token counting the f16 path, 56 fill
+kernels in the replay.
+
+Replacing it with a Python-level select when the position is known:
+
+| | fills | calls | parity |
+| --- | --: | --: | --- |
+| baseline | **56** | 956 | `895365e27ed4255b` |
+| select at Python level | **8** | 908 | **`c693475255158a69`** |
+
+So the fills disappear — and the result changes. **The copy is semantically load-bearing**: the scan
+stores into the buffer `where` produced, so `where` is the copy-on-write step that leaves the
+persistent state untouched. Removing it makes the scan write the persistent state in place and the
+arithmetic diverges.
+
+**Row closed:** the fills are not waste to be optimised away; they are the price of the state
+ownership model. The reference does not pay them because its state is persistent and borrowed
+(`ONPU_REPLAY_BORROW_*`), which is the same architectural change the other rows pointed at. Removing
+them here requires that change, not a code edit at this line.
+
 ## The fills are not emitted at the allocation site
 
 The last directed hypothesis was that the 48 x 2 MB fills come from the buffer allocation, so a
