@@ -150,6 +150,31 @@ Reverted (both the enablement and the guard), parity re-verified, decode back to
 submits. (The 1+1 restore run reports 3,883 ms prefill because a one-warm-up protocol puts warm-up
 in the measured trial; the 3+3 baseline is 1,197.7 ms.)
 
+## CPU ranked by kernel name (one call per segment)
+
+Trace with `MAX_CALLS_PER_SEG = 1`, so each segment is one kernel and the trace carries its name;
+CPU = segment duration minus its submit delta. Totals in this mode are inflated (wall 233 vs 193),
+so read the ranking, not the absolute:
+
+| kernel | CPU ms | calls | µs/call | note |
+| --- | --: | --: | --: | --- |
+| `E_62080_4` | 30.69 | 1 | 30,693 | **artefact** — 8.49 ms in the 64-segment run; one call, unstable |
+| `E_131072_4` | 8.74 | 48 | 182 | the f32 fill (load-bearing) |
+| `rockchip_scan_simd` | 6.68 | 24 | 278 | reference 4.16 ms |
+| `E_2_16_32_4` | 4.00 | 48 | 83 | reference 2.12 ms |
+| `rockchip_attn_1_160` | 3.42 | 8 | 428 | reference 0.45 ms |
+| `r_64_4_970` | 2.55 | 2 | 1,274 | |
+| `E_1024_4` | 2.27 | 72 | 32 | |
+| `E_124160_2` | 2.08 | 1 | 2,084 | single call, like `E_62080` |
+| `rockchip_linear_1_2560_4096` (dequant) | 1.92 | 96 | 20 | inside the fused C |
+| `r_16_32_4` | 1.66 | 48 | 35 | |
+
+Excluding the two single-call artefacts (30.69 + 2.08), CPU is ~47 ms, consistent with the 44 ms
+measured at 64 calls per segment. The largest genuine items are the fill (8.7), the scan (6.7) and
+attention (3.4); against the reference's 4.16 and 0.45 those two are worth ~5.5 ms combined, and
+neither is safely splittable (`loop-classification.md`: the scan's ceiling is 1.21x and pthreads
+cost +100 ms).
+
 ## Threading the fills makes them slower
 
 `thread_split` is an allowlist of five kernel names, and the `_4` in names like `E_131072_4` is

@@ -103,6 +103,13 @@ class Compiled:
     import time as _t
     _t0 = _t.perf_counter()
     in_arr = (ctypes.c_void_p * max(1, self.n_inputs))()
+    seg2name = None
+    if TRACE is not None and len(self.names) == sum(1 for k, _ in self.plan if k == "c"):
+      seg2name, _i = {}, 0
+      for _k, _p in self.plan:
+        if _k == "c":
+          seg2name[_p] = self.names[_i]
+          _i += 1
     for i, u in enumerate(ctx.input_uops):
       b = u.buffer
       in_arr[i] = b.get_buf(b.device) + b.offset
@@ -128,7 +135,7 @@ class Compiled:
             _s1 = _D2["ROCKCHIP:0"].hw.fused_stats[0]
           except Exception:
             pass
-          TRACE.append((payload, (_t.perf_counter()-_c0)*1e3, (_s1-_s0)/1e6))
+          TRACE.append(((seg2name or {}).get(payload, payload), (_t.perf_counter()-_c0)*1e3, (_s1-_s0)/1e6))
         _dt = (_t.perf_counter() - _c0) * 1e3
         stats["c_ms"] += _dt
         # keyed by object: segment names repeat across JITs, so a bare name collides
