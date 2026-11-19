@@ -150,6 +150,26 @@ Reverted (both the enablement and the guard), parity re-verified, decode back to
 submits. (The 1+1 restore run reports 3,883 ms prefill because a one-warm-up protocol puts warm-up
 in the measured trial; the 3+3 baseline is 1,197.7 ms.)
 
+## Contradiction resolved: fill time falls 15 ms, the wall falls 5 ms
+
+The earlier confusion was measuring only the wall. Re-applying the parity-verified memset
+replacement and running the per-kernel attribution on both trees settles it:
+
+| in-model, one warm decode step | baseline | fills as memset |
+| --- | --: | --: |
+| fill time (`E_131072` + `E_81920`) | **19.33 ms** | **4.21 ms** (56 calls) |
+| total by name | 187.14 ms | 182.12 ms |
+| wall | 195.06 ms | **189.96 ms** |
+| full-harness 3+3 decode | 4.94-5.07 tok/s | **5.011 tok/s** (4.80/4.91/5.01) |
+| full-harness prefill | 1,197.7 ms | 1,222.2 ms |
+
+So the fill time really does fall by 15.1 ms, and only **5.1 ms** of that reaches the wall: the
+other ~10 ms was overlapped with device work. In the full harness even that 5 ms is below the
+run-to-run scatter, and prefill is ~24 ms slower.
+
+Conclusion: the fills are load-bearing, partially overlapped, and not a lever. Reverted (the
+general fill detector was correct — parity unchanged — but neutral-to-negative at the wall).
+
 ## The fills are load-bearing, and their cost is not on the wall
 
 Two corrections and one clean measurement.
