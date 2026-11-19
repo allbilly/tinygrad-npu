@@ -150,6 +150,24 @@ Reverted (both the enablement and the guard), parity re-verified, decode back to
 submits. (The 1+1 restore run reports 3,883 ms prefill because a one-warm-up protocol puts warm-up
 in the measured trial; the 3+3 baseline is 1,197.7 ms.)
 
+## The attention split at matched temperature: no gain (the 5.05 was thermal)
+
+3 warm-ups + 10 measured, three arms. The first split run looked like a 2.5% win; it had started
+10 C cooler. Re-run hot, it matched the baseline:
+
+| arm | decode median | trial temps (start) | trial temps (end) |
+| --- | --: | --- | --- |
+| split, cool start | **5.0517** | 64.7-70.2 C | 66.5-70.2 C |
+| baseline | 4.9294 | 67.5-71.2 C | 68.4-71.2 C |
+| **split, hot start** | **4.9077** | **67.5-71.2 C** | 68.4-72.1 C |
+
+At matched bands the split is 4.9077 against 4.9294 — no gain, if anything slightly worse. The
+kernel really is 27% faster (428 -> 314 us/call), but 0.9 ms of 193 is below the thermal scatter,
+and a 10 C cooler start moves the median by more than the change does. This is the clearest
+demonstration in this document of why `AGENTS.md` requires paired, temperature-matched comparisons.
+
+Reverted; parity `895365e27ed4255b`.
+
 ## Splitting the attention groups: kernel 27% faster, wall neutral
 
 `RK_SPLIT` was forced off for `TOK < 8`, leaving the four KV groups serial at decode. The groups
