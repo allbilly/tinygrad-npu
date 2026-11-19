@@ -156,6 +156,19 @@ Replacing it with a Python-level select when the position is known:
 The control matters: A was measured at 56 fills **on its own**, so the 48-fill drop belongs to B and
 not to A+B together; parity is neutral for A and only moves when B is added.
 
+**And the fills belong to the copy, not to the zero-select.** Replacing `where(0, state)` with a plain
+`clone()` -- copy kept, zero-branch gone -- leaves the fill count at **56** and *also* changes parity
+(`c6934752`):
+
+| variant | fills | parity |
+| --- | --: | --- |
+| `where(0, state)` | 56 | `895365e2` |
+| `state.clone()` | **56** | `c6934752` |
+| no copy at all | 8 | `c6934752` |
+
+So any copy of that 2 MB state buffer carries the fills, and the copy's layout is part of the
+numerics -- the where's zero-select is not a separable cost.
+
 So the fills disappear — and the result changes. **The copy is semantically load-bearing**: the scan
 stores into the buffer `where` produced, so `where` is the copy-on-write step that leaves the
 persistent state untouched. Removing it makes the scan write the persistent state in place and the
