@@ -150,6 +150,17 @@ Reverted (both the enablement and the guard), parity re-verified, decode back to
 submits. (The 1+1 restore run reports 3,883 ms prefill because a one-warm-up protocol puts warm-up
 in the measured trial; the 3+3 baseline is 1,197.7 ms.)
 
+## q/dq row closed: the code has no toggle for it
+
+`npu_linear` exposes toggles only for `PARALLEL_QUANT`, `PARALLEL_DEQUANT`, `SKIP_SYNCS` and
+`SKIP_SUBMIT`. Quantise and dequantise themselves are **inside the fused C call** and cannot be
+switched off without removing the call's purpose; the only alternative that separates them is the
+unfused path, already measured **1.43-1.80x slower**. So the +3.7 ms row is not "unoptimised" -- it
+is the price of the design that wins by 43-80%, and no ABBA arm exists to close it.
+
+Gaps re-derived per protocol: **8.95 ms** on the 1-call-per-segment dump, **6.45 ms** on the shipped
+64-call path (the trace). Both are carried in the table because they are different instruments.
+
 ## Elementwise row: the transform arm was a placebo
 
 The elementwise ABBA toggled `thread_split.THREAD_SPLIT` between its full table and empty. It read
@@ -176,14 +187,14 @@ trees share **one kernel name out of 31 and 36**, so a per-kernel join is imposs
 | class | ours, dump (ms) | ours, greedy (ms) | reference (ms) | delta vs ref |
 | --- | --: | --: | --: | --: |
 | NPU GEMM (device submit) | 142.89 | 142.89 | 137.11 | +5.8 |
-| quantise / dequantise / syncs (inside the fused call) | 4.70 | 4.70 | 1.02 | +3.7 |
+| quantise / dequantise / syncs (inside the fused call) | 4.70 | 4.70 | 1.02 | +3.7 — **closed: no toggle exists** |
 | elementwise (incl. sampler) | 22.81 | 14.74 | 6.57 | **+8.2 (open: no decode-shape transform coverage)** |
 | — of which the sampler | 8.48 | 0.41 | 0.09 | +0.3 |
 | state fills | 9.52 | 9.52 | ~0 | +9.5 |
 | GDN scan | 5.23 | 5.23 | 4.16 | +1.1 |
 | reduce | 2.68 | 2.68 | 0.79 | +1.9 |
 | attention | 2.26 | 2.26 | 0.45 | +1.8 |
-| Python / replay gaps | 8.95 | 8.95 | ~0 | **+9.0 (open; provenance suspect -- shipped 64-call protocol reads 6.45)** |
+| Python / replay gaps | 8.95 (dump) / **6.45 (shipped)** | 8.95 | ~0 | **open; two protocols, named** |
 | **total** | **199.04** | **190.97** | **152.59** | **+38.4** |
 
 Two reconciliations, both stated because they are different protocols:
