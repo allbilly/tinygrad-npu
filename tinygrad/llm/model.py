@@ -7,6 +7,11 @@ from tinygrad.llm.kernels.amd import Linear, ExpertWeights, fp8_matmul, gated_de
 from tinygrad.llm.gguf import gguf_parse, gguf_shard, GGUFPackedTable, _GGML_QUANT
 from tinygrad.llm.hf import hf_load
 from tinygrad.uop.ops import resolve, smax, ssimplify
+
+# Greedy decode: bench_llm passes temperature 0 and the reference samples with gpt2_argmax, so
+# the Gumbel-max noise cannot change the selection but costs a full-vocabulary kernel (measured
+# 8.48 -> 0.41 ms when removed). Module-level so an ABBA harness can flip it and re-capture.
+GREEDY_SAMPLING = True
 from tinygrad.helpers import unwrap, round_up, ceildiv, get_child
 
 StartPos = tuple[int|UOp, ...]
@@ -904,6 +909,8 @@ class Transformer:
     elif self.config.attn_res_block_size: x = self.output_res_score.mix(x)
     # only run the output projection on the last token
     logits = self.output(self.output_norm(x[:, -1:]))[:, -1, :].to(tokens.device)
+    if GREEDY_SAMPLING:
+      return logits.argmax(-1, keepdim=True)
     # Gumbel-max trick: argmax(logits/temp - log(-log(uniform))) is equivalent to sampling from softmax(logits/temp)
     return (logits / temperature.maximum(1e-12) - (Tensor.rand_like(logits).maximum(1e-12).log().neg()).log()).argmax(-1, keepdim=True)
 

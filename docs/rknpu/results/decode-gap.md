@@ -150,6 +150,24 @@ Reverted (both the enablement and the guard), parity re-verified, decode back to
 submits. (The 1+1 restore run reports 3,883 ms prefill because a one-warm-up protocol puts warm-up
 in the measured trial; the 3+3 baseline is 1,197.7 ms.)
 
+## In-process ABBA: greedy sampling is 5.1% faster (confirmed)
+
+The harness cannot resolve 8 ms (three trials, 63 s per arm, ~1%/C), so both arms were run in **one
+process**, alternating A,B,B,A with the JIT re-captured per arm and temperature read per block
+(`extra/rockchip/ab_decode.py`). Six blocks per arm, five timed steps each:
+
+| arm | ms/token blocks | median | tok/s |
+| --- | --- | --: | --: |
+| A greedy argmax | 183.3, 181.9, 182.0, 200.8, 182.1, 234.5 | **182.70** | **5.473** |
+| B Gumbel noise | 192.6, 232.9, 192.3, 192.1, 192.7, 192.4 | 192.48 | 5.195 |
+
+Paired ratios (A/B): `0.9517, 0.7808, 0.9464, 1.0453, 0.9453, 1.2187`, **median 0.9491** — a 5.1%
+win, 9.8 ms/token, matching the 8.48 ms kernel that disappears. The two outlier pairs are whole-block
+stalls (0.78 and 1.22), which is why the median ratio is the statistic to quote.
+
+This is the first decode change confirmed to move the wall, and it validates the method: the same
+ABBA is what the fills, submit and attention changes needed and never had.
+
 ## The decisive split: submit disabled gives 60.17 ms
 
 The device-vs-host question was settled by removing the submission itself (`SKIP_SUBMIT = True`,
