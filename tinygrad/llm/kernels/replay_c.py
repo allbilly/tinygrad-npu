@@ -31,6 +31,7 @@ from tinygrad.uop.ops import Ops
 # Validate descriptors against exec_kernel's own resolution, without executing anything.
 # A wrong address in the emitted C is a segfault; a mismatch here names it instead.
 VALIDATE_ONLY = False
+MEMSET_FILLS = False   # ABBA-only; see ab_fills.py
 mismatch: list[str] = []
 # One dossier per runtime type that has no usable code address, so the correct attribute
 # can be found without guessing (rt.addr covered only a minority of calls).
@@ -192,9 +193,47 @@ def build(linear, inputs):
     stats["segments"] += 1
 
   src: list[str] = []
+  # Replace a generated zero-fill kernel with memset of the identical bytes. Measured 25x faster
+  # per call in isolation (19.33 -> 4.21 ms of fill time), but only the in-process ABBA can tell
+  # whether that reaches the wall -- so this ships off and is toggled by ab_fills.py.
+  _ANSI = __import__("re").compile(r"\x1b\[[0-9;]*m")
+  _FILL_NBYTES: dict[str, int] = {}
+  def _fill_nbytes(name: str, ast) -> int:
+    if name in _FILL_NBYTES: return _FILL_NBYTES[name]
+    nb = 0
+    try:
+      nodes = list(ast.toposort())
+      bufs = [n for n in nodes if n.op is Ops.BUFFER]
+      st = [n for n in nodes if n.op is Ops.STORE]
+      if len(bufs) == 1 and st:
+        v = st[0].src[1]
+        if v.op is Ops.CONST and float(v.arg) == 0.0:
+          nb = st[0].src[0].max_numel() * bufs[0].dtype.itemsize
+    except Exception:
+      nb = 0
+    _FILL_NBYTES[name] = nb
+    return nb
   for call in linear.src:
     c = call.without_after
     ast = c.body
+    if MEMSET_FILLS:
+      try:
+        _nm = _ANSI.sub("", getattr(ast.src[0].arg, "name", "") or "")
+      except Exception:
+        _nm = ""
+      _nb = _fill_nbytes(_nm, ast) if _nm else 0
+      if _nb:
+        try:
+          _d = _desc(c.src[1 + ast.arg.globals[0]], inputs)
+          _p = ("(void*)((U64)in[%d] + %d)" % (_d[1], _d[2])) if _d[0] == "b" else "(void*)(%dULL)" % _d[2]
+          body.append(f"  memset({_p}, 0, {_nb}UL);")
+          call_names.append("memset_" + _nm)
+          stats["memset_fills"] = stats.get("memset_fills", 0) + 1
+          calls_in_body += 1
+          if calls_in_body >= MAX_CALLS_PER_SEG: flush()
+          continue
+        except Exception:
+          pass
     dev = _R.to_tuple(c.device)[0]
     kind = dev.split(":")[0]
     if kind != "CPU":
