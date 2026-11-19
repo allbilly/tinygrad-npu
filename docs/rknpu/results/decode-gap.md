@@ -150,7 +150,24 @@ Reverted (both the enablement and the guard), parity re-verified, decode back to
 submits. (The 1+1 restore run reports 3,883 ms prefill because a one-warm-up protocol puts warm-up
 in the measured trial; the 3+3 baseline is 1,197.7 ms.)
 
-## Skipping the fills entirely: no decode improvement
+## Skipping the fills entirely: no decode improvement (valid measurement)
+
+The first version of this test was **invalid**: the skip matched on kernel names that carry ANSI
+escapes, so it matched nothing — `calls_c` was 2923, identical to baseline, and the 4.89 tok/s it
+reported was just an ordinary run.
+
+Redone with the escapes stripped and the skip verified against the call count:
+
+| | calls_c | skipped | prefill | decode | parity |
+| --- | --: | --: | --: | --: | --- |
+| baseline | 2,923 | 0 | 1,197.7 ms | 4.94-5.07 tok/s | `895365e27ed4255b` |
+| fills skipped | **2,723** | **200** | 1,210.1 ms | **4.93 tok/s** | `895365e27ed4255b` |
+
+200 fill calls genuinely removed from the replays (prefill's and decode's), and the wall does not
+move. So the finding stands with a valid experiment: **120 MB/token of zeroing is not on the
+critical path**, and the ~19.33 ms its kernel time contributes is not realisable by removal.
+
+## Skipping the fills entirely: the invalid first attempt
 
 The last hypothesis was that the 19.33 ms of zero-fills was on the critical path. Tested by
 skipping them at replay build time (`SKIP_PREFIXES = ("E_131072", "E_81920")` in
