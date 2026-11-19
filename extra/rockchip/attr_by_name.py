@@ -12,7 +12,9 @@ session).
 import collections, pathlib, sys, time
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-import thread_split; thread_split.install()
+MODE = sys.argv[1] if len(sys.argv) > 1 else "prefill"
+if MODE != "decode-nothreads":
+    import thread_split; thread_split.install()
 from tinygrad.llm.kernels import replay_c as RC
 RC.install()
 from tinygrad import Tensor
@@ -36,14 +38,24 @@ vs = UOp.variable("start_pos", 0, 150).bind(0)
 seen = []
 _orig = RC.Compiled.run
 def run(self, ctx, opaque_runner):
-    if not seen: seen.append(self)
+    if not seen or seen[-1] is not self: seen.append(self)
     return _orig(self, ctx, opaque_runner)
 RC.Compiled.run = run
 
 for _ in range(3): model(pt, (vs,), tp).realize()
+if MODE in ("decode", "decode-nothreads"):
+    # one warm decode step so the m=1 plans are captured, then the measured one
+    for step in range(6):
+        model(Tensor([100 + step], dtype="int32").reshape(1, 1),
+              (UOp.variable("start_pos", 0, 150).bind(128 + step),), tp).realize()
 RC.stats["by_seg"].clear(); RC.stats["c_ms"] = 0.0; RC.stats["segs"] = 0
-t0 = time.perf_counter(); model(pt, (vs,), tp).realize(); wall = (time.perf_counter() - t0) * 1e3
-comp = seen[0]
+if MODE in ("decode", "decode-nothreads"):
+    t0 = time.perf_counter()
+    model(Tensor([200], dtype="int32").reshape(1, 1), (UOp.variable("start_pos", 0, 150).bind(135),), tp).realize()
+    wall = (time.perf_counter() - t0) * 1e3
+else:
+    t0 = time.perf_counter(); model(pt, (vs,), tp).realize(); wall = (time.perf_counter() - t0) * 1e3
+comp = seen[-1]   # the decode JIT when MODE=decode, the prefill JIT otherwise
 # one call per segment, so plan order maps 1:1 onto comp.names
 mapping, i = {}, 0
 for kind, payload in comp.plan:
@@ -51,10 +63,12 @@ for kind, payload in comp.plan:
         mapping[payload] = comp.names[i] if i < len(comp.names) else f"call{i}"
         i += 1
 per = collections.Counter(); cnt = collections.Counter()
-for seg, ms in RC.stats["by_seg"].items():
+for (cid, seg), ms in RC.stats["by_seg"].items():
+    if cid != id(comp): continue
     name = mapping.get(seg, seg)
     per[name] += ms; cnt[name] += 1
 total = sum(per.values())
+print(f"mode                 {MODE}")
 print(f"wall                 {wall:9.2f} ms")
 print(f"segments c_ms        {RC.stats['c_ms']:9.2f} ms over {RC.stats['segs']} segments")
 print(f"sum by name          {total:9.2f} ms over {sum(cnt.values())} calls")

@@ -116,7 +116,9 @@ class Compiled:
         rc = fn(in_arr, v_arr)
         _dt = (_t.perf_counter() - _c0) * 1e3
         stats["c_ms"] += _dt
-        stats["by_seg"][payload] = stats["by_seg"].get(payload, 0.0) + _dt
+        # keyed by object: segment names repeat across JITs, so a bare name collides
+        k = (id(self), payload)
+        stats["by_seg"][k] = stats["by_seg"].get(k, 0.0) + _dt
         stats["segs"] += 1
         if rc != 0:
           return False
