@@ -1553,6 +1553,31 @@ explanation connects them (`conv_state` is 96 KB, so "2 states x 24 blocks" is o
 call graph is disjoint before adding counters. A factor that appears "for free" from two hooks is a
 double-count until proven otherwise.
 
+### M81. Inverted which side forked the model, by diffing against their head as if it were upstream
+
+Asked why we are not on par despite having the reference's source, I measured
+`diff theirs/ours` for `model.py` -- 1,437 differing lines -- and told the user "the 1,437 are ours;
+their tree is stock and hooks it from outside". Exactly backwards.
+
+The error: I treated `1b2a5db33` (their HEAD, "perf(rockchip): MiniCPM3 host stack ...") as upstream.
+It is not. The two trees are **sibling branches** off `9ecf87121` (`merge-base --is-ancestor` says
+`1b2a5db` is not an ancestor of ours), and measured against that upstream:
+
+| tree | `model.py` vs upstream `9ecf87121` (1,076 lines) |
+| --- | --- |
+| theirs | **+637 / -663** |
+| ours | **+126 / -17** |
+
+So theirs is the **heavily rewritten** model and ours is the lightly touched one -- the opposite of
+what I said, and the opposite of the design story I built on it ("stock model + hooks"). A 1,407-line
+diff between files of 1,102 and 1,185 lines should have been the tell: that is not an edit pattern,
+it is two different rewrites.
+
+**Fix:** before arguing from a cross-tree diff, establish the **common ancestor** (`merge-base
+--is-ancestor`) and diff each side against that, never against the other side's head. And treat an
+implausible ratio -- changed lines approaching file length -- as a signal that the baseline of the
+comparison is wrong, not that the code is.
+
 ## Guards now installed
 
 | guard | where |
@@ -1592,6 +1617,7 @@ double-count until proven otherwise.
 | hash the files a source map cites against the measured tree before concluding from them | `mistake.md` M78 |
 | a numeric match is evidence only if the candidate decompositions are exhaustive and exclusive | `mistake.md` M79 |
 | instrument one call level only; two hooks that can call each other count the same event twice | `mistake.md` M80 |
+| diff sibling trees against their common ancestor, never against the other side's head | `mistake.md` M81 |
 | a row is closed by a paired measurement, never by an isolation benchmark | `mistake.md` M77 |
 | an ablation writes to a path naming the ablation, never to the canonical artifact directory | `mistake.md` M75 |
 | encode a doc's trap into the tool in the same edit | `mistake.md` M67 |

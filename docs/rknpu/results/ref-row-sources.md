@@ -1,5 +1,20 @@
 # Where each row of the 182-vs-152 table lives in the reference tree
 
+## Fork direction (corrected)
+
+The two trees are **sibling branches** off upstream `9ecf87121` -- `1b2a5db` is *not* an ancestor of
+ours. Measured against that upstream `model.py` (1,076 lines):
+
+| tree | model.py vs upstream |
+| --- | --- |
+| theirs (`1b2a5db`, measured) | **+637 / -663** |
+| ours (`rkllm`) | **+126 / -17** |
+
+So the reference's 157.34 ms comes with a **heavily rewritten model**; our model is the lightly
+touched one. An earlier version of this file said the opposite ("their model is stock, they hook it;
+we forked it") -- that was an inversion, caused by diffing against `1b2a5db` as if it were upstream
+when it is their own head.
+
 Sources are the **measured tree** `~/tg-qwen35-pack-signature-fix` (the one pinned by the receipt,
 dirty diff `7f87f221...`), verified by sha256 against the dump. **Four of six files differ from the
 dump** -- `rockchip_cpu.py` (`d0952f646368` live vs `8d5026c857d6` dump), `rockchip_int8.py`
