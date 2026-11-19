@@ -304,7 +304,7 @@ _SYNC_REQUEST = _drm_request(0x45, ctypes.sizeof(rk.struct_rknpu_mem_sync))
 
 # u64 slots in the per-plan parameter block: payload, int32 planes, w_scale, status word,
 # task array, payload obj_addr, planes obj_addr, drm fd, device counter block.
-_PARAMS = 9
+_PARAMS = 10   # + skip_quantise: the four same-row consumers share one payload buffer
 
 
 @dataclass(frozen=True)
@@ -335,6 +335,9 @@ class _FusedKey:
     subcores: tuple[int, ...]
     tasks: int
     m_rows: int = 0
+    # FFN tail: stop after the int32 planes so one pack kernel can consume gate and up
+    # together. Default False keeps every existing published number on the same path.
+    raw_out: bool = False
 
 
 # Vectorised INT8 row quantisation for the fused Linear. The scalar loop it replaces measured
@@ -408,6 +411,45 @@ static void qz_row(const float *xr, int depth, int k, signed char *o, float *sca
 """
 
 
+# Quantise was the largest host item in the fused call and the only one still running on one
+# core. The reference dispatches it 4-way at `rows*depth >= 32768` (ref rockchip_int8.py:76-87);
+# this is the same pool with the same serial fallback.
+#
+# Enabled, measured in-model over one warm prefill (C counters, not per-geometry x calls):
+#   quantise 105.56 -> 41.37 ms, wall 1,282.71 -> 1,220.68 ms, 344/355 calls dispatched,
+#   3200 pool dispatches, 0 refused. Parity: logits 895365e27ed4255b unchanged.
+# The dispatch is only trustworthy because stats[3] counts successes; before that a refusal was
+# indistinguishable from a success and this path was recorded as "inert" (mistake.md M68).
+PARALLEL_QUANT = True
+# Ablation only: skip the two cache-maintenance ioctls. Produces garbage results (the NPU and
+# the CPU then disagree about cache state) and exists solely to bound their timing cost.
+SKIP_SYNCS = False
+# Ablation only: do not submit to the NPU. The planes hold stale data, so results are garbage;
+# this isolates how much of the host half is device contention rather than the loop.
+SKIP_SUBMIT = False
+QZ_THREADS = 4
+QZ_MIN_ELEMS = 32768
+# DISABLED by measurement: unlike quantise, this loop is bandwidth-bound (it writes m*n floats),
+# so four threads only add handoff. In-model, one warm prefill, same process and probe:
+#   serial 62.46 ms / 1,220.68 ms wall  ->  parallel 67.85 ms / 1,233.23 ms wall (+12.55 ms)
+# The pool did run (248/355 calls dispatched, 0 refused), so this is the loop, not the dispatch.
+# Kept so the experiment and its verdict are not lost, the same way _row_key is kept.
+PARALLEL_DEQUANT = False
+DQ_MIN_ELEMS = 32768
+
+
+def _pool_addr():
+  """Address of `rk_run`, or None when the pool is not registered in this process."""
+  try:
+    from tinygrad.runtime.support.c import DLL
+    if "rkpool" not in DLL._loaded_:
+      return None
+    import thread_split
+    return thread_split.pool_address()
+  except Exception:
+    return None
+
+
 def _fused_source(key: _FusedKey) -> str:
     """The whole Linear as one C function: quantize, two ioctls, dequantize.
 
@@ -431,8 +473,42 @@ def _fused_source(key: _FusedKey) -> str:
     signed char *o = codes + (long)row*{key.k};
     qz_row(xr, {key.depth_in}, {key.k}, o, scales + row);
   }}"""
+    qrows = key.m_rows or key.m
+    POOL_TYPES = """
+typedef void rkq_fn_t(void **,int,int);
+typedef int rkq_dispatch_t(rkq_fn_t *,void **,int);"""
+    qpool = _pool_addr() if (PARALLEL_QUANT and qrows * key.depth_in >= QZ_MIN_ELEMS) else None
+    if qpool is None:
+      qz_prelude = qz_group = ""
+      qz_body = quantize
+    else:
+      nq = QZ_THREADS
+      qz_prelude = """
+static void rockchip_linear_qz(void **ctx,int unused,int group);"""
+      qz_body = f"""
+  {{
+    void *qctx[3];
+    qctx[0] = (void *)x; qctx[1] = (void *)codes; qctx[2] = (void *)scales;
+    volatile unsigned long qt[2];
+    qt[0] = {qpool}ULL >> 32; qt[1] = {qpool}ULL & 0xFFFFFFFFUL;
+    unsigned long qaddr = (qt[0] << 32) | qt[1];
+    rkq_dispatch_t *qfp = (rkq_dispatch_t *)qaddr;
+    if (qfp(rockchip_linear_qz,qctx,{nq}) != 0) {{{quantize}}} else stats[3] += 1;
+  }}"""
+      qz_group = f"""
+static void rockchip_linear_qz(void **ctx,int unused,int group) {{
+  (void)unused;
+  const float *qx = (const float *)ctx[0];
+  signed char *qc = (signed char *)ctx[1];
+  float *qs = (float *)ctx[2];
+  int lo = {qrows}*group/{nq}, hi = {qrows}*(group+1)/{nq};
+  for (int row = lo; row < hi; row++) {{
+    const float *xr = qx + (long)({key.row_offset}+row)*{key.row_stride} + {key.k_offset};
+    qz_row(xr, {key.depth_in}, {key.k}, qc + (long)row*{key.k}, qs + row);
+  }}
+}}"""
     regions = 2 if key.m_rows else 1
-    planes = "".join(f"""
+    planes_serial = "".join(f"""
   for (int g = 0; g < {regions}; g++) {{
   for (int row = 0; row < {key.m}; row++) {{
     const int *src = raw + g*{key.m * key.n} + {offset * key.m} + (long)row*{width};
@@ -440,13 +516,65 @@ def _fused_source(key: _FusedKey) -> str:
     float a = scales[g*{key.m}+row];
     for (int j = 0; j < {width}; j++) dst[j] = (float)src[j] * a * w_scale[{key.column_offset + offset} + j];
   }}}}""" for offset, width in key.parts)
+    dpool = _pool_addr() if (PARALLEL_DEQUANT and not key.raw_out
+                             and regions * key.m * key.n >= DQ_MIN_ELEMS) else None
+    if dpool is None:
+      dq_prelude = dq_group = ""
+      planes = "" if key.raw_out else planes_serial
+    else:
+      dq_rows = "".join(f"""
+    {{{{
+    const int *src = draw + g*{key.m * key.n} + {offset * key.m} + (long)row*{width};
+    float *dst = dout + (long)t*{key.n} + {offset};
+    for (int j = 0; j < {width}; j++) dst[j] = (float)src[j] * a * dw[{key.column_offset + offset} + j];
+    }}}}""" for offset, width in key.parts)
+      dq_prelude = """
+static void rockchip_linear_dq(void **ctx,int unused,int group);"""
+      dq_group = f"""
+static void rockchip_linear_dq(void **ctx,int unused,int group) {{
+  (void)unused;
+  const int *draw = (const int *)ctx[0];
+  float *dout = (float *)ctx[1];
+  const float *dscales = (const float *)ctx[2];
+  const float *dw = (const float *)ctx[3];
+  int total = {regions * key.m};
+  int lo = total*group/{QZ_THREADS}, hi = total*(group+1)/{QZ_THREADS};
+  for (int t = lo; t < hi; t++) {{
+    int g = t / {key.m}, row = t % {key.m};
+    float a = dscales[g*{key.m}+row];{dq_rows}
+  }}
+}}"""
+      planes = f"""
+  {{
+    void *dctx[4];
+    dctx[0] = (void *)raw; dctx[1] = (void *)out;
+    dctx[2] = (void *)scales; dctx[3] = (void *)w_scale;
+    volatile unsigned long dt[2];
+    dt[0] = {dpool}ULL >> 32; dt[1] = {dpool}ULL & 0xFFFFFFFFUL;
+    unsigned long daddr = (dt[0] << 32) | dt[1];
+    rkq_dispatch_t *dfp = (rkq_dispatch_t *)daddr;
+    if (dfp(rockchip_linear_dq,dctx,{QZ_THREADS}) != 0) {{{planes_serial}}} else stats[5] += 1;
+  }}"""
+    sync_to = "" if SKIP_SYNCS else f"  if (!err) err = sync_mem(fd,1,params[5],{key.payload_size}ULL);"
+    sync_from = "" if SKIP_SYNCS else f"  if (!err) err = sync_mem(fd,2,params[6],{key.out_size}ULL);"
     subcores = ",".join(str(value) for value in key.subcores)
+    submit_block = "" if SKIP_SUBMIT else f"""
+  if (!err) {{
+    long t0[2], t1[2];
+    clock_gettime(1,t0);
+    struct Submit submit={{5,6000,0,{key.tasks},0,0,params[4],{key.domain},0,0,{key.core_mask},-1,{{{subcores}}}}};
+    err = ioctl(fd,{_SUBMIT_REQUEST}UL,&submit);
+    clock_gettime(1,t1);
+    stats[0] += (U64)(t1[0]-t0[0])*1000000000ULL + (U64)(t1[1]-t0[1]);
+    stats[1] += 1;
+    stats[2] += {key.tasks};
+  }}"""
     return f"""#pragma clang fp contract(off)
 {_QZ_HELPER}
 typedef unsigned int U32;
 typedef unsigned long long U64;
 extern int ioctl(int,unsigned long,...);
-extern int clock_gettime(int,void*);
+extern int clock_gettime(int,void*);{(POOL_TYPES if (qpool or dpool) else "")}{qz_prelude}{dq_prelude}
 struct Sync {{U32 flags,reserved;U64 object,offset,size;}} __attribute__((packed));
 struct Submit {{U32 flags,timeout,start,number,counter;int priority;U64 object,regcfg,base,user;
                U32 mask;int fence;U32 subcores[10];}} __attribute__((packed));
@@ -466,21 +594,20 @@ void rockchip_linear(void *args) {{
   volatile int *status = (volatile int*)params[3];
   float *scales = (float*)payload;
   signed char *codes = (signed char*)(payload + {key.header});
-  int err = 0;{quantize}
-  if (!err) err = sync_mem(fd,1,params[5],{key.payload_size}ULL);
-  if (!err) {{
-    long t0[2], t1[2];
-    clock_gettime(1,t0);
-    struct Submit submit={{5,6000,0,{key.tasks},0,0,params[4],{key.domain},0,0,{key.core_mask},-1,{{{subcores}}}}};
-    err = ioctl(fd,{_SUBMIT_REQUEST}UL,&submit);
-    clock_gettime(1,t1);
-    stats[0] += (U64)(t1[0]-t0[0])*1000000000ULL + (U64)(t1[1]-t0[1]);
-    stats[1] += 1;
-    stats[2] += {key.tasks};
-  }}
-  if (!err) err = sync_mem(fd,2,params[6],{key.out_size}ULL);
-  if (err) {{ *status = err; return; }}{planes}
-}}
+  int err = 0;
+  if ((int)params[9] == 0) {{ long q0[2], q1[2];
+  clock_gettime(1,q0);{qz_body}
+  clock_gettime(1,q1);
+  stats[4] += (U64)(q1[0]-q0[0])*1000000000ULL + (U64)(q1[1]-q0[1]); }}
+{sync_to}
+{submit_block}
+{sync_from}
+  if (err) {{ *status = err; return; }}
+  {{ long d0[2], d1[2];
+  clock_gettime(1,d0);{planes}
+  clock_gettime(1,d1);
+  stats[6] += (U64)(d1[0]-d0[0])*1000000000ULL + (U64)(d1[1]-d0[1]); }}
+}}{qz_group}{dq_group}
 """
 
 
@@ -516,7 +643,8 @@ class _FusedInt8Plan:
     """
 
     def __init__(self, dev, m: int, n: int, k: int, depth_in: int, cores: int, column_offset: int,
-                 row_stride: int, row_offset: int, k_offset: int, weight_dma: int, w_scale_addr: int, m_rows: int = 0):
+                 row_stride: int, row_offset: int, k_offset: int, weight_dma: int, w_scale_addr: int,
+                 m_rows: int = 0, raw_out: bool = False):
         self.status = ctypes.c_int(0)
         rows_total = m_rows or m
         self.shape = (rows_total, n)
@@ -524,9 +652,14 @@ class _FusedInt8Plan:
         self.payload = _payload_buffer(dev, rows_total, k)
         self.out = _plane_buffer(dev, rows_total, n)
         if m_rows and m_rows == 2 * m:
+          # The payload stores quantised rows k-wide (`codes + row*k`), NOT at the source
+          # stride. `m * row_stride` walked past the allocation whenever row_stride != k, which
+          # is exactly the ffn_down prefill case (row_stride 9216, k tile 4096): measured 61,952
+          # bytes out of bounds, and every one of the 163,840 values in rows 64-127 differed
+          # from a plain m=64 plan (median relative error 1.42). `m * k` is row m's start.
           cmd, task, tasks, core_mask, subcores, parts = int8_task_plan_multi(dev, (
               (m, n, k, self.payload.dma + header, weight_dma + column_offset * k, self.out.dma),
-              (m, n, k, self.payload.dma + header + m * row_stride,
+              (m, n, k, self.payload.dma + header + m * k,
                           weight_dma + column_offset * k, self.out.dma + m * n * 4)))
           parts = parts[0]
         else:
@@ -538,16 +671,40 @@ class _FusedInt8Plan:
             k_offset=k_offset, column_offset=column_offset, parts=parts,
             payload_size=self.payload.size, out_size=self.out.size, domain=dev.domain,
             core_mask=core_mask, subcores=tuple(value for pair in subcores for value in pair), tasks=tasks,
-            m_rows=m_rows)
+            m_rows=m_rows, raw_out=raw_out)
         self.program = _fused_program(self.key)
         # payload, planes, w_scale, status, task array, payload obj_addr, planes obj_addr, fd,
         # device counter block. A raw BUFFER, not Tensor.empty().realize(): the model's forward
         # runs inside a @function capture, where forcing a realize would execute eagerly.
         self.params = UOp.new_buffer("CPU", _PARAMS, dtypes.uint64)
-        ctypes.memmove(self.params.buffer._buf, struct.pack("<9Q", self.payload.addr, self.out.addr,
+        ctypes.memmove(self.params.buffer._buf, struct.pack("<10Q", self.payload.addr, self.out.addr,
                        w_scale_addr, ctypes.addressof(self.status), task.meta.obj_addr,
                        self.payload.meta.obj_addr, self.out.meta.obj_addr, dev.fd.fd,
-                       dev.fused_stats_addr), _PARAMS * 8)
+                       dev.fused_stats_addr, 0), _PARAMS * 8)
+
+    def _row_key(self, x: Tensor):
+      """DISABLED by measurement: sharing saved no wall time.
+
+      Skipping a duplicate qz_row leaves the sync_mem and the submit on that payload, so the
+      14.4 ms of duplicated quantise did not reach the clock: measured 1,265.70 ms with sharing
+      vs 1,259.09 without (+6.61 ms, i.e. noise on the wrong side). Kept, disabled, so the
+      experiment and its verdict are not lost.
+      """
+      return None
+
+    def _row_key_impl(self, x: Tensor):
+      """(payload, input buffer + version, row_offset, k_offset, depth) or None if unknowable.
+
+      Same-(m,k) plans share one payload buffer, so four same-row consumers per layer each
+      re-quantise an identical row (96 calls x 0.150 ms). The version is part of the key so a
+      rewritten activation can never produce a false hit.
+      """
+      try:
+        b = x.uop.buffer
+        return (self.payload.addr, id(b), int(b.meta.version), self.key.row_offset,
+                self.key.k_offset, self.key.depth_in)
+      except Exception:
+        return None
 
     def __call__(self, x: Tensor) -> Tensor:
         # The ioctl runs at realize time, so a failure is only visible here, on the next call.
@@ -557,6 +714,13 @@ class _FusedInt8Plan:
             raise RuntimeError(f"fused Rockchip Linear ioctl failed with {err}")
         # UOp.alloc + Tensor rather than Tensor.empty: the wrapper's dtype/device canonicalisation
         # is 0.03 ms and this runs 323 times per decode token. 2-D so no reshape is needed.
+        skip = 0
+        k = self._row_key(x)
+        if k is not None:
+          skip = 1 if _QUANTISED.get(k) is not None else 0
+          _QUANTISED[k] = True
+          ctypes.memmove(ctypes.addressof(ctypes.c_uint64.from_buffer(self.params.buffer._buf)) + 9*8,
+                         ctypes.byref(ctypes.c_uint64(skip)), 8)
         out = Tensor(UOp.alloc(self.shape, dtypes.float, device=x.device, bind_on_realize=True))
         # custom_kernel would rebuild the placeholders (0.16 ms for two buffers) and throw them
         # away, because the fxn ignores them and returns the memoised PROGRAM. Bind the CALL
@@ -568,6 +732,8 @@ class _FusedInt8Plan:
 # allocation it owns at finalize. Keyed by id(dev) so a stale plan can never be hit by a new
 # device that reused an address.
 _FUSED_PLANS: dict[tuple, _FusedInt8Plan] = {}
+# which activation rows already have their codes in a given payload (see _row_key)
+_QUANTISED: dict[tuple, bool] = {}
 
 # Scratch is shared per geometry rather than per Linear: a per-plan plane buffer would cost
 # 2.4 MB for every 64-row ffn plan, i.e. ~600 MB for the 4B. Pooled, the whole model needs one
@@ -731,6 +897,30 @@ class NPULinear:
                     # realize per tile: a lazy graph would hold every tile's temporaries at once
                     self.packed.append((c0, k0, pack_weight(tile, self.device).realize(), None))
         self.weight = None  # packed tiles carry everything; the source is the largest live copy
+
+    def _row_key(self, x: Tensor):
+      """DISABLED by measurement: sharing saved no wall time.
+
+      Skipping a duplicate qz_row leaves the sync_mem and the submit on that payload, so the
+      14.4 ms of duplicated quantise did not reach the clock: measured 1,265.70 ms with sharing
+      vs 1,259.09 without (+6.61 ms, i.e. noise on the wrong side). Kept, disabled, so the
+      experiment and its verdict are not lost.
+      """
+      return None
+
+    def _row_key_impl(self, x: Tensor):
+      """(payload, input buffer + version, row_offset, k_offset, depth) or None if unknowable.
+
+      Same-(m,k) plans share one payload buffer, so four same-row consumers per layer each
+      re-quantise an identical row (96 calls x 0.150 ms). The version is part of the key so a
+      rewritten activation can never produce a false hit.
+      """
+      try:
+        b = x.uop.buffer
+        return (self.payload.addr, id(b), int(b.meta.version), self.key.row_offset,
+                self.key.k_offset, self.key.depth_in)
+      except Exception:
+        return None
 
     def __call__(self, x: Tensor) -> Tensor:
         shape = x.shape

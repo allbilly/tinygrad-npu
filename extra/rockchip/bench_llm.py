@@ -30,6 +30,30 @@ def _read(path: str) -> str | None:
         return None
 
 
+def thermal() -> dict:
+    """Per-trial temperature and live clocks.
+
+    This exists because `clocks_start`/`clocks_end` cannot detect a thermal ramp *inside* a
+    run, and a ramp charged to whichever code path ran later is exactly how two A/B verdicts
+    were got wrong (+27.7 ms and +11.57 ms, both neutral when measured fairly with an
+    in-process ABBA). Recording it per trial makes the fairness of a comparison checkable
+    after the fact instead of assumed.
+    """
+    def rd(path: str) -> float | None:
+        try:
+            return float(pathlib.Path(path).read_text().strip())
+        except OSError:
+            return None
+    temp = rd("/sys/class/thermal/thermal_zone0/temp")
+    return {
+        "temp_c": round(temp / 1000.0, 1) if temp is not None else None,
+        "npu_cur_hz": rd("/sys/class/devfreq/fdab0000.npu/cur_freq"),
+        "ddr_cur_hz": rd("/sys/class/devfreq/dmc/cur_freq"),
+        "cpu6_cur_hz": rd("/sys/devices/system/cpu/cpufreq/policy6/scaling_cur_freq"),
+        "cpu6_governor": (pathlib.Path("/sys/devices/system/cpu/cpufreq/policy6/scaling_governor").read_text().strip()
+                          if pathlib.Path("/sys/devices/system/cpu/cpufreq/policy6/scaling_governor").exists() else None),
+    }
+
 def clocks() -> dict:
     """Device state at call time, recorded so a row can be checked after the fact."""
     return {
@@ -128,6 +152,7 @@ def main() -> int:
     def trial(tag: str = "") -> dict:
         nonlocal trial_index
         npu_dev = Device["ROCKCHIP"] if args.npu else None
+        th_start = thermal()
         begin = time.perf_counter()
         s0 = npu_dev.submit_count if npu_dev else 0
         t0 = npu_dev.task_count if npu_dev else 0
@@ -166,7 +191,12 @@ def main() -> int:
                           "decode_tps": rate, "prefill_submits": prefill_submits,
                           "decode_submits": decode_submits}), flush=True)
         trial_index += 1
+        th_end = thermal()
+        print(f"  {tag} thermal start {th_start['temp_c']} C -> end {th_end['temp_c']} C"
+              f"  npu {th_end['npu_cur_hz']} cpu6 {th_end['cpu6_cur_hz']} ddr {th_end['ddr_cur_hz']}", flush=True)
         return {"ttft_ms": ttft_ms, "decode": rate, "generated_ids": generated, "prefill_submits": prefill_submits,
+                "temp_start_c": th_start["temp_c"], "temp_end_c": th_end["temp_c"],
+                "clocks_at_trial": th_end,
                 "prefill_tasks": prefill_tasks, "decode_submits_per_token": decode_submits / args.gen,
                 "decode_tasks_per_token": decode_tasks / args.gen,
                 "decode_npu_ms_per_token": decode_npu_ms / args.gen,
@@ -207,6 +237,15 @@ def main() -> int:
             "ttft_ms": [round(t["ttft_ms"], 2) for t in trials],
             "generated_ids": [t["generated_ids"] for t in trials],
             "decode_tokens_per_second": [round(t["decode"], 4) for t in trials],
+            "trial_temperature_c": {"start": [t.get("temp_start_c") for t in trials],
+                                    "end": [t.get("temp_end_c") for t in trials]},
+            "trial_clock_drift_hz": {
+                key: (max(v) - min(v)) if (v := [t.get("clocks_at_trial", {}).get(k) for t in trials
+                                                 if t.get("clocks_at_trial", {}).get(k) is not None]) else None
+                for key, k in (("npu", "npu_cur_hz"), ("ddr", "ddr_cur_hz"), ("cpu6", "cpu6_cur_hz"))},
+            "trial_temperature_drift_c": (
+                round(max(v) - min(v), 1) if (v := [x for t in trials
+                      for x in (t.get("temp_start_c"), t.get("temp_end_c")) if x is not None]) else None),
             "median_ttft_ms": round(statistics.median(t["ttft_ms"] for t in trials), 2),
             "median_decode_tokens_per_second": round(statistics.median(t["decode"] for t in trials), 4),
             "npu_submits": [{"prefill": t["prefill_submits"], "prefill_tasks": t["prefill_tasks"],

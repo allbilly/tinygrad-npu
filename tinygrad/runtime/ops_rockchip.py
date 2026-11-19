@@ -414,8 +414,12 @@ class _RockchipHardware:
     # Wall time spent inside blocking submits, so a run can separate device time from host time.
     self.submit_seconds = 0.0
     # The fused INT8 Linear submits from its own C function, so its counters live in this
-    # process's memory and the C side accumulates into them: [submit_ns, submits, tasks].
-    self.fused_stats = (ctypes.c_uint64 * 3)()
+    # process's memory and the C side accumulates into them. The slot meaning is fixed by
+    # _fused_source in extra/rockchip/npu_linear.py: [4] is quantise and [6] is dequantise.
+    # [3] is the rkpool hit counter -- without it a refused dispatch is indistinguishable from a
+    # working one, which is how a 64 ms lever sat recorded as "inert" (mistake.md M68).
+    self.fused_stats = (ctypes.c_uint64 * 7)()  # submit_ns, submits, tasks, pool_hits,
+    #                                            quantise_ns, unused, dequantise_ns
 
 _hardware_lifetime_lock = threading.Lock()
 
