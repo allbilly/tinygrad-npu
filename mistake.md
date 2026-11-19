@@ -1050,6 +1050,367 @@ measurements of untouched zeroed memory. The first of those conclusions justifie
 is required to read back that value -- before any of its other results are believed. "The probe
 returned zeros" is indistinguishable from "the kernel did not run" unless the control passes.
 
+### M55. Quoted a CPU-program wall as device time, and nearly rewrote the driver for it
+
+`rockchip_linear` is a CPU PROGRAM: one C function doing quantise -> sync -> blocking ioctl ->
+sync -> dequantise. Its 603.2 ms row in the decomposition contained ~180 ms of host work, but it
+was labelled "NPU programs" and compared against the reference's 428.0 ms, which is device time
+only. That produced "+175 ms of NPU gap" and the conclusion that a kernel fence was the only route
+to 1.2 s -- while the reference reaches 1,201 ms with the same blocking `fence_fd=-1` and an
+identical INT8 register program.
+
+**Fix:** the device row is `submit_seconds`, which `bench_llm` already prints as `0.4s in npu`.
+Compare that against the reference's NPU row, never a fused-program wall. Counter-check: the
+register programs were later diffed field by field and are the same 30 writes.
+
+### M56. Four investigations built on a component timer that inflated host stages ~1.8x
+
+The `clock_gettime` timer inside the fused kernel reported quantise 107.2 ms and dequantise
+106.7 ms. Measured per geometry with a counter read after each call (median of 9, after 3 warm-ups),
+the true figures are **59.3 ms** and **31.9 ms**, and dequantise runs at 22.3 GB/s -- 94% of the
+23.8 GB/s ceiling measured on the same buffers. Mapping, cache residency, cache maintenance and
+NPU-interleave hypotheses were all invented to explain a 2x deficit that did not exist.
+
+**Fix:** attribute with a counter read around the statements in question, over warm reps, and
+compute throughput against a measured ceiling on the same buffer -- not against a theoretical DRAM
+number. An "impossible" bandwidth (46 GB/s on a 33.79 GB/s bus) is a signal that the element count
+or the timer is wrong, not that the hardware is fast.
+
+### M57. Used sampled token ids as a bitwise parity gate
+
+`generated_ids` differ between runs of the *same* build: the baseline's own three trials diverge at
+token 0 (`[141274,...]` vs `[182662,...]` vs `[185053,...]`). Two "parity FAIL" verdicts were
+therefore meaningless, and one caused a working emitter to be reverted.
+
+**Fix:** the deterministic gates are `logits_sha256_16` and a boundary comparison of the kernel's
+own output. Ground truth for ids is `perplexity`/distribution, never equality.
+
+### M58. Compared against a `--quick` run
+
+`bench_llm --quick` sets `prompt=16, gen=8, runs=1, warmups=0`. Three separate "results" came from
+it: "16.1 s prefill", "transforms applied: NONE", and a parity failure. All three were artefacts of
+a 16-token prompt with no warm-up, and the flag's own help text says never to quote it.
+
+**Fix:** a comparison needs `--prompt 128 --warmups 3 --runs 3`; a parity or crash check needs at
+minimum 128 tokens and one warm-up. Run the unmodified control first and only believe a difference
+if the control differs too.
+
+### M59. Toggled a codegen flag in an in-process ABBA after TinyJit had captured
+
+The cache-sync ablation cleared `_FUSED_PROGRAMS` between arms and set `SKIP_SYNCS`. Both arms
+measured 1,020 ms -- ~380 ms below the with-submit baseline, i.e. the device half was missing from
+*both*. `TinyJit` captures the CALL uops on the first forward and never rebuilds them, so every arm
+ran the kernels captured during warm-up. The "+1.12 ms, syncs are free" verdict was void and had to
+be retracted; a fresh process per arm then measured **-30.5 ms**, a 27x difference in conclusion.
+
+**Fix:** an in-process ABBA is valid only for changes that survive capture (runtime data, pool use,
+buffer content). Anything that changes generated source needs one process per arm. Verify the
+toggle took effect by reading a counter that only the flagged path increments.
+
+### M60. Repeated "we are ahead on CPU kernels" without a counter
+
+The claim traced to a decomposition built from the same discredited timer, and to comparing named
+kernel rows against a reference row that already contained its quantise. With counters: our
+non-fused CPU kernels are **785.9 ms** against the reference's **691.2** -- 94.7 ms *behind*, the
+second-largest gap in the tree, and the one row never attacked.
+
+**Fix:** derive each row from a counter over warm reps and state the reference's row definition
+(does it include quantise? copies? dispatch?) before subtracting anything from it.
+
+### M61. Three of four defects in a new kernel were in my own probe, not the kernel
+
+Building the fused FFN-tail pack cost four full model runs: (1) `codes` and `scales` both read
+argument slot 6; (2) `unpack()` allocated float32 and assigned int32 planes into it, so the kernel
+read float bit patterns through `const int *`; (3) the alias hypothesis (`out === g`) was tested and
+refuted; (4) the real fault -- the kernel indexes a **part-blocked** plane buffer, but it was handed
+the unpacked `(m, n)` view, so row 1 read row 0's column 864. Row 0 matched only because its offset
+is 0.
+
+**Fix:** bisect by stage against the emitter's own convention -- compare the dequantised intermediate
+and the final quantity separately -- before touching the kernel again. Any consumer of plane data
+must take the flat buffer plus `key.parts`, never an `(m, n)` reshape.
+
+### M62. Called a ctypes CFUNCTYPE's cast address as code, and passed unpacked kernel args
+
+The compiled-C replay segfaulted on `CALL 0` for three runs. Two causes: `ctypes.cast(rt.fxn,
+c_void_p).value` yields a **thunk**, not the mmap'd code address (the real address is `rt.buf.buf`
+in this tree), and `CPUProgram.fxn` is `CFUNCTYPE(None, c_void_p)` -- **one** pointer to a packed
+argument buffer -- so emitting `void(*)(U64,U64,U64)` and passing the parameters unpacked makes the
+callee dereference an address as if it were the buffer.
+
+**Fix:** emit an unbuffered marker before each call so the last one printed names the crasher; that
+single line turned three runs of guessing into "it fails on call 0". Then match the runtime's actual
+`argtypes`, and pack on the stack exactly as `Program.__call__` does.
+
+### M63. Used a stochastic model's output as a parity gate -- twice
+
+`Transformer.forward` samples every call: `model.py:908` applies the Gumbel-max trick with
+`Tensor.rand_like(logits)` unconditionally, so the returned token is a *sample* even at
+`temperature=0`. Two runs of the stock path, no code change, hash differently:
+
+    846574e718739b2c   vs   f9035cf482f82a3b
+
+So `logits_sha256_16` over the model output is not a gate, and two separate parity verdicts were
+comparisons of random quantities: an earlier "lever 1 fails parity" (which reverted a correct
+emitter) and a later "replay parity FAILS" (which invalidated the session's only real speedup,
+-159.28 ms).
+
+**Fix:** gate on a quantity taken *before* sampling -- the hidden state or pre-sampling logits,
+produced by calling the blocks and lm_head directly -- or fix the RNG and assert the seed took
+effect. Never gate on `generated_ids` (M57) or on a hash of the model's return value.
+
+### M64. Compared two execution paths across runs, and wrote off the session's only real win
+
+The compiled-C replay measured **+9.7% slower** (3,926.1 vs 3,580.4 ms) across two separate runs, so
+it was recorded as refuted "at four segment shapes". Executed both ways on the *same* captured
+linear in one process, with a counter around each path, it is **-151.6 ms (-10.7%)**:
+
+    stock   1411.8 ms    replay   1260.2 ms      (same process, same linears, back to back)
+
+End-to-end, fresh process per arm, 3+3: control 1,412.89, replay **1,259.09** (-153.80 ms, -10.9%,
+decode 3.43 -> 4.85 tok/s). Seven replay implementations were discarded on the strength of that
+cross-run comparison.
+
+This refines M59 rather than contradicting it. The rule is not "always in-process" or "always
+separate processes" -- it depends on what varies:
+
+| what the change varies | valid comparison |
+| --- | --- |
+| generated source, capture-time codegen | **one process per arm** (capture pins kernels, M59) |
+| execution path over the same captured graph | **same process, both paths, counters around each** |
+| end-to-end number | fresh process per arm, 3+3 |
+
+**Fix:** before declaring a lever dead, ask which of those three the change is, and time it the
+matching way. A cross-run comparison of two paths that could have been run in one process is not
+evidence.
+
+### M65. "Quantise duplication is only 2-7 ms" was measured on the wrong denominator
+
+Quantise cost scales with `m*k` (elements read), not with `n` (columns written): every real shape
+sits at a constant **0.92 ns/element** (163,840 elements -> 0.150 ms; 262,144 -> 0.239 ms). Same-
+`(m,k)` plans already share **one** payload buffer (`payload is pb.payload -> True`), so the four
+same-row consumers per layer each re-quantise the identical row and overwrite the same memory with
+the same bytes: **96 calls x 0.150 ms = 14.4 ms**.
+
+The earlier note that this was "refuted: 2-7 ms" measured it against a different call population,
+not against the 96 calls that actually duplicate.
+
+**Fix:** state the denominator when quoting a duplication cost ("X ms across N calls of shape Y"),
+and confirm buffer sharing by identity before claiming a redundancy is free to remove.
+
+### M66. Trusted a runner script as the oracle's interface for four attempts
+
+`extra/rockchip/run_ref.py` drives the oNPU reference. It had **four** defects, each of which
+produced a plausible-looking number or a silent hang rather than an error, and I found them one per
+run instead of in one verification pass:
+
+| # | defect | what it looked like |
+| --: | --- | --- |
+| 1 | `stderr=subprocess.PIPE` never drained | worker blocks forever on a full 64 KiB pipe; "ready at 182.7 s, then silence" |
+| 2 | stale NPU lock from an interrupted run | `NPU is owned by another worker` -- and I blamed a thermal gate |
+| 3 | `ttft_ms` read at top level, but `worker.py:1030` emits `{"event":"done","metrics":{...}}` | three completed runs discarded, reported as "no TTFT" |
+| 4 | **`ONPU_NPU_PREFILL="off"`** | prefill ran on the **CPU**: **49,310.76 ms** vs the archived 1,201.41, a 41x error |
+
+Defect 4 is the damaging one. The env block *looked* authoritative -- it carries a comment citing
+`rockchip_options.py:389-401` -- so I never checked the one flag that decides **where the work
+runs**. The result was a number 41x wrong that I came within one turn of reporting as "the
+reference is much slower on this board today", i.e. as a finding about the machine.
+
+**Fix:** before trusting any harness that drives an external oracle, verify against the oracle's own
+source, not against the harness: (a) the event schema and *where* the metric lives; (b) that stdout
+and stderr are both drained; (c) every flag that changes which engine does the work. And when an
+oracle's number is off by more than ~20% (AGENTS rule 5), suspect the **harness** before the
+hardware -- a 41x deviation is a configuration difference, never a machine difference.
+
+### M67. Shipped a "reproducible command" whose default arguments cannot run
+
+`docs/rknpu/reference-run.md` records the command with no `--prompt`, and the runner's default
+prompt is the raw x8 text -- **612 tokens**, which the worker rejects:
+
+    error: Prompt (612 tokens) + reply limit (64) exceeds context (512).
+
+So the documented command failed on its first use, after I had already written the fix into the
+doc ("prompt must be `decode(encode(PROMPT)[:128])`") without putting it into the tool. A reader
+following the doc verbatim would hit exactly the failure I had just diagnosed.
+
+**Fix:** a runner must be invoked **with its defaults** once before its command is written down; a
+documented command that needs an undocumented argument is not reproducible. When a trap is written
+into a doc, encode it in the tool in the same edit -- do not leave it as prose the next caller must
+remember.
+
+### M68. Called a lever "inert" without a counter proving it ran -- it was silently falling back
+
+`PARALLEL_QUANT` (four-way quantise through the `rkpool` dispatch inside the fused C) was recorded
+as **inert** and left `False`, because "enabling it changed nothing". The reason it changed nothing
+was that the dispatch was **silently falling back to the serial loop**: the emitted C is
+
+    if (qfp(rockchip_linear_qz, qctx, 4) != 0) { <serial quantise> }
+
+and nothing counted which branch ran. A refused dispatch and a working dispatch were therefore
+indistinguishable -- both produced correct numbers, one just slowly. Adding `stats[3] += 1` on
+success made it observable, and the same code immediately measured:
+
+| | recorded as "inert" | measured once the hit counter existed |
+| --- | --: | --: |
+| quantise, one warm prefill | 59.32 ms (per-geometry x calls) | **105.56 ms** |
+| quantise, parallel | "no change" | **41.37 ms** |
+| pool hits | never counted | **344 / 355 calls, 2208 dispatches, 0 refused** |
+| wall, same probe | 1,282.71 ms | **1,220.68 ms** |
+
+So the single largest piece of host work in the project sat disabled for the whole session, and the
+59 ms gap it could pay for was hunted elsewhere for many turns. Timer-based evidence is not
+evidence that a feature ran.
+
+**Fix:** an "inert"/"no effect" verdict requires a **counter that proves the path executed**, not
+just an unchanged stopwatch. If the code has a fallback branch, increment a counter on each branch
+and print both before drawing any conclusion about which one is being taken.
+
+**Resolved -- this was the whole 1.2 s gap.** Three changes, no new algorithm:
+
+| change | why |
+| --- | --- |
+| `stats[3] += 1` on a successful dispatch | a refusal and a success become distinguishable |
+| `PARALLEL_QUANT = False -> True` | the lever itself |
+| hoist `rkq_fn_t` / `rkq_dispatch_t` out of the quantise-only prelude | not part of the 60 ms: needed once a *second* path could be parallel, so enabling either cannot duplicate the typedefs. Kept. |
+
+Evidence, in-model, one warm prefill, same process:
+
+| | before | after |
+| --- | --: | --: |
+| quantise (C counter) | 105.56 ms | **41.37 ms** |
+| wall | 1,282.71 ms | **1,220.68 ms** |
+| pool hits | 0 counted | **344 / 355 calls, 3200 dispatches, 0 refused** |
+
+Parity: pre-sampling logits `895365e27ed4255b`, unchanged. Protocol result: **1,198.87 ms** median,
+3+3, `complete: true` (`docs/rknpu/results/prefill-parallel-quantise.md`).
+
+The sibling change -- the same treatment on the dequantise loop -- measured **worse** (62.46 -> 67.85
+ms, wall +12.55) and is disabled with that verdict in the code. Same pool, same split, opposite
+outcomes: telling those apart is exactly what the hit counter buys, and it is why "enabling it
+changed nothing" was never evidence about the *loop*.
+
+### M69. Built a decomposition from overlapping rows, so a phantom 83.13 ms row survived
+
+The budget was reported as
+
+    device 393.78 + quantise 59.32 + dequantise 31.86 + syncs 30.50 + "CPU kernels" 660.50 = 1,175.96
+
+against a 1,259.09 ms wall, leaving **83.13 ms "outside every counter"**. That row does not exist.
+`cpu_by_name.json` totals **1,281.73 ms over 1006 calls**, of which `rockchip_linear_*` is
+**621.20 ms / 355 calls** and *everything else* is **660.53 ms / 651 calls** -- i.e. the "660.50 CPU
+kernels" row was **the whole table minus the fused linears**. Device, quantise, dequantise and syncs
+are all *inside* the fused linear's wall, so adding them on top double-counted them.
+
+Measured properly, with one call per C segment so each kernel is timed in-model:
+
+    wall 1,272.84   sum-by-name 1,264.53   outside run_linear 8.31 ms
+
+which agrees with the independent `attr_jit` measurement (`prep` 0.01, `symbolic_ret` 0.00,
+outside `run_linear` 5.78/5.97 ms). The residual is ~8 ms, not 83.13.
+
+The consequence was a whole turn spent attributing the phantom to `jit.py:79`'s
+`substitute(walk=True)`, which measured **0.00 ms**. The doc `int8-name-reconciliation.md:745` had the
+correct total all along (`621.2 + 660.5 = 1,281.7`); the 83.13 came from quoting a *different*
+arithmetic in the summary than the one in the document.
+
+**Fix:** a decomposition's rows must be **disjoint** and must sum to the wall to within a few ms.
+State which row contains which; if the largest row is "everything else", never add sub-rows of it
+back. Always print `sum(rows)` next to `wall` and treat a residual over ~2% as an arithmetic defect
+before treating it as a mechanism.
+
+### M70. Multiplied an isolated per-geometry cost by a call count -- twice the real numbers
+
+`dequant_per_geom.py` builds each `(m,n,k)` plan standalone and prints a `calls` column, then sums
+`ms/call x calls` to get the prefill total: quantise **59.32 ms**, dequantise **31.86 ms**. That is
+the multiplication `AGENTS.md` rule 2 forbids ("attribute by ablation, never by multiplication"),
+and the in-model C counters disagree:
+
+| | per-geometry x calls | in-model counter | understated by |
+| --- | --: | --: | --: |
+| quantise | 59.32 ms | **105.56 ms** | 1.78x |
+| dequantise | 31.86 ms | **62.62 ms** | 1.97x |
+
+Because both numbers were too small, the fused Linear's host work looked like 91 ms when it was
+**168 ms**, so the target gap looked unreachable and the lever that actually paid (~64 ms) was
+dismissed as inert in the same breath (M68).
+
+**Fix:** per-geometry probes may size a shape's *share*, never the prefill total. The total comes
+from the counter accumulated across one real forward (`fused_stats[4]` and `[6]`), read before and
+after the run.
+
+### M71. Let an invalid run occupy the device for 27 minutes: `prefill_submits: 0`
+
+`bench_replay_c.py` passes argv through to `bench_llm.py`, and I launched it without `--npu`. The
+model therefore ran **pure CPU**, and the log said so on every trial:
+
+    warmup 3/3 prefill 312.4s 0 submits 0.0s in npu
+
+`0 submits` and a 312 s prefill are not a slow measurement -- they are the wrong device. I read the
+first trial's line, saw a number, and let it run.
+
+This is the same defect as M66 (a driver that silently ran the reference on the CPU because
+`ONPU_NPU_PREFILL=off`) and it has the same tell: **zero submits**. The difference is that this time
+the tell was printed in the line I was reading.
+
+**Fix:** before accepting any trial, check the device actually ran -- `prefill_submits > 0` and
+`npu` ms/token non-zero. A prefill of 312 s is also 4x the slowest valid prefill ever measured here
+(31.7 s on the CPU path in an earlier session), so a >20% outlier should stop the run, not be
+recorded (AGENTS rule 5).
+
+### M72. Compared a 3+3 against a baseline measured with a different transform set
+
+`bench_replay_c.py` installed the compiled-C replay but **not** `thread_split`, so no four-way CPU
+kernel transform was applied. The number looked like a catastrophic regression:
+
+| | recorded baseline | my "same" run |
+| --- | --: | --: |
+| prefill TTFT | 1,259.09 ms | **1,858.49 ms** |
+| decode | 4.85 tok/s | 4.97 tok/s |
+| `[thread_split] transforms applied` | `{...}` present | **the line does not exist** |
+| submits | 355 | 355 |
+
+Both runs printed the same `fused 8 qkv groups`, the same `233 linears`, the same 355 submits, the
+same temperatures (67-78 C) and the same pinned clocks. Everything I checked matched. What differed
+was the **transform set**, and the only evidence for it was a line that was *absent* -- an absence,
+which is why it survived the checks I did make.
+
+The tell was in the log the whole time: `bench_llm` never installs `thread_split`; the baseline's
+driver did, and its log proves it with `[thread_split] transforms applied: {'r_32_16_4_32_4': 2,
+'E_32_32_128_4': 1, 'E_2_16_32_32_4_4': 2, 'E_1024_32_4_4': 1, 'E_393216_3': 1}`.
+
+**Fix:** a driver asserts its own configuration instead of relying on the caller:
+`thread_split.install()`, `rkpool` present in `DLL._loaded_`, `replay_c.install()`, and `--npu`
+checked in argv. And when a new number disagrees with the baseline by more than ~20%, diff the
+**log's configuration lines** -- not just the flags -- before treating it as a result. An absent
+line is as much a configuration difference as a wrong one.
+
+### M73. Spent the session building levers when the fix was a disabled path in the file under edit
+
+The 1.2 s target was reached by 60.22 ms (1,259.09 -> 1,198.87 ms), and **nothing new was built** for
+it. `extra/rockchip/npu_linear.py` already contained a four-way quantise path through `rkpool`, with
+the group function, the dispatch typedef and the row-range split all written. It was one constant
+away: `PARALLEL_QUANT = False`.
+
+What was spent instead:
+
+| approach | outcome |
+| --- | --- |
+| split the fused call into quantise / submit / dequantise | measured **1.43-1.80x slower**, bitwise identical (the copies the fused call exists to avoid) |
+| per-forward `jit.py` graph walk | measured **0.00 ms** |
+| replay dispatch | closed: stock dispatch 136.24 ms, removed by the replay |
+| quantise sharing across consumers | measured **+6.61 ms worse** |
+| 22 other levers | neutral or worse |
+
+`AGENTS.md` already states the rule: *"Before building anything, name the existing entry point and
+say why it cannot be used."* The entry point existed and was named -- as **"inert"**, which was the
+one word that stopped anyone looking at it again.
+
+**Fix:** before building a lever, enumerate the **disabled constants and unexercised branches in the
+file being edited**, and for each one either measure it with a hit counter or delete it. A disabled
+constant carrying a verdict ("inert", "no gain") is a claim that must have a counter behind it.
+Also re-test old verdicts whenever a *different* change removes their premise -- the split above was
+correctly rejected at 149.6 us/program of dispatch, and that price is exactly what the replay removed.
+
 ## Guards now installed
 
 | guard | where |
@@ -1074,3 +1435,29 @@ returned zeros" is indistinguishable from "the kernel did not run" unless the co
 | kernel file-scope data is at address 0; never park state in a jit-loaded kernel | `mistake.md` M49 |
 | a patch that changes compilation must assert its own hit count each run | `mistake.md` M49 |
 | no date-based filenames under `docs/rknpu/` | `AGENTS.md` "Markdown" |
+| counter-read attribution over warm reps, never a stage timer | `mistake.md` M56 |
+| a "impossible" bandwidth means the count or the timer is wrong, not fast hardware | `mistake.md` M56 |
+| a codegen flag needs one process per arm; capture pins kernels | `mistake.md` M59 |
+| two execution paths: same process, both ways, counters around each | `mistake.md` M64 |
+| a cross-run comparison of two paths is not evidence | `mistake.md` M64 |
+| quote a duplication cost with its denominator and confirm buffer sharing by identity | `mistake.md` M65 |
+| validate an oracle driver against the oracle's source: event schema, both streams drained, engine-selecting flags | `mistake.md` M66 |
+| an oracle number off by >20% is a harness/config difference, not the machine | `mistake.md` M66 |
+| a documented command must succeed with its defaults, once, before it is written down | `mistake.md` M67 |
+| encode a doc's trap into the tool in the same edit | `mistake.md` M67 |
+| prove a toggle took effect via a counter only that path increments | `mistake.md` M59 |
+| plane consumers take the flat buffer + `key.parts`, never an `(m,n)` view | `mistake.md` M61 |
+| bisect a new kernel by stage (dequantise vs final) before editing it | `mistake.md` M61 |
+| emit a marker per call so a segfault names the crasher | `mistake.md` M62 |
+| device row = `submit_seconds`, never a fused-program wall | `mistake.md` M55 |
+| parity gate = pre-sampling logits / boundary output, never the model's return | `mistake.md` M57 M63 |
+| an "inert"/"no effect" verdict needs a counter proving the path ran, not an unchanged stopwatch | `mistake.md` M68 |
+| count both branches of a fallback, and print the counts before concluding which is used | `mistake.md` M68 |
+| decomposition rows must be disjoint and sum to the wall within ~2%; print the residual | `mistake.md` M69 |
+| never add sub-rows of "everything else" back into the total | `mistake.md` M69 |
+| per-geometry probes size a shape's share; the total comes from a counter over one real forward | `mistake.md` M70 |
+| a trial is invalid if `prefill_submits == 0`: check the device ran before reading the number | `mistake.md` M71 |
+| a driver asserts its own config: transforms installed, pool registered, replay installed, device flag | `mistake.md` M72 |
+| diff the log's configuration lines on a >20% disagreement; an absent line is a difference | `mistake.md` M72 |
+| enumerate disabled constants / unexercised branches in the file under edit before building a lever | `mistake.md` M73 |
+| a disabled constant's verdict needs a counter, and must be re-tested when its premise is removed | `mistake.md` M73 |
