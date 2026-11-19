@@ -107,11 +107,65 @@ true of inventing your own tree.
   process, and a second run then fails with "Rockchip NPU is owned by another
   worker" or, worse, competes for the device. `fuser /tmp/rk3588_npu_submit.lock`
   and `ps -eo pid,cmd | grep bench_llm` first, and kill by explicit PID.
+- **An invalid submit is what wedges the board, and a wrong pointer is enough.**
+  `probe_kdepth.py` passed a device DMA address where the fused C function
+  dereferences a CPU pointer (`w_scale` is read by the CPU; the weight is read by
+  the NPU). The driver logged `RKNPU: soft reset, num: 6` eight times; the board
+  recovered and `smoke_matmul.py` still printed `max_abs_err=0.0000`. So: for every
+  buffer, decide CPU address (`buf.addr`) vs device address (`buf.dma`) before the
+  call, and run the smoke test after any crash.
+
+### The `NPU programs` row is NOT device time — do not quote it as such
+
+This mis-attribution cost a day and produced a wrong conclusion ("the only route is a
+kernel fence"). The fused INT8 Linear is a **CPU PROGRAM**: one C function that does
+quantize -> `sync_mem(TO_DEVICE)` -> blocking ioctl -> `sync_mem(FROM_DEVICE)` ->
+dequantize. Its wall duration therefore contains CPU work, and the 603.2 ms "NPU
+programs" row in `results/compare-ours-vs-ref.md` is that fused wall, not the device.
+
+Measured split (`docs/rknpu/results/threadsplit/ioctlprobe/run.log`, 355 calls):
+
+| component | ms | nature |
+| --- | --: | --- |
+| `submit` (blocking ioctl) | 423.5 | **device** — `submit_seconds`, also printed as `0.4s in npu` |
+| `dequantize` | 106.7 | CPU, single-threaded, inside the fused call |
+| `sync_from` | 17.2 | CPU cache maintenance |
+| `sync_to` | 6.6 | CPU cache maintenance |
+| quantize + remainder | ~49 | CPU, NEON, single-threaded |
+
+`bench_llm` already prints the device part: `prefill 1.4s 355 submits 0.4s in npu`.
+**That `0.4s` is the NPU row. Compare it to the reference, not the 603 ms.** At 423.5
+against the reference's 428.0 ms the NPU is at parity, so the NPU is not the gap and
+no fence or async submit is required to match 1.2 s. RKLLM and the reference both hit
+their numbers with the same blocking submit and `fence_fd=-1`.
+
+The addressable gap is therefore the **host half of the fused call** (~155 ms of
+quantize + dequantize + syncs, single-threaded) plus the ~155 ms outside every kernel.
+Both are CPU-side and parallelisable; neither needs a driver change.
 
 ### Reporting — every measurement carries a comparison table
 
 After any measured number, in the same turn, report it against the reference tree
 and RKLLM. A number with no comparison is a reading, not a result.
+
+**During optimization, the comparison is a class-level decomposition table, not a running
+commentary.** Keep it as a file, update it in the same turn a number changes, and drive the work
+from its largest delta. It has exactly these columns:
+
+| class | ours | reference | delta | provenance (which protocol produced each column) |
+
+Rules, learned the hard way (`mistake.md` M74, M76):
+
+- **Same classes, same units, a delta column, provenance per column.** Two rows (device/host) is not
+  a decomposition; a per-kernel dump is evidence behind it, never the answer — this tree and the
+  reference share **one kernel name out of 31 and 36**, so per-kernel joins are impossible.
+- **When two protocols give two totals for the same configuration, the table carries both and says
+  why.** Here: one call per replay segment gives the class shares (958 ctypes calls, reads higher),
+  the shipped 64-call segments give the headline. Quoting one in place of the other is what makes
+  successive answers look like different stories.
+- **A row is "open" until its delta is closed by a paired measurement**, not by an isolation
+  benchmark: kernel time in isolation has repeatedly failed to reach the wall (fills 19.3 -> 4.2 ms
+  moved the wall not at all; a 27%-faster attention kernel made decode 9.4% slower).
 
 | metric | ours | oNPU ref | RKLLM | vs ref | vs RKLLM |
 | --- | --: | --: | --: | --: | --: |
@@ -230,6 +284,81 @@ Rules that follow:
 6. **`DEBUG=2` inflates CPU-bound kernels by up to 10x** because it prints per
    kernel. Use it for names and ordering only, never for timing. `PROFILE=1`
    collects viz events and prints no table in this tree.
+
+### An A/B needs an in-process ABBA — `bench_llm` cannot do one
+
+`bench_llm`/`bench_threaded` record `clocks_start`/`clocks_end` but **no per-trial temperature**,
+and each invocation is a fresh process. Comparing two of them wall-to-wall attributes a thermal ramp
+to whichever arm ran later. Measured cost of getting this wrong: `par-dq-3plus3` reported **+27.7 ms**
+and `par-dq-big-3plus3` **+11.57 ms** against the baseline, both of which the fair method then showed
+to be **neutral (0.9998x, 0.8% spread)**.
+
+Rules that follow:
+
+- An A/B of a code variant must run **both arms inside one process**, interleaved `A,B,B,A`, with
+  temperature read from `/sys/class/thermal/thermal_zone0/temp` before every trial.
+- If the variant is baked into generated source (a kernel emitter, a codegen flag), **drop the
+  PROGRAM/PLAN caches between arms** or the second arm silently reuses the first arm's binary.
+- Report **paired ratios**, the per-arm spread, and the temperature range. A single-arm spread above
+  ~20% invalidates the pair.
+- Reference implementation: `extra/rockchip/ab_fused_host.py`.
+
+A 3+3 is still the right gate for an absolute number; it is the wrong tool for a comparison.
+
+### `generated_ids` is sampled — it is not a parity gate
+
+The baseline's own three runs in `threadsplit/scanpool-3plus3` diverge at **token 0**:
+run0 `[141274, 166375, …]`, run1 `[182662, 201060, …]`, run2 `[185053, 51777, …]`. The model
+samples, so identical ids are not expected from identical code and a mismatch proves nothing.
+
+Use these instead:
+
+| gate | artifact | deterministic |
+| --- | --- | --- |
+| model logits | `logits_sha256_16` per trial (`inmodel_program_cost.py`, `results/parity/nosplit`) | yes |
+| per-kernel boundary | `extra/rockchip/parity_fused_linear.py` (serial emitter vs pooled emitter, bitwise) | yes |
+| generated tokens | `results/*/report.json` `generated_ids` | **no — smoke only** |
+
+`extra/rockchip/check_parity.py` now says so in its own output; it cannot award or deny parity.
+
+### `--quick` is not comparable to a 128-token baseline — ever
+
+`bench_llm.py --quick` sets `prompt=16, gen=8, runs=1, warmups=0` (the flag's own help text
+says *"Never quote a --quick number as a measurement"*). Three consequences, all measured:
+
+| effect | consequence |
+| --- | --- |
+| 16-token prompt instead of 128 | different prefill shapes, so different kernel names: `thread_split` reports **`transforms applied: NONE`**, meaning the four-way kernels are not even exercised |
+| 0 warm-ups | the JIT capture and compile land inside the measured trial: 16.1 s where the warmed prefill is 1.4 s |
+| different token count | `generated_ids` cannot equal a 128-token run's, so a parity check against a 128-token baseline always "fails" at token 0 |
+
+So `--quick` is only good for "does it crash". It cannot A/B a change, cannot check parity, and
+cannot show a regression either — a 16 s reading is compile time, not prefill. For parity use
+`--prompt 128 --gen 64 --warmups 1 --runs 1` at minimum, and for a number use the full 3+3.
+
+**Confirmed by control, not just by reading the flag.** The unmodified baseline source, run with
+`--quick`, also "fails" a 128-token parity check at token 0 (`results/threadsplit/serial-quick-control`:
+`transforms applied: NONE`, ids `[205565, 243740, …]` against the baseline's `[141274, 166375, …]`,
+prefill 10.2 s). So a `--quick` parity failure says nothing about the change under test — run the
+control before believing the failure.**
+
+### Profiling the host half — py-spy, not REA flameox
+
+Profiling host time on this board is possible **without root**:
+
+- `.venv/bin/py-spy` (0.4.3, `uv pip install py-spy`) records a real sampling flame graph.
+  `record -f speedscope -o out.json -- <command>` launches the child itself, so it never needs to
+  attach to a running process.
+- The `ptrace_scope` file is **absent** on this kernel, which is why same-user tracing works.
+- `perf` is not installed and `perf_event_paranoid` is `2`, so hardware sampling is unavailable and
+  would need root — py-spy covers the same question.
+- REA's `flameox` is **not** in `rea-agents` 6.7.0 (the newest that runs on Node 24.12.0), and
+  6.8+ needs Node ≥ 24.22.1. Do not upgrade Node to chase it: `nvm alias default` is the major
+  `24`, so installing 24.22.1 would repoint PATH away from `v24.12.0/bin`, where `dsh` and `dst`
+  live. Pin `nvm alias default 24.12.0` first if a second Node is ever needed.
+
+Cheap alternatives when a full flame graph is overkill: `cProfile` for proportions only (its
+absolute times are inflated), and direct timers for exact per-phase milliseconds.
 
 ### Timing protocol
 
