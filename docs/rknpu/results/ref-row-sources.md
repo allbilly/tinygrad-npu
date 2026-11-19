@@ -166,8 +166,22 @@ not to A+B together; parity is neutral for A and only moves when B is added.
 | `state.clone()` | **56** | `c6934752` |
 | no copy at all | 8 | `c6934752` |
 
-So any copy of that 2 MB state buffer carries the fills, and the copy's layout is part of the
-numerics -- the where's zero-select is not a separable cost.
+So any copy of that 2 MB state buffer carries the fills -- the where's zero-select is not a
+separable cost.
+
+**Correction:** an earlier version of this paragraph also said "the copy's layout is part of the
+numerics". That was a confound: the clone variant had swapped **both** branches, so prefill capture
+used `zeros_like()` instead of `where(True, 0, state)`. Isolating the decode branch only:
+
+| variant | fills | parity |
+| --- | --: | --- |
+| baseline | 56 | `895365e2` |
+| clone, decode branch only | **56** | **`895365e2`** (unchanged) |
+| clone, both branches | 56 | `c6934752` |
+| no copy | 8 | `c6934752` |
+
+`where(False,0,state)` and `state.clone()` are numerically identical at decode. The fills are the
+cost of copying at all, and only removing the copy changes results (aliasing).
 
 So the fills disappear — and the result changes. **The copy is semantically load-bearing**: the scan
 stores into the buffer `where` produced, so `where` is the copy-on-write step that leaves the
