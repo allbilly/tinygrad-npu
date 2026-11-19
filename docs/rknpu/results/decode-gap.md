@@ -150,6 +150,22 @@ Reverted (both the enablement and the guard), parity re-verified, decode back to
 submits. (The 1+1 restore run reports 3,883 ms prefill because a one-warm-up protocol puts warm-up
 in the measured trial; the 3+3 baseline is 1,197.7 ms.)
 
+## Splitting the attention groups: kernel 27% faster, wall neutral
+
+`RK_SPLIT` was forced off for `TOK < 8`, leaving the four KV groups serial at decode. The groups
+write disjoint output rows (`H_*g/4 .. H_*(g+1)/4`), so enabling it is exact — parity stayed
+`895365e27ed4255b` — and the kernel measured:
+
+| | attention | 3+3 decode | prefill |
+| --- | --: | --: | --: |
+| serial groups (baseline) | 428 us/call, 3.42 ms | 4.94-5.07 tok/s | 1,197.7 ms |
+| **four-way groups** | **314 us/call, 2.52 ms** | **5.013 tok/s** | 1,193.2 ms |
+
+The kernel is 27% faster, worth 0.9 ms of the 193 ms wall, and the full protocol reads 5.013 against
+a 4.94-5.07 baseline — inside the scatter. The scan's CPU read rose to 12.1 ms in the same trace, so
+part of the gain may be traded against pool contention. Reverted rather than shipped as a
+below-noise change.
+
 ## fp16 attention: bit-exact, and slower
 
 The reference reads its KV cache as `half4` while we made an fp32 copy every call
