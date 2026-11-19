@@ -150,6 +150,29 @@ Reverted (both the enablement and the guard), parity re-verified, decode back to
 submits. (The 1+1 restore run reports 3,883 ms prefill because a one-warm-up protocol puts warm-up
 in the measured trial; the 3+3 baseline is 1,197.7 ms.)
 
+## The fills are load-bearing, and their cost is not on the wall
+
+Two corrections and one clean measurement.
+
+**They are not redundant.** Skipping the fills changes the logits:
+`895365e27ed4255b` -> `ee30d6ee1f15cd1f`. So my earlier claim that parity "proved they were
+unnecessary" was made with the broken skip (which matched nothing) and is wrong: the buffers are
+read before being rewritten, and the zeros are required.
+
+**Making them fast changes nothing.** Replaced each fill with `memset` of the identical buffer and
+length, which writes the same zeros at memory speed instead of 11.6 / 2.3 GB/s. Parity returns to
+`895365e27ed4255b` exactly, so the values are unchanged, and a full 3+3 gives:
+
+| | prefill | decode | parity |
+| --- | --: | --: | --- |
+| baseline | 1,197.7 ms | 4.94-5.07 tok/s | `895365e27ed4255b` |
+| fills as memset (same zeros) | 1,214.5 ms | **4.995 tok/s** | `895365e27ed4255b` |
+
+Removing ~13 ms of measured fill time moves neither phase. Together with the gate/up fusion
+(32 fewer submits, no change), the conclusion is that **CPU work and submit count are not what
+bounds decode**: host work overlaps whatever the NPU is doing, so the wall is set by device
+occupancy, not by the sum of CPU kernels.
+
 ## Skipping the fills entirely: no decode improvement (valid measurement)
 
 The first version of this test was **invalid**: the skip matched on kernel names that carry ANSI
