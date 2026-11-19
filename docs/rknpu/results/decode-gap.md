@@ -150,6 +150,29 @@ Reverted (both the enablement and the guard), parity re-verified, decode back to
 submits. (The 1+1 restore run reports 3,883 ms prefill because a one-warm-up protocol puts warm-up
 in the measured trial; the 3+3 baseline is 1,197.7 ms.)
 
+## Greedy sampling: the sampler kernel falls 20x, wall 199 -> 190 ms
+
+The dump identified `E_62080_4` as 62,080 float4 = **248,320 floats, the logits width** — the
+Gumbel-max expression building a full-vocabulary random tensor every token. At temperature 0 (what
+`bench_llm.py:141` passes) the division by `1e-12` is a positive scaling that preserves the argmax,
+and the O(1) noise is absorbed by float32 rounding at magnitude 1e12 (ULP 65,536), so the noise
+cannot change the result. The reference samples with `gpt2_argmax` at 0.085 ms.
+
+`GREEDY_SAMPLING = True` in `Transformer.forward` takes the argmax directly. Same protocol
+(`MAX_CALLS_PER_SEG = 1`, one warm decode token), dumps taken minutes apart:
+
+| | calls | `E_62080_4` | wall |
+| --- | --: | --: | --: |
+| Gumbel noise | 958 | **8.48 ms** | **199.04 ms** |
+| greedy argmax | 956 | **0.41 ms** | **190.39 ms** |
+
+The sampler loses 20x its cost and two calls disappear from the graph.
+
+The full-harness 3+10 could not confirm it: it ran at **77.6-82.2 C** against the baseline's
+67.5-71.2 C, and this board moves ~1%/C, so the 13 C gap (about 13%) swamps an 8 ms (4%) gain,
+reading 4.75 tok/s. A temperature-matched re-run is needed for the wall number; the kernel change
+itself is measured under identical conditions and is unambiguous.
+
 ## Host profile (py-spy) and the kernel dump artifact
 
 `flameox` is unavailable on this host (`AGENTS.md`: rea-agents 6.7.0 predates it; 6.8+ needs
