@@ -83,6 +83,29 @@ So the picture is: at decode capture, 24 state buffers of 2 MB are allocated by 
 because both the allocation and the state update are materialised. This is the JIT treating the
 recurrent state as a read-write captured constant.
 
+## Ablation, not attribution: the gap is bandwidth, not removable kernels
+
+The sums above are *timing attribution*. The project's rule is to ablate and diff the total, so I
+did, dropping whole classes of segments from the replay (outputs become garbage; the timing is what
+is being measured).
+
+| ablation | baseline | ablated | delta |
+| --- | --: | --: | --: |
+| drop the 48 × 2 MB fills | 212.64 ms | 206.43 ms | **−6.21 ms** |
+| drop **all** elementwise `E_*` (452 segments) | 201.54 ms | 207.31 ms | **+5.77 ms** (slower) |
+
+Two conclusions, both important:
+
+1. The fills cost **6.21 ms**, not the 8.63 ms their summed kernel time suggests — timing
+   attribution overstates, exactly as `AGENTS.md` warns.
+2. Removing every elementwise kernel does **not** save 30.84 ms; it makes decode *slower*. The
+   elementwise time is therefore not additive, removable work. Decode is bound by **DDR bandwidth
+   shared with the NPU**: 4.2 GB of weights plus activations per token against a 33.79 GB/s ceiling
+   is a 136 ms floor, and every CPU kernel competes for the same bus.
+
+That explains why no removal has ever helped: the CPU kernels are not the bottleneck, they are
+*load* on the same bottleneck. The right metric is **bytes moved per token**, not kernel time.
+
 ## Next, in order
 
 1. Confirm the staging hypothesis: instrument the JIT's staging allocation to report buffer
