@@ -1,5 +1,7 @@
 # Loop classification of the eight largest CPU kernels: which loop is splittable
 
+*Citations to `split/FINDINGS.md`, `doc-audit.md` or `audit-refdoc.md` resolve via git history; those files were deleted in the docs cleanup because their conclusions were superseded.*
+
 **What this document is.** For each of the eight largest CPU kernels in the Qwen3.5-4B prefill,
 the emitted C source is read and classified: which loop indices are reductions (an accumulator
 that carries across iterations) and which only select disjoint output elements. That decides

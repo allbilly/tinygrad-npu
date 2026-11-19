@@ -1,3 +1,7 @@
+> **Historical.** Every "ours" figure below is the pre-INT8 generic-GEMM baseline
+> (31.9 s prefill, 1.5 tok/s). Current: **1,198.87 ms** — see `../prefill-parallel-quantise.md`.
+> The 9-model table and the device findings are still valid.
+
 # NPU GEMM baseline — INT8, Qwen3.5 4B
 
 Every `nn.Linear` replaced by `NPULinear` (`extra/rockchip/npu_linear.py`),

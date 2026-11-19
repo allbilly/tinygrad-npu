@@ -1,3 +1,7 @@
+> **The "ours" column is historical** (the 2,532 ms tree, before INT8, replay and parallel
+> quantise). The reference column is current. Our current numbers are in
+> `results/prefill-parallel-quantise.md`. Citations to `split/FINDINGS.md` resolve via git history.
+
 # Reference Qwen3.5 4B on RK3588 — organised record
 
 What this file is: everything this checkout knows about **how the reference runs Qwen3.5 4B

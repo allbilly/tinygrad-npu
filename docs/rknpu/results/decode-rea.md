@@ -1,5 +1,7 @@
 # Decode: the 311 ms per token, line by line, and what to change
 
+*Citations to `split/FINDINGS.md`, `doc-audit.md` or `audit-refdoc.md` resolve via git history; those files were deleted in the docs cleanup because their conclusions were superseded.*
+
 Subject: Qwen3.5-4B, 128-token prompt, 64 greedy tokens, `extra/rockchip/bench_llm.py --npu`
 (host CPU with every `nn.Linear` offloaded to the NPU GEMM), clocks pinned. This document is
 about **decode only**; prefill has its own decomposition in `compare-ours-vs-ref.md`.

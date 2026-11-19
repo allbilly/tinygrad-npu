@@ -1,5 +1,7 @@
 # Decode: where 307 submits and 825 tasks per token come from, and what merging them is worth
 
+*Citations to `split/FINDINGS.md`, `doc-audit.md` or `audit-refdoc.md` resolve via git history; those files were deleted in the docs cleanup because their conclusions were superseded.*
+
 Scope: Qwen3.5 4B under `extra/rockchip/bench_llm.py --npu`, decode phase, `m=1` per Linear.
 Everything here is **read off the code path or off a recorded artifact**; nothing was run for this
 document (another measurement owned the machine). Values that are arithmetic on measured constants are

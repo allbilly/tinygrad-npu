@@ -1,5 +1,7 @@
 # oNPU reference archive — Qwen3.5 4B extract and optimisation methodology
 
+*Citations to `split/FINDINGS.md`, `doc-audit.md` or `audit-refdoc.md` resolve via git history; those files were deleted in the docs cleanup because their conclusions were superseded.*
+
 Read-only extraction from `/home/orangepi/oNPU/`. Every claim carries a `file:line`.
 `[M]` = measured on this board. `[S]` = stated intent / plan / policy, not a measurement.
 

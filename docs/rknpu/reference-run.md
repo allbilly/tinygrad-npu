@@ -61,8 +61,10 @@ before any re-run: a clean checkout of `1b2a5db` is **not** the measured configu
 
 ## Protocol
 
-- **2 warm-ups + 3 measured**, one worker process, one `generate` per trial (the worker accepts
-  repeated requests, so no reload between trials).
+- The **recorded command** (see the argv above) is **1 warm-up + 3 measured**; `run_ref.py` was
+  invoked with `--warmups 2 --runs 3`, which is a different protocol and must be quoted as such.
+  Both use one worker process and one `generate` per trial (the worker accepts repeated requests,
+  so no reload between trials).
 - Prompt: the 128-token text `bench_llm` uses. It must be built by decoding
   `SimpleTokenizer.encode(PROMPT)[:128]`, because the worker's context is 512 and
   `prompt + 64 reply` must fit. The ×8 raw text is 612 tokens and is rejected:
@@ -96,6 +98,8 @@ before any re-run: a clean checkout of `1b2a5db` is **not** the measured configu
 | `NPU_PREFILL=off`, 140-token prompt, 2+3 | 49,310.76 ms | 2.84 | 2.93 |
 | archived `ref-profile` (this board, earlier session) | **1,201.41 ms** | ~101 | 6.48 |
 
-The `on` configuration is the one that must be quoted, and it has not yet completed a measured
-run. Until it does, the only reference figure available is the archived 1,201.41 ms, taken at
-128 tokens under the 52-55 °C gate.
+The `on` configuration has since completed: best trial **2,033.81 ms**, median **7,968.69 ms**,
+trials 2.0-21.4 s. That spread is 300x the differences being discussed, so today's re-run cannot
+arbitrate a small gap. The number to compare against is therefore the **archived** 1,201.41 ms
+(128 tokens, 52-55 °C gate), and the live re-run only establishes that the reference tree still
+runs.
