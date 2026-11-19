@@ -1411,6 +1411,55 @@ constant carrying a verdict ("inert", "no gain") is a claim that must have a cou
 Also re-test old verdicts whenever a *different* change removes their premise -- the split above was
 correctly rejected at 149.6 us/program of dispatch, and that price is exactly what the replay removed.
 
+### M74. Asked twice for a 182-vs-152 decomposition, delivered kernel lists instead
+
+The request was a side-by-side table: our decode against the reference's, same classes, same units.
+I produced a per-kernel dump, per-class sums in prose, a segment trace, and a py-spy profile -- but
+never the one table that answers the question. The user had to ask again, twice.
+
+The cost is not cosmetic. A per-kernel list of 36 rows cannot be compared to a reference whose rows
+are named differently (only **one kernel name in common out of 31 and 36**); only a class-level table
+can. Without it, "where is the 30 ms" kept being re-answered from scratch, and three separate class
+sums (timing attribution, ablation, ABBA) were quoted at different times with nothing reconciling
+them.
+
+**Fix:** when a comparison is requested, ship **one table**: our column, reference column, same
+classes, same units, a delta column, and the provenance of each column. The per-kernel dump is
+evidence behind it, not the answer.
+
+### M75. Wrote an ablation run into the shipped artifact path
+
+`docs/rknpu/results/decode-kernels/MANIFEST.md` was regenerated while `SKIP_SUBMIT = True`, an
+ablation whose results are garbage by construction. The tracked artifact therefore described a
+configuration that cannot produce valid output, and its totals (wall 60.17 ms) would read as a decode
+kernel table to anyone opening it.
+
+This is the same class as M55 (device row from a fused wall) and M69 (overlapping rows): an artifact
+that *looks* canonical while measuring something else. It is worse here because it is a file in the
+repository, not a number in a message.
+
+**Fix:** a probe that changes semantics writes to a path that names the ablation (`.../ablation-skip-submit/`),
+never to the canonical artifact directory. The shipped artifact is regenerated only from the shipped
+configuration, and its first line states the configuration that produced it.
+
+### M76. Asked three times for the 182-vs-152 table, and kept answering with a different table
+
+The request was a **class-level decomposition of our decode against the reference's**, side by side.
+I answered with a device/host split (twice) and a per-kernel dump (once). Device/host is two rows; a
+per-kernel dump cannot be joined across trees that share one kernel name in 36. Neither is the table
+that was asked for, and after the second miss I should have treated "the table" as a precise
+artifact with a known column set, not a shape I could approximate from whatever I had just measured.
+
+When it was finally built, the reason it had not been obvious became clear: our classes had to be
+**reconciled across two protocols** -- the dump runs one call per segment (958 ctypes calls) to
+attribute per kernel and reads 190.97, while the ABBA runs the shipped 64-call segments and reads
+182.70. Quoting either as "the" total without the reconciliation is what made each earlier answer
+look like a different story.
+
+**Fix:** when a comparison is asked for, fix the column set first (same classes, same units, delta,
+provenance per column) and state any protocol difference *inside the table*, not in a later
+paragraph. If two totals exist for the same configuration, the table carries both and names why.
+
 ## Guards now installed
 
 | guard | where |
@@ -1444,6 +1493,9 @@ correctly rejected at 149.6 us/program of dispatch, and that price is exactly wh
 | validate an oracle driver against the oracle's source: event schema, both streams drained, engine-selecting flags | `mistake.md` M66 |
 | an oracle number off by >20% is a harness/config difference, not the machine | `mistake.md` M66 |
 | a documented command must succeed with its defaults, once, before it is written down | `mistake.md` M67 |
+| a requested comparison is one table: both columns, same classes, units, deltas, provenance | `mistake.md` M74 |
+| fix the column set before answering; put protocol differences inside the table, not after it | `mistake.md` M76 |
+| an ablation writes to a path naming the ablation, never to the canonical artifact directory | `mistake.md` M75 |
 | encode a doc's trap into the tool in the same edit | `mistake.md` M67 |
 | prove a toggle took effect via a counter only that path increments | `mistake.md` M59 |
 | plane consumers take the flat buffer + `key.parts`, never an `(m,n)` view | `mistake.md` M61 |

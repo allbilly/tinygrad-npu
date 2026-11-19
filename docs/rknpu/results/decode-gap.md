@@ -150,6 +150,38 @@ Reverted (both the enablement and the guard), parity re-verified, decode back to
 submits. (The 1+1 restore run reports 3,883 ms prefill because a one-warm-up protocol puts warm-up
 in the measured trial; the 3+3 baseline is 1,197.7 ms.)
 
+## The 182 vs 152 table
+
+Our column is the shipped configuration; the reference column is
+`ref-profile/report.json` (46 runs, its own 36-flag recipe). Classes are matched by hand because the
+trees share **one kernel name out of 31 and 36**, so a per-kernel join is impossible.
+
+| class | ours, dump (ms) | ours, greedy (ms) | reference (ms) | delta vs ref |
+| --- | --: | --: | --: | --: |
+| NPU GEMM (device submit) | 142.89 | 142.89 | 137.11 | +5.8 |
+| quantise / dequantise / syncs (inside the fused call) | 4.70 | 4.70 | 1.02 | +3.7 |
+| elementwise (incl. sampler) | 22.81 | 14.74 | 6.57 | +8.2 |
+| — of which the sampler | 8.48 | 0.41 | 0.09 | +0.3 |
+| state fills | 9.52 | 9.52 | ~0 | +9.5 |
+| GDN scan | 5.23 | 5.23 | 4.16 | +1.1 |
+| reduce | 2.68 | 2.68 | 0.79 | +1.9 |
+| attention | 2.26 | 2.26 | 0.45 | +1.8 |
+| Python / replay gaps | 8.95 | 8.95 | ~0 | +9.0 |
+| **total** | **199.04** | **190.97** | **152.59** | **+38.4** |
+
+Two reconciliations, both stated because they are different protocols:
+
+- the greedy column is the dump column with the sampler at its measured 0.41 instead of 8.48, giving
+  190.97; the measured greedy dump is **190.39**, a 0.6 ms agreement.
+- the ABBA headline of **182.70** is 8.3 ms below the dump's 190.97 because the dump runs one call
+  per segment (958 ctypes calls) to attribute per kernel, and the ABBA runs the shipped 64-call
+  segments. So: class shares come from the dump; the 182.70 total comes from the ABBA; neither
+  number is quoted in place of the other.
+
+Reference columns sum to 152.585 as published. Our classes sum to the dump wall with a 8.95 ms gap
+row; that gap is the replay's between-segment time, which the reference's native replay does not pay
+(it issues one C call per linear).
+
 ## ABBA: the attention split is 9.4% SLOWER at the wall
 
 The split made the attention kernel 27% faster in isolation (428 -> 314 us/call), which the harness
