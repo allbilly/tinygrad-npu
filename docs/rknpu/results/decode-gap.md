@@ -57,6 +57,19 @@ of copies in total — because its replay borrows outputs rather than staging th
 Removing it is worth **8.6 ms** (195 → 186, 5.37 tok/s). It is not 42 ms, but it is the only
 mechanism located so far that is a defect rather than a difference of degree.
 
+## Further exclusions (second pass)
+
+| hypothesis | test | result |
+| --- | --- | --- |
+| the JIT stages read-write state, and the staging buffer is zeroed | read `jit.py:69`: `UOp.new_buffer` allocates without zeroing; the copy is a full `store_call` | not staging |
+| the per-layer caches are re-initialised each step | instrumented `_init_state`: `Tensor.zeros(1,32,128,128)` fires **24 times, all during the prefill capture, 0 during decode** | not cache init |
+| `.clone()` on the state emits a second fill | dropped `.clone()` from `recurrent_state` | 48 fills unchanged, 193.91 ms — reverted |
+| the fills are allocated per step | they are **baked constant addresses**, exactly 2,097,152 bytes apart (`537751035904 → 537753133056`), i.e. 48 fixed intermediates | per-call, not per-allocation |
+
+So the 48 fills are fixed 2 MB intermediates inside the decode graph, and they are **not**
+`Tensor.zeros`, not `.clone()`, not `pad_to`, not staging, and not the caches. The remaining
+candidate is allocator-side zeroing of a buffer that the graph treats as read-write state.
+
 ## Next, in order
 
 1. Confirm the staging hypothesis: instrument the JIT's staging allocation to report buffer
