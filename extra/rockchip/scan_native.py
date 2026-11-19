@@ -47,6 +47,12 @@ def _build(batch: int, heads: int, tokens: int, value_dim: int, key_dim: int, al
   # static helpers, hence the forward declaration and the entry ahead of it.
   _unused_prototype = ("static int cpu_gated_delta_scan(float*,const float*,const float*,const float*,"
                "const float*,const float*,float*,int,int,int,int,int,int,int,int,float*);\n")
+  if POOLED:
+    call = (f"cpu_gated_delta_scan_pooled(out,q,k,v,beta,alpha,state,1,{tokens},{batch},{heads},"
+            f"{tokens},{key_dim},{value_dim},{alpha_dim},NULL,(scan_parallel_fn){pool_address()},&status)")
+  else:
+    call = (f"status = cpu_gated_delta_scan(out,q,k,v,beta,alpha,state,1,{tokens},{batch},{heads},"
+            f"{tokens},{key_dim},{value_dim},{alpha_dim},NULL)")
   entry = f'''
 void rockchip_cpu_gated_delta_scan(void *args) {{
   float *out = *(float**)args;
@@ -61,8 +67,7 @@ void rockchip_cpu_gated_delta_scan(void *args) {{
      divergence seen with random-byte inputs is confined to non-finite data, so `scan_native`
      asserts once that the real inputs are finite before this path is trusted. */
   int status = 0;
-  cpu_gated_delta_scan_pooled(out,q,k,v,beta,alpha,state,1,{tokens},{batch},{heads},{tokens},{key_dim},
-                       {value_dim},{alpha_dim},NULL,(scan_parallel_fn){pool_address()},&status);
+  {call};
 }}
 '''
   # CPUProgram jumps to offset 0, so the entry must be the FIRST function definition in the
@@ -107,6 +112,7 @@ void rockchip_cpu_gated_delta_scan(void *args) {{
 _OUT_POOL: dict = {}
 _FINITE_CHECKED = False
 _PROGRAMS: dict[tuple[int, int, int, int, int, int], UOp] = {}
+POOLED = True   # ABBA-only; see ab_scan.py
 
 
 def _program(batch: int, heads: int, tokens: int, value_dim: int, key_dim: int, alpha_dim: int) -> UOp:
