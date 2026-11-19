@@ -195,7 +195,12 @@ trees share **one kernel name out of 31 and 36**, so a per-kernel join is imposs
 | reduce | 2.68 | 2.68 | 0.79 | +1.9 |
 | attention | 2.26 | 2.26 | 0.45 | +1.8 |
 | Python / replay gaps | 8.95 (dump) / **6.45 (shipped)** | 8.95 | ~0 | **open; two protocols, named** |
-| **total** | **199.04** | **190.97** | **152.59** | **+38.4** |
+| **total** | **199.04** | **190.97** | **152.59 (archived) / 157.34 (measured tree)** | **+38.4 / +33.6** |
+
+**Reference basis, corrected:** the archived `ref-profile` gives 6.48-6.56 tok/s (152.59 ms), but the
+measured tree's own retime receipt reports `median_decode_tps: 6.355455` = **157.34 ms** over 1+3 at
+128/64. Against our ABBA headline of 182.70 ms the gap is therefore **+25.36 ms against the receipt**
+and +30.11 against the archive; both are quoted, and the receipt is the like-for-like one.
 
 Two reconciliations, both stated because they are different protocols:
 
