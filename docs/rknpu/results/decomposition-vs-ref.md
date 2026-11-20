@@ -151,3 +151,38 @@ one open item with a measured 1.60 ms attached.
 
 For scale: 1.60 ms is 0.9% of the token -- ten times the norm+quantise fusion's realistic capture, which
 is why this was traced before that port was started.
+
+### E_80_32_64_4: real, reproducible, and still unnamed after six approaches
+
+| check | result |
+| --- | --- |
+| itemiser, two runs | **1.59 / 1.60 ms**, 1 call/token |
+| fresh schedule (`SCACHE=0`) | **still 1.60 ms** -- not a stale cache artefact |
+| parity with `SCACHE=0` | `895365e27ed4255b` unchanged |
+| ablation: `ARGMAX_KERNEL=1` vs `0` | present in both -- not argmax |
+| `_cache_prefix` multi-batch mask | needs `len(start_pos) > 1`; decode passes one -- not it |
+| `_one_hot_along_dim` in core | does not exist outside `nn/onnx.py` -- so the "one-hot" reading is also wrong |
+| `to_program` / `do_render` hooks | **never fire for it**, with or without `SCACHE=0` |
+| `CPUProgram.__init__` hook | fires, stack = `realize.get_runtime` at **decode**, i.e. the PROGRAM was built earlier |
+
+**Why tracing failed, mechanically:** the program is built during the JIT capture (symbolic shapes) and
+only *loaded* at decode, so the concrete source with `Lidx1_0 < 80` and `Lidx2 < 64` never passes through
+`do_render` in a decode run -- and in a capture run the loop bounds are still symbolic. Every hook I tried
+was on the wrong side of that boundary.
+
+**What is still true about it:** reads Q8_0 rows of 80 blocks (2560 values) at a runtime scalar index,
+writes a byte per (row, block) and zeros the rest across 64 tiles of 3880 (= vocab/64). One call, 1.60 ms.
+
+**The way through is a source bisect, not a trace:** tag candidate emit sites with a unique
+`KernelInfo` name and see which one renames the kernel. That is an edit to the model, and it is the next
+step rather than another instrument.
+
+### Status of the two open items
+
+| item | ms | state |
+| --- | --: | --- |
+| `E_80_32_64_4` | **1.60** | real, reproducible, unnamed |
+| their components-vs-wall discrepancy | 10.32 | unexplained; not used in any claim |
+
+Neither is claimed as a lever. The decomposition otherwise closes at
+`142.34 device + 31.11 CPU - 2.69 overlap = 170.76`.
