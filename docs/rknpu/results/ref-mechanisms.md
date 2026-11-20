@@ -467,3 +467,37 @@ Byte-identical across CNA, DPU and CORE targets. So:
 The next comparison is therefore **task granularity, not registers** -- same math, one CNA setup
 instead of three. That is a task-encoding change, which is a different risk class from the register
 program that wedged the board.
+
+## Task encoding and padding are also identical: what is left of the +6.31 ms
+
+The 1-task-with-3-subcores hypothesis is refuted as well. Their encoder
+(`runtime/ops_rockchip.py:222`) is the same expression as ours, character for character:
+
+```python
+self.subcores = ((0,self.tasks),) if active_cores==1 else (
+  (0,0),(0,0),*((i*(self.tasks//3),self.tasks//3) for i in range(3)))
+```
+
+So they also emit N tasks with one subcore each -- not one task with three subcores. And the K
+padding matches: their `padded_depth(4096)` returns 4096, ours `_int8_padded_depth(4096)` returns
+4096, so neither tree pads this depth.
+
+Everything structural that can be read has now been compared for `m=1, n=2560, k=4096`:
+
+| aspect | ours vs theirs |
+| --- | --- |
+| emitted int8 registers (CNA/DPU/CORE) | **21 of 31 identical, 0 differing** |
+| `CBUF_CON0` | 0xb1 both |
+| task encoding / subcore expression | identical source |
+| K padding at 4096 | 4096 both |
+| core split | 3 parts (864/864/832) both use `_matmul_parts` |
+
+**The remaining candidate, and it is a hypothesis:** their per-token cost may be lower because their
+decode loop runs four tokens inside one C function, so the next token's weight DMA can overlap the
+current token's compute. 10.5 MB streams from DRAM per call; four calls in a loop can pipeline the
+stream, four calls issued from Python cannot, because each one waits for its own submit. That would
+explain an 18% per-call advantage with byte-identical registers -- and it is the same
+`CPU_TOKEN_INPUTS` / `DecodeLoop` mechanism already listed as a structural gap, not a kernel.
+
+It is labelled a hypothesis because it cannot be tested without building the token loop, and every
+cheaper explanation has now been measured and eliminated.
