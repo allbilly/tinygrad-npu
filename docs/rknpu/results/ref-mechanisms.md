@@ -532,3 +532,33 @@ moves sustained bandwidth by ~18% without changing a single register.
 
 That is the next thing to measure, and unlike the CBUF recipe it does not touch the register program
 that wedged the board.
+
+## The +6.0 ms same-shape gap: seven hypotheses, all refuted by measurement
+
+`m=1, n=2560, k=4096` is the one row where both trees run the same number of calls (96) and we are
+slower: 417.8 us against their 345 (25.2 vs 30.4 GB/s, 90% of this board's 33.79 GB/s ceiling).
+
+| # | hypothesis | test | result |
+| --: | --- | --- | --- |
+| 1 | core split | in-model `cores=1` vs `3` | 965 vs 417.8 us -- 3 is optimal |
+| 2 | argument ABI | 200k calls, packed buffer vs typed args | typed is **150 ns slower** |
+| 3 | CBUF register value | parsed both trees | **identical**, `0xb1` in both |
+| 4 | task encoding / subcores | source diff | identical expression, character for character |
+| 5 | K padding | `padded_depth(4096)` both | 4096 both |
+| 6 | cross-token pipelining | their worker with a **1-token** loop | **345 us, unchanged** |
+| 7 | IOMMU domain layout | `DOMAIN_BUDGET` 3 GiB (2 domains) vs 1.4 GB (3 domains) | 417.8 vs **419.8 us** -- no effect |
+
+Also checked and equal: our own k=2560 rows reach **30.3-31.2 GB/s** on the same board, i.e. exactly
+their k=4096 number, so the hardware and our harness can do it -- it is this shape that is slow, not
+the tree. And their tree carries the same `m==1 and k==4096 -> 0xb1` override we do, so the override
+is not it either.
+
+Seven controlled refutations leave the gap unexplained by anything I can read or change in the tree.
+The remaining possibilities are outside the code: page placement of a 10.5 MB weight buffer, driver
+state, or something their runtime does that our port does not reproduce. Every one of those needs an
+instrument this tree does not have (NPU-side counters or a driver trace), which is where I stop
+rather than guess an eighth time.
+
+**Honest bound on the objective:** +17.8 ms total = **+6.0** this row + **+3.7** from GEMMs we still
+split (fusion measured at +15-22% prefill) + the rest in host/residual that the cross-run comparison
+cannot resolve. Reaching 153.2 needs a mechanism none of the above identifies.
