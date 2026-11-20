@@ -286,3 +286,30 @@ our tree is the 1.91 ms ceiling already measured.
 So the 15 ms host gap is real, is theirs by design, and the only way to reach it is to port the fused
 host kernels that give each worker enough work to be worth a thread. That is the same port named
 earlier (`register_norm`, `_swiglu_pack`), and its capture on our side is ~2 ms, not 15.
+
+## Sizing the norm+quantise fusion before building it: 0.66 ms, below both instruments
+
+The 1.91 ms ceiling was gross: it counted the whole norm chain and all quantise as removable. A fused
+norm still has to read the 2,560-float row and reduce it, so what actually disappears is one of the two
+passes plus the separate reduce kernel:
+
+| item | ms |
+| --- | --: |
+| `r_640_4` reduce (65 calls, 6.9 us) -- kernel disappears | **0.45** |
+| `E_640_4` scale (65 paired calls, 6.5 us) -- one pass instead of two | **0.21** |
+| **realistic capture** | **0.66** |
+| as a share of the 170.76 ms wall | **0.39%** |
+
+**Neither instrument can resolve that.** Two itemiser runs of *identical* code today span
+167.25-174.92 ms CPU (4.6%), and a 16-pair ABBA resolves ~1.5% on this board. A 0.39% change is
+below both, before any implementation risk -- and the fused kernel must also reproduce tinygrad's
+`rsqrt` bit-for-bit or parity `895365e27ed4255b` breaks.
+
+**This is the real reason the last several ports returned "no measured change"**: at 0.3-1.6 ms they
+were each below the measurement floor. The changes that demonstrably moved the wall were the ones
+>= 3 ms (word-load 3.1, zero-pad 8.6, greedy 10.0), or ones with a *structural* signal (fills 56 -> 8,
+`E_62080_4` 8.49 -> 0.43 ms).
+
+**So the rule for what is worth building here is now explicit:** a lever must be >= ~3 ms, or it must
+have a structural signature that proves it fired. Nothing below that can be defended, however clean
+the kernel is.
