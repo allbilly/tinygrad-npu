@@ -366,3 +366,33 @@ Combined with the three wiring attempts (M96, M97) and the 1.59 ms size against 
 spread, this lever has no route to evidence in this tree. It is not a missing user input; it is a
 measurement gap: the fast gather is correct and 80x faster, and nothing in the harness set can show it
 on the wall.
+
+## The sum of every identified in-tree lever is 3.08 ms against a 17.6 ms gap
+
+Checked before porting the third one, because it changes what the port is for. Our
+`gated_activation` (`model.py:43-50`) is **already a single fused elementwise kernel** -- the code
+deliberately omits `.contiguous()` so the sigmoid fuses -- so the reference's `_swiglu_pack` can only
+absorb our down-GEMM's quantise into it, which is 0.83 ms total, not the 2.11 ms of the swiglu kernel.
+
+| lever | ms |
+| --- | --: |
+| embedding gather (verified 0.02 vs 1.59, unwireable at the capture entry) | 1.59 |
+| swiglu -> quantise fusion (absorbs only the quantise) | 0.83 |
+| norm+quantise fusion | 0.66 |
+| **all three** | **3.08** |
+
+- covers **18%** of the gap; the remaining **14.5 ms** is not in these
+- best wall if every one landed: **167.68 ms** against 153.2
+- instrument floor: ABBA ~1.5% = **2.6 ms**, itemiser spread 4.6% = **7.7 ms**
+
+So one lever is 1-2.4x *below* the ABBA floor, and all three together are 1.3x it -- meaning even the
+best case is barely distinguishable from noise, at a parity risk to `895365e27ed4255b` for each.
+
+**The 15 ms host-wall gap is real but it is not in these three kernels.** Their 1.65x pool concurrency
+pays on work that exists because their graph has *fewer, larger host ops* (fused norm+quant per layer,
+packed swiglu feeding a packed down-GEMM). Adopting that means adopting their host *pipeline*, not
+porting one function into ours: our equivalent work is already fused into single kernels, so there is
+no second pass left to absorb.
+
+That is the honest end of the in-tree route: not a missing port, but a pipeline difference whose
+capture on our side is ~3 ms of an 17.6 ms gap.
