@@ -13,6 +13,9 @@ HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import thread_split; thread_split.install()
 from tinygrad.llm.kernels import replay_c as RC
+# One call per segment: this is the mode the committed MANIFEST was generated in, and the only
+# one that yields per-kernel rows. The shipped default (64) yields 16 `seg*` rows.
+RC.MAX_CALLS_PER_SEG = 1
 RC.install()
 from tinygrad.runtime.support.compiler_cpu import ClangCompiler
 from tinygrad import Device, Tensor
@@ -81,6 +84,12 @@ tot = sum(per.values())
 for c, ms in cls.most_common():
   lines.append(f"| {c} | {ms:.2f} | {100*ms/tot:.1f}% |")
 lines += ["", f"sum of kernels {tot:.2f} ms; wall {wall:.2f} ms; outside {wall-tot:.2f} ms", ""]
-(out / "MANIFEST.md").write_text("\n".join(lines))
+text = "\n".join(lines)
+committed = out / "MANIFEST.md"
+if committed.exists() and len(per) < 30:
+  (out / "MANIFEST.rejected.md").write_text(text)
+  raise SystemExit(f"REFUSED: {len(per)} kernels is not the per-kernel table (committed has "
+                   f"{committed.read_text().count(chr(10) + '| `')} rows). Wrote MANIFEST.rejected.md")
+committed.write_text(text)
 print(f"wrote {len([n for n in per if n in SRC])} sources, {len(per)} kernels, wall {wall:.2f} ms")
 print("\n".join(lines[-4-len(cls):-2]))

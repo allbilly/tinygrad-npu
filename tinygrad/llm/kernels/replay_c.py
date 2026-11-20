@@ -166,6 +166,13 @@ def _expected_args(call, ast, ctx):
   return out
 
 
+# Calls emitted per replay segment. 64 is the shipped value (the minimum of the measured curve);
+# 1 makes every call its own segment, which is the mode `docs/rknpu/results/decode-kernels/MANIFEST.md`
+# was generated in -- per-kernel rows instead of 16 `seg*` rows. Tools that need per-kernel
+# resolution set this before the replay is compiled; it was a local inside `build()` until then,
+# which is why re-running the dump silently overwrote the per-kernel table with segments.
+MAX_CALLS_PER_SEG = 64
+
 def build(linear, inputs):
   """Return a Compiled for this (linear, input set) or raise Unsupported."""
   stats["linear"] += 1
@@ -175,7 +182,6 @@ def build(linear, inputs):
   bound: dict[str, int] = {}
   call_names: list[str] = []
   calls_in_body = 0
-  MAX_CALLS_PER_SEG = 64     # locate the minimum of the measured curve
   plan: list[tuple[str, object]] = []       # ('c', seg_name) | ('py', call)
   body: list[str] = []
   seg_idx = 0
