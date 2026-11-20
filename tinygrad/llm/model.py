@@ -102,6 +102,17 @@ def pairwise_topk(x: Tensor, k: int) -> tuple[Tensor, Tensor]:
   sel = x.const_like(0).scatter(-1, cmp.sum(axis=-1).cast('int32'), vals)[:,:,n-k:].cast('int32')
   return x.gather(-1, sel), sel
 
+# ABBA arm for `extra/rockchip/ab_nopad.py`: True skips the never-selected zero branch of the
+# decode `where` (48 x 2 MB fills/token, 8.76 ms). Not an env flag -- a module constant so the
+# arm is explicit in the harness that flips it.
+SKIP_ZERO_PAD_DECODE = True
+
+def _first_step(pos) -> bool|None:
+  """True/False when the position is statically known, else None."""
+  v = getattr(getattr(pos, "arg", None), "val", None)
+  try: return None if v is None else int(v) == 0
+  except Exception: return None
+
 def rolling_window(state:Tensor, x:Tensor, initial:Tensor) -> tuple[Tensor, UOp]:
   # assemble the window in a static-size buffer: [state | x rows | zero-pad], state is zeroed when initial
   T, T_pad = x.shape[1], x.max_shape[1]
@@ -799,7 +810,14 @@ class GatedDeltaNetBlock(FFNBlock):
       state = Tensor(self.recurrent_state.uop.after(*conv_state_stores))  # carry the conv write into this graph
       core = gated_delta_prefill(q, k, v, beta, alpha, state, Tensor(pos)).transpose(1, 2)
     else:
-      state = initial.where(0, self.recurrent_state.float())
+      # `initial` is `pos == 0`, so at decode it is statically False and the zero branch of the
+      # `where` can never be selected -- but it is still materialised: E_131072_4 is a pure 2 MB
+      # zero fill, emitted 48 times per token (96 MB of zeros) for 8.76 ms/token. The upcast is the
+      # only copy this path needs. Prefill keeps the original expression: changing that branch is
+      # what moved the parity hash in the earlier attempt.
+      _first = _first_step(pos)
+      state = (self.recurrent_state.float() if (SKIP_ZERO_PAD_DECODE and _first is False)
+               else initial.where(0, self.recurrent_state.float()))
       core = None
       # One C call for the whole scan when the geometry qualifies. Verified against the
       # loop below to rel 4e-7 at B=1 H=32 T=128 V=128 K=128

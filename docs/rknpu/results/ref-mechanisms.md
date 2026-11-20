@@ -29,7 +29,7 @@ non-device rows.
 
 | reference mechanism | what it removes | our tree | our measured row | ref row | delta |
 | --- | --- | --- | ---: | ---: | ---: |
-| `BORROW_BATCH` + `BORROW_OUTPUTS` (`rockchip_replay.py:391,405`, both **default 0**) | per-token copies of state/output buffers | **absent** -- we copy, and the copy emits fills | fills **9.43 ms** | ~0 | **+9.4** |
+| `BORROW_BATCH` + `BORROW_OUTPUTS` (`rockchip_replay.py:391,405`, both **default 0**) | per-token copies of state/output buffers | **closed locally**: the decode-only zero-pad skip removed 48 x 2 MB fills (parity unchanged, 21/28 pairs, -8.56 ms) | fills **0.68 ms** | ~0 | **+0.7** |
 | `SHARED_HOST_POOL` + `HOST_POOL_WFE` (`rockchip_shared_pool.py`) | per-kernel dispatch of host chains; kernels run in one shared pool | **absent at decode** -- `thread_split` is harness-level and prefill-scoped | elementwise **20.04 ms** | 6.57 | **+13.5** |
 | `GDN_DIRECT_DECODE` + `GDN_DECODE_PREP_POOL` + `GDN_DECODE_SPIN` | Python-side GDN bookkeeping per step | `scan_native` (kernel only, no prep pool) | scan **5.22 ms** | 4.16 | +1.1 |
 | `REPLAY_NATIVE_FROM` + `_LARGE` | per-call `sync_mem` ioctls | `sync_mem` ioctls intact | 2.8 us/call = 0.87 ms | ~0 | +0.9 |
@@ -39,8 +39,8 @@ non-device rows.
 | `SWIGLU_PACK_STATIC_LAYOUT`, `EXP2_FAST_PATH`, `FFN_PACKED_UPLOAD`, `SCALAR_COPY`, `DEDUP_GUARDS` | assorted copies and dispatch | partial / absent | not separately measured | -- | -- |
 | `NPU_DOMAINS=3` | IOMMU domain count | we run **2** | not separately measured | -- | -- |
 
-Sum of the measured deltas: **9.4 + 13.5 + 1.1 + 0.9 + 9.3 + 5.5 = 39.7 ms**, against a measured
-gap of 32.4. The classes overlap somewhat (the outside-kernel time and the fills are both buffer
+Sum of the measured deltas before the fills fix: 9.4 + 13.5 + 1.1 + 0.9 + 9.3 + 5.5 = 39.7 ms against a
+gap of 32.4. With the fills row closed (+0.7) the remaining attribution is ~31 ms against a 24.1 ms gap. The classes overlap somewhat (the outside-kernel time and the fills are both buffer
 plumbing), so this is an attribution, not an exact budget -- but it names where the 32 ms sits.
 
 ## The single most important line in their source

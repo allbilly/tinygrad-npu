@@ -893,6 +893,66 @@ the gain applies to the instrument that defines the decode comparison (the `ab_*
 parity gate) and not yet to `bench_llm`. Landing it there is a one-line install, but it changes that
 script's historic numbers and was not done here.
 
+
+## The fills row is closed: a pad that is never read was being materialised every token
+
+`E_131072_4` is a pure 2 MB zero fill (`E_131072_4.c`: `*(float4*)... = {0,0,0,0}` over 131072
+float4). It was emitted **48 times per token** -- 96 MB of zeros per token, 9.43 ms of kernel time --
+for the `where(0, recurrent_state)` at `model.py:802`, whose zero branch is statically **False** at
+decode because `initial` is `pos == 0`. The branch can never be selected and was still materialised.
+
+This is the local form of the reference's `ONPU_ZERO_PAD_VIEWS` (`rockchip_padding.py:13,37`): stop
+materialising a pad that is never read. Their code reaches it with a view over a capacity-zeroed
+buffer; ours skips the branch.
+
+```python
+_first = _first_step(pos)                      # False when the position is statically non-zero
+state = (self.recurrent_state.float() if (SKIP_ZERO_PAD_DECODE and _first is False)
+         else initial.where(0, self.recurrent_state.float()))
+```
+
+**Prefill keeps the original expression.** That is not caution for its own sake: the earlier attempt
+at this line changed both branches at once and moved the parity hash to `c693475255158a69`. With the
+change confined to decode, parity is **`895365e27ed4255b`, unchanged**.
+
+### Measured
+
+Two independent ABBAs, temperature per block, `to_program_cache` cleared per arm:
+
+| run | A no-pad | B zero-pad | ratio | pairs |
+| --- | --: | --: | --: | --- |
+| 1 (12 pairs) | **181.26** | 189.82 | 0.9549 | 10/12 |
+| 2 (16 pairs) | **181.45** | 191.00 | 0.9546 | 11/16 |
+| combined | | | **0.955** | **21/28, sign test p = 6.3e-03** |
+
+Logs: `results/threadsplit/nopad.log`, `nopad-replicate.log`.
+
+Per-kernel, from the regenerated dump (`MAX_CALLS_PER_SEG = 1`, one warm token):
+
+| | before | after |
+| --- | --: | --: |
+| fill (kernel) class | 9.43 ms | **0.68** |
+| calls per token | 958 | **910** |
+| wall, dump protocol | 196.18 | **187.58** |
+| elementwise | 20.04 | 19.98 |
+| `E_131072_4` | 48 calls, 8.76 ms | **absent** |
+
+The 8.56 ms of wall removed against 8.76 ms of kernel removed is a transfer factor of ~1.0: these
+kernels were pure writes, so nothing of them was hidden behind the device.
+
+`E_131072_4.c` remains in `decode-kernels/` for the record but is **no longer emitted**; the dump
+wrote 24 sources and 35 kernels this time. Deleting it needs a decision, so it stays and is flagged
+here rather than left to look current.
+
+### Position
+
+| | ms/token |
+| --- | --: |
+| ours, word-load + no-pad | **181.26 - 181.45** (5.51 tok/s) |
+| reference, receipt | 157.34 |
+| **gap** | **+24.1** |
+| gap before the fills fix | +32.4 |
+
 ## Next, in order
 
 ## Next, in order
