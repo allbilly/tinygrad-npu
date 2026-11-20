@@ -94,3 +94,45 @@ that the scan writes in place is a third option between those two, and it is wha
   harnesses and the kernel dump run the replay path at ~190 ms. Every number in the class table is
   the replay path. Installing the word-load hook in `bench_llm.py` was reverted: it changes a script
   whose numbers are not the objective's basis, and a single 1+1 run cannot validate a 1.6% effect.
+
+## The oracle: their stack measured on this board, in this session
+
+Everything above was attribution from their source and receipt. `extra/rockchip/run_ref.py` already
+carries the receipt's environment and drives their worker, so the reference number can be *measured*
+rather than quoted. Run with the receipt's protocol (1 warm-up + 3 measured, 64 tokens):
+
+| | ours | reference (oracle) |
+| --- | --: | --: |
+| decode | **181.26 - 181.45 ms** (5.51 tok/s) | **153.2 ms** (6.525 tok/s) |
+| temperature | 71-73 C | 79.5 - 84.1 C |
+| trials | 12 + 16 paired | 6.348, 6.549, 6.525 tok/s |
+| TTFT | 1.2 s (frozen) | 2120 - 2247 ms |
+
+Trial log: `results/threadsplit/ref-oracle.log`. So the 157.34 from the receipt reproduces here as
+153.2 ms, at a *higher* temperature than our run, which means the ~28 ms gap is real and is not a
+thermal or archive artefact.
+
+## The one comparison from their profile that is unambiguous
+
+Their own per-call profile (`results/ref-calls.jsonl`, `--profile` run) is recorded per **batch**
+(m=32 segments), not per token, so a per-token class split from it is not yet trustworthy and is not
+claimed. One entry is directly comparable, because it is a single call of a kernel both trees emit
+under the same name and shape (62080 float4 = 248,320 elements, the vocabulary op):
+
+| kernel | theirs | ours | ratio |
+| --- | --: | --: | --: |
+| `E_62080_4` | **0.375 ms** | **8.497 ms** | **22x** |
+
+That one kernel is **8.1 ms of the ~28 ms gap**, and it is a *kernel-quality* difference, not an
+architecture difference -- the same op, the same shape, the same tinygrad emitter. It also means our
+remaining gap is not purely architectural, which is what the earlier mechanism table implied.
+
+Their profile also shows multi-millisecond host kernels (`E_2_16_8_32_4_4` 96.7 ms, `r_32_16_32_4`
+50.4 ms, `rockchip_cpu_gated_delta_scan` 47.2 ms) inside a 32-token segment, so "their host work is
+small" is false: it is *batched* over 32 tokens, and m=32 GEMMs appear in the same segment. That is
+the `ONPU_CPU_DECODE_POOL`/`DecodeLoop(count=32)` shape, and it is the next thing to quantify before
+porting anything.
+
+**Not claimed:** any per-token class decomposition from `ref-calls.jsonl` until the segment split is
+shown to isolate a single token. My first attempt at that split produced a 1886-call / 563 ms
+"token" containing m=32 GEMMs, which is a batch, not a token.
