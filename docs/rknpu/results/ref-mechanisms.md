@@ -641,3 +641,31 @@ size) and points inside the **K loop**: the per-k-block weight fetch. At k=4096 
 That is a much narrower target than "the GEMM is slow", and it is the specific thing a driver-side
 trace should confirm or refute: whether our weight fetches stall on the k-block boundary while
 theirs stream.
+
+## Raw vs fused call path, measured: the fused wrapper is worth 84 ms, and it cannot be replaced
+
+The open question was whether the +73 us/call on `2560x4096` sits in the fused C wrapper (quantise,
+payload, skip handling) or in the device submit. The obvious A/B is the raw `packed_matmul_int8` path
+against `packed_matmul_int8_fused`, in-model, same weights, same steps.
+
+`npu_linear.FUSED_CALL` was added to route `NPULinear` through the raw API and the arms were run
+ABBA in one process:
+
+| arm | decode wall |
+| --- | --: |
+| fused (shipped) | **171.2 ms** |
+| raw `packed_matmul_int8` | **255.7 ms** |
+
+Two results, one of them decisive:
+
+1. **The raw path is 84 ms worse and cannot run prefill at all** -- `_int8_matmul_body` rejects
+   `m=128` (`ValueError: Unsupported Rockchip INT8 matmul geometry (128, 1376, 2560)`), so it could
+   never be the shipped path. The fused wrapper is not a cost to be removed; it is worth 84 ms.
+2. **The per-call attribution still failed**, and for the same reason as `reconcile_wall.py`'s first
+   attempt: the fused plan binds its CALL uop directly and `replay_c` calls the compiled entry
+   through a function pointer, so a `CPUProgram.__call__` hook observes neither arm. The wall is
+   reliable; the per-name split is not.
+
+So the +73 us is *not* explained by the call form, and this instrument cannot split the remaining
+candidates. That closes the last in-tree avenue that the step named: localisation now needs the
+driver, which needs root.

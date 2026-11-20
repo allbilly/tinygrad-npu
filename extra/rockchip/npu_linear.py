@@ -784,6 +784,10 @@ def _fused_plan(dev, m: int, n: int, k: int, depth_in: int, cores: int, column_o
 # The fused forward hard-codes the default, so this is the single knob a harness can flip without
 # touching the CBUF register recipe (which wedged the board at k=9216).
 CORES_OVERRIDE: dict[int, int] = {}
+# A/B switch: False routes NPULinear through the raw `packed_matmul_int8` (separate quantise,
+# submit, dequantise) instead of the fused C wrapper, so the k-proportional excess on
+# 2560x4096 can be attributed to the wrapper or to the device submit.
+FUSED_CALL = True
 # A/B switch for the attn_qkv+attn_gate fusion; decided by extra/rockchip/prefill_ab.py.
 FUSE_QKV_GATE = False
 
@@ -892,10 +896,14 @@ class NPULinear:
                         # 1.45-1.60 -> 0.150-0.208 ms of lazy construction per call (8.3-9.7x)
                         # and Qwen2 0.5B paired decode 3.64 -> 7.95 tok/s. Bit-exact at every
                         # 4B geometry (parity_shapes.py, 9/9).
-                        piece = packed_matmul_int8_fused(dense, weight, scales, w2, self.device,
-                                                         part.shape[0], row_offset=r0, k_offset=pk,
-                                                         column_offset=col,
-                                                         cores=CORES_OVERRIDE.get(w2, 3))
+                        if FUSED_CALL:
+                          piece = packed_matmul_int8_fused(dense, weight, scales, w2, self.device,
+                                                           part.shape[0], row_offset=r0, k_offset=pk,
+                                                           column_offset=col,
+                                                           cores=CORES_OVERRIDE.get(w2, 3))
+                        else:
+                          piece = packed_matmul_int8(part, weight, scales, w2, self.device,
+                                                     cores=CORES_OVERRIDE.get(w2, 3), column_offset=col)
                         acc = piece if acc is None else acc + piece
                     if acc is None:
                         raise RuntimeError("NPULinear.prepare() was not called")
