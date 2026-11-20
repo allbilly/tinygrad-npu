@@ -404,12 +404,28 @@ runs the same pair as one 12352-wide GEMM.
 | prefill TTFT spot-check | 4243.8 ms | **4336 ms (+2.2%)** |
 
 The decode side is exactly what the per-shape table predicted (-0.71 ms, 24 fewer submits, 1.6%
-off their 24.52 ms for the same shape), and parity held. **Reverted anyway**, because the prefill
-spot-check moved the wrong way by more than the decode gain: +92 ms against -0.71 ms.
+off their 24.52 ms for the same shape), and parity held.
 
-Honest limit: one `--warmups 1 --runs 1` run cannot separate +2.2% from cross-process noise on this
-board. Reverting is the risk-adjusted call, not a proof of regression. If the 0.71 ms is wanted, the
-measurement to settle it is two runs with and two without, in the same thermal band.
+**Settled by measurement, and rejected.** `prefill_ab.py` runs prefill in the *native* configuration
+-- the one whose 1,198.87 ms target is frozen -- with the flag flipped per process, in ABBA order:
+
+| arm | stabilized trials (ms) | median |
+| --- | --- | --: |
+| off | 1180.4, 1179.8 | **1180.4** |
+| on | 1361.3, 1342.1 | **1361.3** |
+| on | 1456.2, 1457.9 | 1457.9 |
+| off | 1186.9, 1189.5 | **1189.5** |
+
+**+15% to +22% prefill** against -0.71 ms of decode, consistent across both orders and one thermal
+band (73-75 C). `fused_groups` goes 32 -> 56, so the arm demonstrably ran. That is the same verdict
+the gate/up docstring recorded at 19456 (+14.7%): a wider GEMM costs prefill more than the submit it
+saves, even at 12288, which is exactly the width limit.
+
+**The measurement error worth keeping:** my earlier spot-check was a `bench_llm --warmups 1 --runs 1`
+run and reported +2.2%, understating a +15-22% regression by an order of magnitude -- because that
+script's prefill (4.2 s) is a different, CPU-dominated configuration from the frozen one (1.18 s).
+Measuring the right thing in the wrong configuration gave a number that was both precise and
+irrelevant. `FUSE_QKV_GATE` stays False and the rule stays in the tree behind it.
 
 **Also at the resolution limit:** the shipped alpha/beta fusion measured 167.54 -> 167.19 when it
 landed and 167.64 on a later run of the same code, so its *total* effect (~0.35 ms) is inside the

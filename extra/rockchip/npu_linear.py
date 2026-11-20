@@ -784,6 +784,8 @@ def _fused_plan(dev, m: int, n: int, k: int, depth_in: int, cores: int, column_o
 # The fused forward hard-codes the default, so this is the single knob a harness can flip without
 # touching the CBUF register recipe (which wedged the board at k=9216).
 CORES_OVERRIDE: dict[int, int] = {}
+# A/B switch for the attn_qkv+attn_gate fusion; decided by extra/rockchip/prefill_ab.py.
+FUSE_QKV_GATE = False
 
 
 def packed_matmul_int8_fused(dense: Tensor, weight: Tensor, w_scale: Tensor, columns: int, device: str,
@@ -1001,6 +1003,19 @@ def fuse_linears(model) -> int:
             for name in ("attn_q", "attn_k", "attn_v"):
                 delattr(node, name)
             count += 1
+        # attn_qkv + attn_gate: 4096 + 8192 = 12288, exactly the prefill width limit, so unlike
+        # gate/up (19456) it fits one prefill submit. Decode measured -0.71 ms and 283->259 submits.
+        # Gated by FUSE_QKV_GATE because a one-sample prefill spot-check moved the wrong way; the
+        # A/B that decides it is extra/rockchip/prefill_ab.py.
+        if (FUSE_QKV_GATE and all(hasattr(node, name) for name in ("attn_qkv", "attn_gate"))
+                and not hasattr(node, "attn_qkv_gate")):
+            qkv, gate = node.attn_qkv, node.attn_gate
+            if isinstance(qkv, nn.Linear) and isinstance(gate, nn.Linear) and qkv.weight.shape[1] == gate.weight.shape[1]:
+                node._qkv_gate_width = qkv.weight.shape[0]
+                node.attn_qkv_gate = _cat_linears([qkv, gate])
+                delattr(node, "attn_qkv"); delattr(node, "attn_gate")
+                count += 1
+
         # ssm_alpha + ssm_beta: both are Linear(dim, num_v_heads=32) on the same input, 2 submits
         # per GDN layer = 48 per token at 30 us each. The fused width is 64, far below the 12288
         # prefill width, so unlike gate/up this cannot push prefill over a tiling boundary. Exact

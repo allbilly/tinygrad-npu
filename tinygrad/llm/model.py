@@ -783,7 +783,9 @@ class GatedDeltaNetBlock(FFNBlock):
 
     # input processing
     x = x.half()
-    out_gate = (self.ssm_g(x) if hasattr(self, "ssm_g") else self.ssm_g_b(self.ssm_g_a(x))) if is_kda else self.attn_gate(x)
+    _qg = self.attn_qkv_gate(x) if hasattr(self, "attn_qkv_gate") else None
+    out_gate = ((self.ssm_g(x) if hasattr(self, "ssm_g") else self.ssm_g_b(self.ssm_g_a(x))) if is_kda
+                else (_qg[..., self._qkv_gate_width:] if _qg is not None else self.attn_gate(x)))
     out_gate = out_gate.reshape(B, T, self.num_v_heads, self.head_v_dim)
     # ssm_alpha+ssm_beta are fused to one n=64 GEMM when `fuse_linears` ran (2 submits -> 1 per
     # layer); slicing reproduces the two tensors exactly, since each output row keeps its own scale.
@@ -798,10 +800,12 @@ class GatedDeltaNetBlock(FFNBlock):
     log_alpha = g.softplus() * a if (lb:=unwrap(self.config.ssm).gate_lower_bound) is None else (g * a.abs()).sigmoid() * lb
 
     # qkv conv, conv_state is reset when starting from position 0
-    projs = (self.attn_q, self.attn_k, self.attn_v) if is_kda else (self.attn_qkv,)
+    projs = ((self.attn_q, self.attn_k, self.attn_v) if is_kda
+             else ((self.attn_qkv,) if hasattr(self, "attn_qkv") else ()))
     convs = (self.ssm_conv1d_q, self.ssm_conv1d_k, self.ssm_conv1d_v) if is_kda else (self.ssm_conv1d,)
     states = self.conv_states if is_kda else [self.conv_state]
-    conv_outs, conv_state_stores = zip(*(short_conv(s, proj(x), w["weight"].flatten(1), initial) for s, proj, w in zip(states, projs, convs)))
+    proj_outs = ((_qg[..., :self._qkv_gate_width],) if _qg is not None else tuple(proj(x) for proj in projs))
+    conv_outs, conv_state_stores = zip(*(short_conv(s, po, w["weight"].flatten(1), initial) for s, po, w in zip(states, proj_outs, convs)))
     # padded steps are exact no-ops: beta=0 (delta rule off), log_alpha=0 (decay 1 after exp)
     if symbolic:
       out_gate = out_gate.pad_to((B, T_pad, self.num_v_heads, self.head_v_dim))
