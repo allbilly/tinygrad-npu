@@ -784,6 +784,9 @@ def _fused_plan(dev, m: int, n: int, k: int, depth_in: int, cores: int, column_o
 # The fused forward hard-codes the default, so this is the single knob a harness can flip without
 # touching the CBUF register recipe (which wedged the board at k=9216).
 CORES_OVERRIDE: dict[int, int] = {}
+# A/B: the ssm_alpha+ssm_beta fusion is suspected of breaking numerics (logits are zero in the
+# fused stack while stock Linears give real logits). Set False to grade the unfused path.
+FUSE_ALPHA_BETA = True
 # A/B switch: False routes NPULinear through the raw `packed_matmul_int8` (separate quantise,
 # submit, dequantise) instead of the fused C wrapper, so the k-proportional excess on
 # 2560x4096 can be attributed to the wrapper or to the device submit.
@@ -1028,7 +1031,7 @@ def fuse_linears(model) -> int:
         # per GDN layer = 48 per token at 30 us each. The fused width is 64, far below the 12288
         # prefill width, so unlike gate/up this cannot push prefill over a tiling boundary. Exact
         # for the same reason as qkv: one fp32 scale per output row survives the concatenation.
-        if (all(hasattr(node, name) for name in ("ssm_alpha", "ssm_beta"))
+        if (FUSE_ALPHA_BETA and all(hasattr(node, name) for name in ("ssm_alpha", "ssm_beta"))
                 and not hasattr(node, "ssm_alpha_beta")):
             alpha, beta = node.ssm_alpha, node.ssm_beta
             # isinstance, not `type(...) is nn.Linear`: this model's projections are
