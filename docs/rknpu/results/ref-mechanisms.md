@@ -325,3 +325,38 @@ touched.
 
 `npu_linear.CORES_OVERRIDE` is kept: default empty (so every shape uses 3, the shipped value) and it
 is the hook an in-model A/B needs, since the fused forward does not expose the argument.
+
+## Reconciling the unattributed 7.8 ms: it is a comparison artefact, not work
+
+| | device | host | copies | sum | wall | outside |
+| --- | --: | --: | --: | --: | --: | --: |
+| ours | 142.66 | 24.85 | -- | **167.51** | **171.0** | +3.49 |
+| theirs | 136.44 | 26.28 | 0.59 | **163.31** | **153.2** | **-10.11** |
+
+Their profiled per-label sum **exceeds their own unprofiled wall by 10.11 ms**. The two numbers come
+from different runs of their tree (`--runs 3` unprofiled for 153.2, `--runs 1 --profile` for the
+labels), so the 10.11 ms is either instrumentation (5.9 us/call over 1700 calls) or run-to-run
+variation -- and either way it means **summing profiled labels from one run and comparing against an
+unprofiled wall from another cannot reconcile by construction**.
+
+So the "+7.8 ms unattributed" was my own arithmetic mixing two runs. It is not work. What remains
+defensible:
+
+- the wall-to-wall gap is **+17.8 ms** (both sides measured properly);
+- the per-shape device table gives **+10.92 ms** (same-instrument deltas, one run per side);
+- the host comparison is **at or slightly better than theirs, with an unknown bias**: our 24.85 ms
+  has no instrumentation, their 26.28 ms is a profiled run. The honest statement is that the host is
+  no longer the gap, not that it is proven equal.
+
+## No software tiling knob is left for n=2560
+
+| knob | value | effect at columns=2560 |
+| --- | --- | --- |
+| `TILE` | 24576 | 1 piece (2560 < 24576) |
+| `width` (m==1 rule) | 24576 | 1 submit (no width split) |
+| `cores` | 3 | `_matmul_parts` = (0,864),(864,864),(1728,832) |
+
+`n=2560, k=4096` already runs as **one submit, three tasks, three cores**, with a 864/864/832 split.
+The A/B the last turn asked for (TILE / the 24576 width choice) therefore has **nothing to vary**:
+any setting reproduces the same single call. The remaining 19% against their 351 us/call is inside
+`int8_task_plan` -- tasks, banks, subcore assignment -- not in the Python tiling.
