@@ -852,18 +852,32 @@ pure win in one phase is a 37% regression in the other -- the phase has to be me
 ### Three figures for one class, and they are not interchangeable
 
 | quantity | value | protocol |
-| --- | --: | --- |
-| elementwise class, committed `MANIFEST.md` | **12.61 ms** | one call per replay segment |
+| --- | --: | --: |
+| elementwise class, previous `MANIFEST.md` | 12.61 ms | one call per segment, **with the greedy sampler** |
+| elementwise class, regenerated `MANIFEST.md` | **20.04 ms** | one call per segment, shipped config |
 | the seven rewritten kernels, itemiser | 10.77 -> 8.24 ms | 5 warm decode steps, `CPUProgram` self time |
 | elementwise class, ablation | **14.55 ms** | wall difference, 12 pairs |
+
+**Reconciled.** The 7.4 ms between the two manifests is one kernel: `E_62080_4`, the 248,320-element
+vocabulary op, **8.50 ms** in the shipped configuration against 2.63 ms when the manifest was
+generated while `GREEDY_SAMPLING` was on. The old manifest was a snapshot of a configuration that is
+no longer shipped, so 12.61 was never the shipped cost.
+
+It also explains why 20.04 ms of kernel time is consistent with 14.55 ms of wall: `E_62080_4` does
+not transfer. Removing the greedy sampler -- which deletes the gumbel noise over the same 248,320
+elements -- measured ratio 0.9991 over 16 pairs, i.e. no wall change from ~8 ms of CPU.
+`20.04 - 8.50 = 11.5` transfers, against 14.55 measured for the class.
+
+The regenerated table also shows the rewrite per kernel: `E_2_16_32_4` **1.93 ms** (3.47 before),
+`E_1024_4` **1.24** (1.85), `E_640_4` **0.64** (1.81 in the itemiser's byte-load arm), `r_16_32_4`
+1.13.
 
 The itemiser's total CPU (197.06 ms/token) also counts the fused Linear calls including their
 blocking submit, so it is not a class total and must not be used as one.
 
-**Outstanding:** `dump_decode_kernels.py` did not reproduce per-kernel rows on re-run -- it emitted
-16 `seg*` rows, overwriting the good manifest (restored). Until it reproduces the per-kernel table,
-the manifest's 12.61 cannot be regenerated, and the three figures above stay separate rather than
-being reconciled to one.
+**Fixed:** `dump_decode_kernels.py` could not reproduce per-kernel rows because `MAX_CALLS_PER_SEG`
+was a local inside `build()`. It is now module-level, the dump pins it to 1 and refuses to overwrite
+a manifest whose row count it does not match; the regenerated table above is the shipped state.
 
 ### Position
 
