@@ -994,15 +994,24 @@ across two runs:
 Two independent methods -- CPU self time and fast-mode wall -- agree at **-10.0 to -11.0 ms**, which
 is the strongest agreement between a CPU delta and a wall delta yet measured here.
 
-### The next kernel: our argmax is 78x slower than theirs
+### Our argmax was 78x slower in isolation -- and 1.4x in the model
 
-| | ours | theirs |
+| | isolated, 20 runs | in model, itemiser |
 | --- | --: | --: |
-| argmax over 248,320, isolated, 20 runs | **6.6 - 6.8 ms** (stable) | `gpt2_argmax` **0.086 ms** |
+| `logits.argmax(-1)`, tinygrad | 6.6 - 6.8 ms | **~0.2 ms** |
+| `rockchip_argmax_1_248320`, ported SIMD kernel | 1.55 ms | **0.10 ms** |
+| reference `gpt2_argmax` | -- | 0.086 ms |
 
-Our reduce is 148 MB/s; theirs is 11 GB/s. That is **6.6 ms still in the path** after the greedy
-change, and it is a hand-written C kernel in their tree (`rockchip_greedy.py:10 _argmax`), not an
-architecture difference.
+The ported kernel (`extra/rockchip/argmax_native.py`, the reference's 4 x float4 first-maximum
+kernel, adapted to this tree's packed-args ABI) is bit-identical to `argmax` at (1,16), (1,64) and
+(1,248320). In the model it costs **0.10 ms** against the reference's 0.086 -- **now at parity**.
+
+**Correction:** the previous version of this section claimed the argmax was "6.6 ms still in the
+path". That was an **isolated** measurement and it does not transfer: in the decode graph the reduce
+was worth ~0.2 ms, and replacing it moved total CPU by **0.10 ms** (175.11 -> 175.01). The 6.6 ms was
+per-call schedule, allocation and dispatch in a non-JIT loop, not the kernel. This is `AGENTS.md`
+rule 1 again -- never quote an isolated measurement as an in-model number -- and I broke it in the act
+of writing the rule down (M90).
 
 ## Next, in order
 

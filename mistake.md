@@ -1759,6 +1759,33 @@ captured span, and require consecutive offsets rather than specific ones. Then *
 transformed source** before measuring anything, and keep a bracket-balance fail-safe that falls back to
 the untransformed source. Never transcribe a delimiter count by eye.
 
+### M90. Quoted a 6.6 ms isolated argmax as "6.6 ms still in the path", in the same turn I wrote the rule against it
+
+The isolated loop was `x.argmax(-1).realize()` twenty times on a realised `(1, 248320)` tensor. It
+measured 6.6-6.8 ms, very stable, so I wrote that our argmax was 78x the reference's `gpt2_argmax`
+(0.086 ms) and that it was "6.6 ms still in the path after the greedy change".
+
+Ported the reference's SIMD kernel, verified bit-identical at three shapes, and measured it:
+
+| | isolated | in model |
+| --- | --: | --: |
+| tinygrad `argmax(-1)` | 6.6 ms | **~0.2 ms** |
+| ported SIMD kernel | 1.55 ms | **0.10 ms** |
+
+Total CPU moved 175.11 -> 175.01: the change is worth **0.10 ms**, not 6.6. In the decode graph the
+argmax was always cheap; the isolated number was per-call schedule, allocation and dispatch in a
+non-JIT loop.
+
+Two things are worse than an ordinary wrong number here. First, `AGENTS.md` rule 1 says exactly this,
+and I had restated it to the user one turn earlier. Second, the wrong figure was *stable*: twenty
+repeats agreeing to 0.2 ms made it feel measured, and stability is not the property that matters --
+being measured *in the configuration under optimisation* is.
+
+**Fix:** the isolated harness must not exist for a quantity that matters in-model. If a kernel's
+in-model cost is the question, the itemiser (`decode_kernels_by_name.py`) answers it directly, and it
+takes one model load. Use the isolated loop only to prove a kernel *can* be faster, never to claim a
+wall or CPU total.
+
 ## Guards now installed
 
 | guard | where |
@@ -1828,3 +1855,4 @@ the untransformed source. Never transcribe a delimiter count by eye.
 | prove a knob is connected (output changes between two values) before interpreting its output | `mistake.md` M87 |
 | measure transfer per kernel by ablating that kernel, never from an adjacent experiment | `mistake.md` M88 |
 | parse generated text with a balanced scanner and compile the rewrite before measuring it | `mistake.md` M89 |
+| a stable isolated number is still an isolated number; use the itemiser for in-model cost | `mistake.md` M90 |

@@ -108,6 +108,10 @@ def pairwise_topk(x: Tensor, k: int) -> tuple[Tensor, Tensor]:
 SKIP_ZERO_PAD_DECODE = True
 # Temperature-0 decode only; see the comment at the sampler. The reference runs gpt2_argmax here.
 GREEDY_SAMPLING = True
+# First-maximum SIMD argmax (extra/rockchip/argmax_native.py): `logits.argmax(-1)` over the 248,320
+# vocabulary measured 6.6 ms/token against the reference's 0.086 ms. The kernel is 1.55 ms and
+# returns the identical index; this constant is the A/B arm in extra/rockchip/ab_argmax.py.
+ARGMAX_KERNEL = True
 
 def _first_step(pos) -> bool|None:
   """True/False when the position is statically known, else None."""
@@ -932,6 +936,16 @@ class Transformer:
     # over 248,320 logits) against their 0.375 ms for the same op. GREEDY_SAMPLING is for
     # temperature-0 decode only; a sampling workload must set it False.
     if GREEDY_SAMPLING:
+      if ARGMAX_KERNEL:
+        try:
+          from extra.rockchip.argmax_native import argmax as _fast_argmax, supported as _argmax_ok
+        except ImportError:
+          try:
+            from argmax_native import argmax as _fast_argmax, supported as _argmax_ok
+          except ImportError:
+            _argmax_ok = None
+        if _argmax_ok is not None and _argmax_ok(logits):
+          return _fast_argmax(logits).reshape(1, 1)
       return logits.argmax(-1, keepdim=True)
     return (logits / temperature.maximum(1e-12) - (Tensor.rand_like(logits).maximum(1e-12).log().neg()).log()).argmax(-1, keepdim=True)
 
