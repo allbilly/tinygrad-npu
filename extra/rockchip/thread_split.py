@@ -144,8 +144,112 @@ def split_source(src: str, name: str, occurrence: int, threads: int) -> str | No
 
 
 HITS: dict[str, int] = {}
+NOOP_HITS: dict[str, int] = {}
 CALLS: dict[str, int] = {}
 DUMP_DIR: pathlib.Path | None = None
+
+
+# --- word loads: replace four consecutive byte loads assembled into one f32 with one 4-byte load ---
+# The emitted code reconstructs floats from byte-addressed buffers:
+#   (__builtin_bit_cast(float, (unsigned int)(((unsigned int)(b0))+(((unsigned int)(b1))<<8u)+
+#                                           (((unsigned int)(b2))<<16u)+(((unsigned int)(b3))<<24u))))
+# where b0..b3 are four `unsigned char` loads from consecutive addresses. On a little-endian host
+# that expression is exactly a 4-byte load at b0's address, so the rewrite is bit-exact; the dead
+# byte loads are then eliminated by the compiler. 13.79 ms of decode CPU kernel time (manifest) is
+# in kernels carrying this pattern, and ablating the elementwise class moved the wall 14.55 ms, so
+# the transfer factor is ~0.77.
+WORD_LOAD = True
+WORD_LOAD_HITS: dict[str, int] = {}
+# Scoped by name, like THREAD_SPLIT, and for a measured reason: applied to every kernel the
+# rewrite regressed the 128-token prefill by 37% (ab_prefill ABBA, ratio 0.7314, 0/8 pairs), which
+# is the frozen target. These seven are the decode kernels that carry the pattern and are not
+# prefill shapes -- prefill has E_1024_32_4_4 and E_32_32_128_4, not E_1024_4 and E_32_32_128_4's
+# neighbours. Decode measured +1.55% (ratio 1.0155, 10/12 pairs).
+WORD_LOAD_KERNELS = {"E_2_16_32_4", "E_1024_4", "E_640_4", "E_8_32_4_4", "E_16_32_2_4",
+                     "E_4_32_2_4_2", "r_16_32_4"}
+
+_LOAD4_HELPER = ("static __attribute__((always_inline)) unsigned int rk_pack_load4(const unsigned char *p)"
+                 "{ unsigned int v; __builtin_memcpy(&v, p, 4); return v; }\n")
+_BYTE_DECL = re.compile(r"unsigned char (\w+) = \(\*\(\(\(unsigned char\*\)\((\w+)\)\)\+([^;]+?)\)\);")
+_BITCAST = "__builtin_bit_cast(float, "
+_UINT = "(unsigned int)"
+
+def _balanced(src: str, i: int) -> int:
+  depth = 0
+  for j in range(i, len(src)):
+    if src[j] == "(": depth += 1
+    elif src[j] == ")":
+      depth -= 1
+      if depth == 0: return j
+  return -1
+
+def _split_off(expr: str) -> tuple[str, int]:
+  e = expr.strip()
+  while e.startswith("(") and e.endswith(")"): e = e[1:-1].strip()
+  m = re.match(r"^(.*?)\+\s*(\d+)$", e)
+  if m: return m.group(1).strip(), int(m.group(2))
+  if e.isdigit(): return "", int(e)
+  return e, 0
+
+def _brackets_ok(text: str) -> bool:
+  pairs = {")": "(", "]": "[", "}": "{"}
+  stack = []
+  for ch in text:
+    if ch in "([{": stack.append(ch)
+    elif ch in pairs:
+      if not stack or stack.pop() != pairs[ch]: return False
+  return not stack
+
+def word_loads(src: str) -> str:
+  """Rewrite four-consecutive-byte -> f32 assembly into a single 4-byte load (bit-exact)."""
+  decls = {m.group(1): (m.group(2), m.group(3)) for m in _BYTE_DECL.finditer(src)}
+  out, pos, sites = [], 0, 0
+  while (i := src.find(_BITCAST, pos)) != -1:
+    j = src.find(_UINT, i + len(_BITCAST))
+    if j == -1 or j > i + len(_BITCAST) + 2: out.append(src[pos:i + len(_BITCAST)]); pos = i + len(_BITCAST); continue
+    so = j + len(_UINT)
+    if so >= len(src) or src[so] != "(": out.append(src[pos:so]); pos = so; continue
+    sc = _balanced(src, so)
+    inner = src[so + 1:sc]
+    names = re.findall(r"\(unsigned int\)\((\w+)\)", inner)
+    shifts = re.findall(r"<<(\d+)u", inner)
+    ok = len(names) == 4 and shifts == ["8", "16", "24"] and all(n in decls for n in names)
+    if ok:
+      ptr0, off0 = decls[names[0]]
+      offbase0, first0 = _split_off(off0)
+      for k, n in enumerate(names):
+        ptr, off = decls[n]
+        offbase, o = _split_off(off)
+        if ptr != ptr0 or offbase != offbase0 or o != first0 + k: ok = False; break
+    if not ok:
+      out.append(src[pos:sc + 1]); pos = sc + 1; continue
+    out.append(src[pos:i])
+    out.append(f"__builtin_bit_cast(float, rk_pack_load4((const unsigned char*)({ptr0}) + ({off0.strip()})))")
+    sites += 1
+    pos = sc + 2          # also consume the bitcast call's own closing paren
+  out.append(src[pos:])
+  if sites == 0: return src
+  rewritten = "".join(out)
+  # Fail-safe: a compiler-boundary rewrite must leave every bracket balanced. If it does not, the
+  # rewrite is wrong and the untransformed source is used instead of emitting a broken kernel.
+  if not (_brackets_ok(rewritten) and _brackets_ok(src)):
+    return src
+  WORD_LOAD_HITS["sites"] = WORD_LOAD_HITS.get("sites", 0) + sites
+  return _LOAD4_HELPER + rewritten
+
+NOOP: set[str] = set()
+
+def _noop_source(src: str, name: str) -> str | None:
+  """Replace a kernel body with a no-op, keeping its exact ABI. ABLATION ONLY.
+
+  Answers "does this kernel's time reach the wall?", which multiplying us/call by calls cannot:
+  the fills moved the wall 5 ms for 15 ms of kernel, so the transfer factor is not 1.
+  """
+  m = _ENTRY.search(src)
+  if m is None or m.group("name") != name: return None
+  body_open = m.end() - 1
+  body_close = _match_brace(src, body_open)
+  return src[:body_open + 1] + f"\n  (void){m.group('arg')};\n" + src[body_close:]
 
 
 def transform(src: str) -> str:
@@ -156,6 +260,14 @@ def transform(src: str) -> str:
   if DUMP_DIR is not None:
     DUMP_DIR.mkdir(parents=True, exist_ok=True)
     (DUMP_DIR / f"{key}.c").write_text(src)
+  if WORD_LOAD and key in WORD_LOAD_KERNELS:
+    out = word_loads(src)
+    if out is not src: return out
+  if key in NOOP:
+    out = _noop_source(src, key)
+    if out is not None:
+      NOOP_HITS[key] = NOOP_HITS.get(key, 0) + 1
+      return out
   for name, occurrence in THREAD_SPLIT.items():
     if name not in src: continue
     out = split_source(src, name, occurrence, THREAD_SPLIT_THREADS)

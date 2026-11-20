@@ -1640,6 +1640,28 @@ the same shape as `ab_attn` and its conclusion is now marked unmeasured.
 that the arms did different compilation (a hit counter, or the emitted `#if` line) rather than print
 it. A harness that cannot distinguish its arms will report ~1.0 and look like a clean null.
 
+### M84. Re-ran a dump script in its default mode and overwrote the good artifact
+
+`dump_decode_kernels.py` produced the per-kernel `MANIFEST.md` (35 rows, per-kernel names, class
+rollup). Re-running it to refresh the numbers after the word-load rewrite produced **16 `seg*` rows**
+under a single "other" class: the default is the shipped 64-call segment protocol, and the manifest
+was generated with one call per segment.
+
+Two things went wrong and only one was caught:
+
+1. The overwrite itself -- a tracked, hand-referenced artifact was replaced by a degenerate version.
+   Recovered with `git checkout`; the lesson is that a regeneration script with several modes will
+   silently destroy the artifact it is aimed at unless the exact mode is pinned.
+2. **The numbers it was meant to refresh had already drifted.** The committed manifest gives the
+   elementwise class **12.61 ms**, while the class table in `decode-gap.md` carries **14.74 ms** and a
+   working-tree dump I had been quoting all session said **18.88 ms**. Three figures, three bases, one
+   quantity -- and the ablation then measured the *wall* cost at **14.55 ms**.
+
+**Fix:** before regenerating a committed artifact, verify the script reproduces the committed file
+byte-for-byte in the configuration you intend (or diff its shape first: row count and class names).
+And when a class has more than one number, label the protocol next to each rather than picking the
+one that suits the narrative.
+
 ## Guards now installed
 
 | guard | where |
@@ -1683,7 +1705,7 @@ it. A harness that cannot distinguish its arms will report ~1.0 and look like a 
 | "confirmed" needs a pre-declared test to pass; 6 pairs cannot resolve 5%, 16 can | `mistake.md` M82 |
 | if the mechanism says work was removed and the wall says nothing, the wall wins | `mistake.md` M82 |
 | an ABBA arm must clear `to_program_cache`, not just the JIT, and must assert the arms compiled differently | `mistake.md` M83 |
-| a source-only arm that reports ~1.0 is the defect, not the answer | `mistake.md` M83 |
+| a source-only arm that reports ~1.0 is the defect, not the answer | `mistake.md` M83 |\n| pin a regeneration script's mode and check the row shape before it overwrites a committed artifact | `mistake.md` M84 |
 | a row is closed by a paired measurement, never by an isolation benchmark | `mistake.md` M77 |
 | an ablation writes to a path naming the ablation, never to the canonical artifact directory | `mistake.md` M75 |
 | encode a doc's trap into the tool in the same edit | `mistake.md` M67 |

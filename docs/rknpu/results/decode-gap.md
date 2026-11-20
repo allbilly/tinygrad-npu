@@ -188,7 +188,7 @@ trees share **one kernel name out of 31 and 36**, so a per-kernel join is imposs
 | --- | --: | --: | --: | --: |
 | NPU GEMM (device submit) | 142.89 | 142.89 | 137.11 | +5.8 |
 | quantise / dequantise / syncs (inside the fused call) | 4.70 | 4.70 | 1.02 | +3.7 — **closed: no toggle exists** |
-| elementwise (incl. sampler) | 22.81 | 14.74 | 6.57 | **+8.2 (open: no decode-shape transform coverage)** |
+| elementwise (incl. sampler) | 22.81 | 14.74 | 6.57 | **+8.2 (measured: 4-way split null 1.0031; word-load rewrite -2.5 ms CPU / -3.1 ms wall)** |
 | — of which the sampler | 8.48 | 0.41 | 0.09 | +0.3 |
 | state fills | 9.52 | 9.52 | ~0 | +9.5 |
 | GDN scan | 5.23 | 5.23 | 4.16 | +1.1 |
@@ -777,6 +777,107 @@ not resolvable at 12 pairs, so the shipped configuration stays serial. Log:
 their results stand. `ab_elem` and `ab_attn` changed only emitted source and are re-measured above.
 `ab_scan` has the same shape as `ab_attn` and its conclusion should be treated as unmeasured until
 re-run.
+
+
+## The elementwise row is on the wall, and one rewrite moves it
+
+### First: does the row reach the wall?
+
+Multiplying `us/call` by `calls` has been wrong here before (the fills took 15 ms of kernel and
+5 ms of wall), so the class was ablated -- every elementwise kernel body replaced with a no-op,
+same ABI, `ab_noop.py`, A/B/B/A in one process, `to_program_cache` cleared per arm:
+
+| arm | blocks (ms/token) | median |
+| --- | --- | --: |
+| A real | 225.7, 193.2, 192.7, 192.4, 192.6, 192.9, 321.7, 194.1, 211.1, 193.1, 193.4, 192.8 | **193.12** |
+| B whole class no-op | 172.5, 179.1, 172.4, 172.1, 194.9, 180.7, 172.0, 195.4, 200.2, 172.2, 196.7, 178.0 | **178.57** |
+| **wall saved** | | **+14.55 ms** |
+
+So the elementwise class costs ~14.5 ms of wall -- it is the first row measured to transfer almost
+fully, and the largest addressable item left. Log: `results/threadsplit/noop-elementwise.log`.
+
+### The rewrite
+
+The emitted code rebuilds floats from byte-addressed buffers:
+
+```c
+(__builtin_bit_cast(float, (unsigned int)(((unsigned int)(b0))+(((unsigned int)(b1))<<8u)+
+                                        (((unsigned int)(b2))<<16u)+(((unsigned int)(b3))<<24u))))
+```
+
+where `b0..b3` are four `unsigned char` loads from four consecutive addresses. On a little-endian
+host that is exactly one 4-byte load, so `thread_split.word_loads` rewrites it to a single
+`__builtin_memcpy` load. 72 sites in seven decode kernels. The rewrite is refused unless the four
+offsets are consecutive from a common base, and the result is discarded if it leaves any bracket
+unbalanced.
+
+**Parity:** `presample_logits_sha256_16 895365e27ed4255b`, unchanged.
+
+**Per-kernel effect** (`decode_kernels_by_name.py`, 5 warm decode steps, CPU self time):
+
+| kernel | byte-load ms | word-load ms | delta |
+| --- | --: | --: | --: |
+| `E_2_16_32_4` | 3.79 | **2.26** | **-40%** |
+| `E_1024_4` | 2.35 | **1.72** | -27% |
+| `E_640_4` | 1.81 | **1.38** | -24% |
+| `r_16_32_4` | 1.57 | 1.44 | -8% |
+| `E_8_32_4_4` | 1.25 | 1.25 | 0 |
+| **all CPU kernels** | **197.06** | **194.53** | **-2.53** |
+
+**Wall effect**, two independent ABBAs (temperature per block, arms verified by rewrite counter):
+
+| run | A byte-load | B word-load | ratio | pairs |
+| --- | --: | --: | --: | --- |
+| 1 | 193.39 | **189.90** | 1.0155 | 10/12 |
+| 2 | 192.74 | **189.74** | 1.0161 | 15/16 |
+| combined | | | **1.016** | **25/28, sign test p = 1.4e-05** |
+
+Logs: `results/threadsplit/wordload.log`, `wordload-replicate.log`.
+
+### The trap this change walked into
+
+Applied to **every** kernel, the same rewrite regressed the 128-token prefill by **37%**:
+
+| arm | prefill blocks (ms) | median |
+| --- | --- | --: |
+| A byte-load | 1209.1, 1211.7, 1213.8, 1212.1, 1215.5, 1214.3, 1221.8, 1232.4 | **1214.04** |
+| B word-load (all kernels) | 1657.0, 1662.3, 1678.0, 1683.9, 1657.0, 1656.2, 1666.0, 1664.2 | **1663.24** |
+| ratio | | **0.7314, 0/8 pairs** |
+
+The damage is in the 16-site prefill kernels (`E_2_16_32_32_4_4`, `r_32_16_4_32_4`). The rewrite is
+therefore scoped by name to the seven decode kernels, exactly like `THREAD_SPLIT`; prefill is then
+neutral (1211.95 vs 1210.50 on the 4 residual sites it still matches). A change that reads as a
+pure win in one phase is a 37% regression in the other -- the phase has to be measured separately.
+
+### Three figures for one class, and they are not interchangeable
+
+| quantity | value | protocol |
+| --- | --: | --- |
+| elementwise class, committed `MANIFEST.md` | **12.61 ms** | one call per replay segment |
+| the seven rewritten kernels, itemiser | 10.77 -> 8.24 ms | 5 warm decode steps, `CPUProgram` self time |
+| elementwise class, ablation | **14.55 ms** | wall difference, 12 pairs |
+
+The itemiser's total CPU (197.06 ms/token) also counts the fused Linear calls including their
+blocking submit, so it is not a class total and must not be used as one.
+
+**Outstanding:** `dump_decode_kernels.py` did not reproduce per-kernel rows on re-run -- it emitted
+16 `seg*` rows, overwriting the good manifest (restored). Until it reproduces the per-kernel table,
+the manifest's 12.61 cannot be regenerated, and the three figures above stay separate rather than
+being reconciled to one.
+
+### Position
+
+| | ms/token |
+| --- | --: |
+| ours, word-load (two ABBAs) | **189.74 - 189.90** |
+| reference, receipt | 157.34 |
+| **gap** | **+32.4** |
+| gap before this change | +35.4 |
+
+**Caveat on scope:** the rewrite lives in `thread_split`, which `bench_llm.py` does not install, so
+the gain applies to the instrument that defines the decode comparison (the `ab_*` harnesses and the
+parity gate) and not yet to `bench_llm`. Landing it there is a one-line install, but it changes that
+script's historic numbers and was not done here.
 
 ## Next, in order
 
