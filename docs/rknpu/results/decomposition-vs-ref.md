@@ -340,3 +340,29 @@ model, not a two-line change. For 1.59 ms = 0.93%, below the itemiser's 4.6% spr
 
 **Reverted.** Baseline re-verified: 167.36 ms CPU, `E_80_32_64_4` present at 1.59 ms, parity
 `895365e27ed4255b`.
+
+## Why the embed hoist has no validation path: `generate` is not instrumented
+
+The proposed route is to hoist the token lookup out of `Transformer.forward` into `generate`, since
+`generate` knows the token as a Python int and can supply the row as an input rather than computing it
+inside the captured graph.
+
+Inventory of the decode instruments:
+
+| harness | calls `model.generate` | calls `model(...)` directly |
+| --- | :-: | --: |
+| `decode_kernels_by_name` | 0 | 2 |
+| `ab_decode` | 0 | 2 |
+| `reconcile_wall` | 0 | 3 |
+| `bench_llm` | 0 | 2 |
+| `logits_gate` | 0 | -- |
+
+**Every measurement in this session calls `model(...)` per token; `generate` is used only by `cli.py`
+and `serve.py`, which have never been measured here.** So a hoist inside `generate` changes no measured
+number, and to measure it the harness would have to pass `embd` itself -- at which point the harness is
+measuring a path that exists because I added it, not the configuration the 170.76 ms baseline describes.
+
+Combined with the three wiring attempts (M96, M97) and the 1.59 ms size against a 4.6% instrument
+spread, this lever has no route to evidence in this tree. It is not a missing user input; it is a
+measurement gap: the fast gather is correct and 80x faster, and nothing in the harness set can show it
+on the wall.
