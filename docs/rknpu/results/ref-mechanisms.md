@@ -261,3 +261,48 @@ not the host.
 
 **Kept anyway**: it is strictly less work per call, parity is unchanged, and the per-kernel table is
 now comparable with theirs. But it is not a step toward 153.2 and the gap stays +17.8.
+
+## Device, per GEMM shape: where the 104 extra submits are
+
+Both per-token tables, joined on `(n, k)`:
+
+| shape (n,k) | ours calls / ms | theirs calls / ms | delta |
+| --- | ---: | ---: | ---: |
+| 9216 x 2560 | **64** / 49.78 | **0** | +64 calls |
+| 18432 x 2560 | 0 | **32** / 48.29 | -32 calls |
+| 2560 x 4096 | 96 / **40.01** | 96 / **33.70** | **+6.31 ms, same calls** |
+| 24576 x 2560 | 10 / 20.19 | (24384) 10 / 19.58 | +0.61 |
+| 8192 x 2560 | **24** / 16.62 | 0 | +24 calls |
+| 4096 x 2560 | **24** / 8.63 | 0 | +24 calls |
+| 12352 x 2560 | 0 | **24** / 24.52 | -24 calls |
+| 10240 x 2560 | 8 / 6.84 | 8 / 6.76 | +0.08 |
+| 2560 x 1024 | 32 / 3.61 | 32 / 3.22 | +0.39 |
+| 32 x 2560 | **48** / 1.44 | 0 | +48 calls |
+| **total** | **307 / 147.36** | **203 / 136.44** | **+104 calls, +10.92 ms** |
+
+Three findings:
+
+1. **`+6.31 ms` is a same-shape inefficiency.** 96 calls in both trees, `n=2560, k=4096`, ours
+   417 us/call against their 351. At 10.49 MB of weights per call that is **25.2 GB/s against
+   29.9 GB/s**. This is the single largest device item and it is not a submit-count problem.
+2. **`64 -> 32` calls is gate/up fusion.** Their `n=18432` is exactly `2 x 9216`. We already have
+   the code: `npu_linear.fuse_linears` fuses gate/up and its own docstring records the blocker --
+   *"MEASURED AND REJECTED -- do not call this. With 40 groups fused, prefill went 2,771 -> 3,179 ms
+   (+14.7%)"*, because `n=19456` exceeds the 12288 prefill width so the call still splits, and the
+   fused weight is packed as one 24576-column tile. At `m == 1` the limit is 24576, so decode would
+   get one submit instead of two: **32 fewer submits, ~1.5 ms**. The switch is `if False and ...`.
+3. **`8192 + 4096 -> 12352` is the qkv fusion** (12288 padded to 12352): 24 fewer submits, ~0.73 ms,
+   same function, same blocker.
+
+Plus `48 x n=32` submits costing 1.44 ms for 48 tiny GEMMs.
+
+**Discarded measurement:** a cores sweep for `n=2560,k=4096` (1/2/3) via `packed_matmul_int8` in a
+loop reported 96 ms/call, i.e. the JIT never captured the call and every iteration re-scheduled.
+That is M90 again and it says nothing about the device. A cores sweep has to be in-model.
+
+**Blocked on a decision, not on work:**
+
+- enabling gate/up + qkv fusion removes **56 of the 104** extra submits (~2.2 ms) but its own
+  recorded cost is **+14.7% prefill**, against a frozen 1,198.87 ms target;
+- the `+6.31 ms` same-shape gap points at CBUF/tiling width (`ONPU_INT8_DECODE_NARROW_CBUF` in their
+  recipe), and the only CBUF experiment this tree has run (k=9216) wedged the board and rebooted it.
