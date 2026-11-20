@@ -386,3 +386,32 @@ Measured the hard way: the itemiser still showed 48 x `n=32` after the rule was 
 which is already 864; padding `n` to 2592 raises the smallest part to 864 and adds 1.25% of work
 without touching the critical part. Reporting it as an untested hypothesis with that arithmetic is
 more useful than a run that can only come back neutral.
+
+### attn_qkv + attn_gate fused to 12288: decode wins, prefill spot-check loses, reverted
+
+`attn_qkv` (4096) + `attn_gate` (8192) = **12288**, exactly the prefill width limit -- the case the
+`fuse_linears` docstring's objection does *not* cover (gate/up is 19456, over the limit). Their tree
+runs the same pair as one 12352-wide GEMM.
+
+| | before | after |
+| --- | --: | --: |
+| `8192x2560` | 24 calls, 16.62 ms | -- |
+| `4096x2560` | 24 calls, 8.87 ms | -- |
+| `12288x2560` | -- | 24 calls, **24.86 ms** |
+| submits/token | 283 | **259** |
+| total CPU | 167.19 ms | **166.48** |
+| parity | `895365e2` | **`895365e2`** |
+| prefill TTFT spot-check | 4243.8 ms | **4336 ms (+2.2%)** |
+
+The decode side is exactly what the per-shape table predicted (-0.71 ms, 24 fewer submits, 1.6%
+off their 24.52 ms for the same shape), and parity held. **Reverted anyway**, because the prefill
+spot-check moved the wrong way by more than the decode gain: +92 ms against -0.71 ms.
+
+Honest limit: one `--warmups 1 --runs 1` run cannot separate +2.2% from cross-process noise on this
+board. Reverting is the risk-adjusted call, not a proof of regression. If the 0.71 ms is wanted, the
+measurement to settle it is two runs with and two without, in the same thermal band.
+
+**Also at the resolution limit:** the shipped alpha/beta fusion measured 167.54 -> 167.19 when it
+landed and 167.64 on a later run of the same code, so its *total* effect (~0.35 ms) is inside the
+itemiser's run-to-run spread (~0.45 ms). Its structural effect is solid -- 48 x `n=32` (1.47 ms) is
+now 24 x `n=64` (0.96 ms) and 24 submits are gone.
