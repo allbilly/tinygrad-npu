@@ -360,3 +360,29 @@ defensible:
 The A/B the last turn asked for (TILE / the 24576 width choice) therefore has **nothing to vary**:
 any setting reproduces the same single call. The remaining 19% against their 351 us/call is inside
 `int8_task_plan` -- tasks, banks, subcore assignment -- not in the Python tiling.
+
+## Landed: ssm_alpha + ssm_beta fused (48 submits -> 24), and why balancing the 2560 split cannot help
+
+`ssm_alpha` and `ssm_beta` are both `Linear(dim, num_v_heads=32)` on the same `x`, 2 submits per
+GDN layer. Fusing them to one `n=64` GEMM (24 GDN blocks, so 48 -> 24 submits/token):
+
+| | before | after |
+| --- | --: | --: |
+| `rockchip_linear_1_32_2560` | 48 calls, **1.47 ms** | **gone** |
+| `rockchip_linear_1_64_2560` | -- | 24 calls, **0.98 ms** |
+| total CPU, itemiser | 167.54 ms | **167.19** |
+| parity | `895365e2` | **`895365e2`** |
+| prefill spot-check (`bench_llm` TTFT, same config) | 4251.8 ms | **4243.8** |
+
+Unlike gate/up this cannot push prefill over a tiling boundary: `n=64` against a 12288 prefill width.
+
+**The bug that made the first attempt silent:** the model's projections are
+`tinygrad.llm.kernels.amd.Linear`, a **subclass** of `nn.Linear`, so `type(x) is nn.Linear` matched
+nothing and `fuse_linears` fused 0 of 24 blocks while reporting success. `isinstance` fixed it.
+Measured the hard way: the itemiser still showed 48 x `n=32` after the rule was added.
+
+**Balance 864/864/832 -> 864/864/864: not tested, because it cannot help.** `_matmul_parts(1, 2560,
+4096, 3)` returns `(0,864), (864,864), (1728,832)`. Per-call time is set by the **largest** part,
+which is already 864; padding `n` to 2592 raises the smallest part to 864 and adds 1.25% of work
+without touching the critical part. Reporting it as an untested hypothesis with that arithmetic is
+more useful than a run that can only come back neutral.

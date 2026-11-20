@@ -785,8 +785,14 @@ class GatedDeltaNetBlock(FFNBlock):
     x = x.half()
     out_gate = (self.ssm_g(x) if hasattr(self, "ssm_g") else self.ssm_g_b(self.ssm_g_a(x))) if is_kda else self.attn_gate(x)
     out_gate = out_gate.reshape(B, T, self.num_v_heads, self.head_v_dim)
-    beta = self.ssm_beta(x).sigmoid().reshape(B, T, self.num_v_heads)
-    alpha = (self.ssm_f(x) if hasattr(self, "ssm_f") else self.ssm_f_b(self.ssm_f_a(x))) if is_kda else self.ssm_alpha(x)
+    # ssm_alpha+ssm_beta are fused to one n=64 GEMM when `fuse_linears` ran (2 submits -> 1 per
+    # layer); slicing reproduces the two tensors exactly, since each output row keeps its own scale.
+    if hasattr(self, "ssm_alpha_beta"):
+      _ab, _w = self.ssm_alpha_beta(x), self._alpha_beta_width
+      beta, alpha = _ab[..., :_w].sigmoid().reshape(B, T, self.num_v_heads), _ab[..., _w:]
+    else:
+      beta = self.ssm_beta(x).sigmoid().reshape(B, T, self.num_v_heads)
+      alpha = (self.ssm_f(x) if hasattr(self, "ssm_f") else self.ssm_f_b(self.ssm_f_a(x))) if is_kda else self.ssm_alpha(x)
     g, a = (alpha.float() + self.ssm_dt["bias"]).reshape(B, T, self.num_v_heads, -1), self.ssm_a.reshape(self.num_v_heads, -1)
     # the decay: log_alpha = softplus(g) * A, or bounded by gate_lower_bound: sigmoid(g * |A|) * lb
     log_alpha = g.softplus() * a if (lb:=unwrap(self.config.ssm).gate_lower_bound) is None else (g * a.abs()).sigmoid() * lb

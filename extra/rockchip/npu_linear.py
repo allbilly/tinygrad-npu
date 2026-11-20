@@ -1001,6 +1001,22 @@ def fuse_linears(model) -> int:
             for name in ("attn_q", "attn_k", "attn_v"):
                 delattr(node, name)
             count += 1
+        # ssm_alpha + ssm_beta: both are Linear(dim, num_v_heads=32) on the same input, 2 submits
+        # per GDN layer = 48 per token at 30 us each. The fused width is 64, far below the 12288
+        # prefill width, so unlike gate/up this cannot push prefill over a tiling boundary. Exact
+        # for the same reason as qkv: one fp32 scale per output row survives the concatenation.
+        if (all(hasattr(node, name) for name in ("ssm_alpha", "ssm_beta"))
+                and not hasattr(node, "ssm_alpha_beta")):
+            alpha, beta = node.ssm_alpha, node.ssm_beta
+            # isinstance, not `type(...) is nn.Linear`: this model's projections are
+            # `tinygrad.llm.kernels.amd.Linear`, a subclass, so an exact-type check silently
+            # matched nothing (measured: 0 of 24 blocks fused).
+            if isinstance(alpha, nn.Linear) and isinstance(beta, nn.Linear) and alpha.weight.shape == beta.weight.shape:
+                node._alpha_beta_width = alpha.weight.shape[0]
+                node.ssm_alpha_beta = _cat_linears([alpha, beta])
+                delattr(node, "ssm_alpha"); delattr(node, "ssm_beta")
+                count += 1
+
         # gate/up fusion DISABLED: measured +14.7% prefill (n=19456 exceeds the 12288 prefill width,
         # so it still splits, and prepare packs it as one 24576-column tile). qkv alone is measured
         # below because it fits (n=10240).
