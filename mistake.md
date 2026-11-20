@@ -1857,6 +1857,26 @@ the banked-gains table before it was corrected.
 only complete instrument in this tree; anything that wraps one call site measures a subset by
 construction.
 
+### M96. Built a replacement kernel for a graph-root op twice, on wiring forms that cannot work there
+
+The stock embedding lookup costs 1.59 ms/token because `nn/_embedding_fwd` masks over the whole
+vocabulary to fetch one row. The replacement kernel worked on the first try -- bit-exact at tokens
+0/5/999, **0.02 ms against 1.59** -- and then could not be attached:
+
+| wiring | result |
+| --- | --- |
+| `Tensor.custom_kernel` | **640-782 ms/token**: the forward is rebuilt and recompiled every token |
+| direct `prog.call(...)` | works at 2 decode steps, errors at 5 |
+
+Both are the same oversight: the embedding is the **first** op of the captured graph, while every
+custom kernel in this tree that works (`argmax_native`, `attn_native`, `npu_linear`'s fused CALL) sits
+at the end or inside a bound plan. Capture is established at the entry, so a custom kernel there
+defeats it.
+
+**Fix:** before writing a replacement for an op, state where that op sits in the captured graph and
+which existing binding form is known to work *there*. "The kernel is faster" is not the whole
+condition; the binding has to be capture-safe, and at the graph's entry it is not.
+
 ## Guards now installed
 
 | guard | where |
@@ -1932,3 +1952,4 @@ construction.
 | re-read which instrument is known not to work on a path before building another one; assert it captured | `mistake.md` M93 |
 | reconcile a component sum to its own wall before comparing components across trees or runs | `mistake.md` M94 |
 | parity claims need the instrument that covers the whole quantity, not the one call site | `mistake.md` M95 |
+| a faster kernel still needs a capture-safe binding form; check where the op sits in the graph | `mistake.md` M96 |

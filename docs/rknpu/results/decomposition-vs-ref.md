@@ -208,3 +208,24 @@ step rather than another instrument.
 
 Neither is claimed as a lever. The decomposition otherwise closes at
 `142.34 device + 31.11 CPU - 2.69 overlap = 170.76`.
+
+### The embedding gather: kernel built and verified, wiring rejected (tree at baseline)
+
+`extra/rockchip/embed_native.py` is a one-row gather for the fp16 `(248320, 2560)` token table:
+read the token id, convert 2,560 `__fp16` values to f32 with `half4` loads. Verified bit-exact against
+`weight[idx]` for tokens 0, 5 and 999, and it costs **0.02 ms** against the mask path's **1.59** -- 80x.
+
+**Both wiring forms fail, and the tree is back at 167.25 ms CPU / 170.76 wall with parity intact.**
+
+| wiring | result |
+| --- | --- |
+| `Tensor.custom_kernel(...)` at the graph root | **640-782 ms/token** -- the forward is rebuilt and recompiled every token, because the fxn sits at the entry of the captured graph. `argmax_native` gets away with `custom_kernel` because it is the *last* op, not the first |
+| direct `prog.call(out, weight, idx)` (the `_FusedInt8Plan` form) | works for 2 decode steps, **errors at 5** |
+
+So the 1.60 ms is real and the replacement is 80x faster in isolation, but the embedding sits at the
+graph's entry, where a custom kernel defeats capture. Landing it needs a capture-safe gather -- either
+`Ops.GATHER` in the backend (absent) or hoisting the lookup out of the forward into the caller, which
+is a model-interface change rather than a kernel.
+
+**Net effect of the attempt: zero, deliberately.** Nothing is shipped; `EMBED_KERNEL` is not in the
+tree and the measured baseline is unchanged.
