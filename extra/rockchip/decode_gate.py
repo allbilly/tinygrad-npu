@@ -55,16 +55,24 @@ def body(tokens:Tensor, start_pos:tuple, embd:Tensor|None=None):
   elif model.config.attn_res_block_size: x = model.output_res_score.mix(x)
   return model.output(model.output_norm(x[:, -1:]))[:, -1, :]
 
-gate = TinyJit(body)
-pt = Tensor(ids, dtype="int32").reshape(1, 128)
-v0 = UOp.variable("start_pos", 0, 150).bind(0)
-gate(pt, (v0,)).realize()                                    # prefill: fills the caches
 STEP_TOK = int(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1].lstrip('-').isdigit() else 100
 STEP_POS = int(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2].isdigit() else 128
+# One TinyJit per shape. A single gate serving both the prefill (1,128) and the step (1,1) was
+# observed to replay the prefill's capture: token 100/101 and pos 128/129 all hashed identically.
+gate_pre, gate_dec = TinyJit(body), TinyJit(body)
+pt = Tensor(ids, dtype="int32").reshape(1, 128)
+v0 = UOp.variable("start_pos", 0, 150).bind(0)
+gate_pre(pt, (v0,)).realize()                                # prefill: fills the caches
 v1 = UOp.variable("start_pos", 0, 150).bind(STEP_POS)
 st = Tensor([STEP_TOK], dtype="int32").reshape(1, 1)
 emb = Tensor(_ROWS[STEP_TOK].astype(np.float32)).reshape(1, 1, -1) if PASS_EMBD else None
-out = gate(st, (v1,), emb).realize().numpy().astype(np.float32)
+out = gate_dec(st, (v1,), emb).realize().numpy().astype(np.float32)
+plain = body(st, (v1,), emb).realize().numpy().astype(np.float32)   # ground truth, no replay
 h = hashlib.sha256(np.ascontiguousarray(out).tobytes()).hexdigest()[:16]
-print(f"DECODE{' embd' if PASS_EMBD else ' mask'}  presample_logits_sha256_16 {h}  "
-      f"shape {out.shape}  finite={np.isfinite(out).all()}")
+hp = hashlib.sha256(np.ascontiguousarray(plain).tobytes()).hexdigest()[:16]
+_zero = hashlib.sha256(np.ascontiguousarray(np.zeros_like(out)).tobytes()).hexdigest()[:16]
+if h == _zero or not np.any(out != 0):
+  print(f"GATE INVALID: decode logits are all zero (hash {h}) -- the step did not execute")
+  raise SystemExit(2)
+print(f"DECODE{' embd' if PASS_EMBD else ' mask'} tok={STEP_TOK} pos={STEP_POS}  "
+      f"jit {h}  plain {hp}  match={h==hp}  shape {out.shape}")

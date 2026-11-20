@@ -10,6 +10,8 @@ import hashlib, os, pathlib, sys
 import numpy as np
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+import numpy as np
+PASS_EMBD = "--embd" in sys.argv          # caller supplies the embedding row (hoisted lookup)
 import thread_split; thread_split.install()
 mod = None
 if os.environ.get("NO_REPLAY") != "1":
@@ -44,6 +46,12 @@ pt=Tensor(ids,dtype="int32").reshape(1,128); vs=UOp.variable("start_pos",0,150).
 gate(pt, (vs,)).realize()                   # warm-up / capture
 out = gate(pt, (vs,)).realize().numpy().astype(np.float32)
 h = hashlib.sha256(np.ascontiguousarray(out).tobytes()).hexdigest()[:16]
+# The gate hashed an all-zero tensor for the whole session (895365e27ed4255b IS sha256 of zeros),
+# so it certified nothing. Refuse to print a verdict unless the logits are real and non-degenerate.
+_zero = hashlib.sha256(np.ascontiguousarray(np.zeros_like(out)).tobytes()).hexdigest()[:16]
+if h == _zero or not np.any(out != 0):
+  print(f"GATE INVALID: logits are all zero (hash {h}); this gate cannot certify anything")
+  raise SystemExit(2)
 print(f"ARM {'replay' if mod else 'stock'}  presample_logits_sha256_16 {h}  shape {out.shape}  finite={np.isfinite(out).all()}")
 if mod is not None:
     s=mod.stats; print(f"     replay built={s['built']} segs={s['segments']} c_calls={s['calls_c']} py_calls={s['calls_py']}")

@@ -1888,6 +1888,36 @@ not captured, and the first clean run had simply not hit the failure.
 **Fix:** for a change that touches JIT capture, one clean run proves nothing. Run it at least twice,
 compare the *total*, and treat "the kernel appeared" as a structural signal only -- it says the op was
 replaced, not that the graph still captures.
+### M98. The parity gate hashed an all-zero tensor for the entire session
+
+`logits_gate.py` printed `presample_logits_sha256_16 895365e27ed4255b` and was cited in dozens of
+reports as proof that a change preserved numerics. That value is the SHA-256 of an all-zero
+`(1, 248320)` float32 tensor:
+
+```
+sha256(zeros(1,248320, f32))[:16] = 895365e27ed4255b     <- identical
+```
+
+The gate's `body` returns `model.output(model.output_norm(x[:, -1:]))[:, -1, :]`, and under `TinyJit`
+that returned buffer is never written -- every run hashed zeros, `finite=True` passed on zeros, and
+"parity held" was a constant that no change could ever have moved.
+
+**What this invalidates:** every numerical claim in the session, for prefill and decode alike --
+word-load rewrite, zero-pad skip, greedy sampler, SIMD argmax, `ssm_alpha`/`ssm_beta` fusion. None of
+them was verified. What still stands is the *timing* evidence (wall/device/host reconciliation,
+per-kernel counts, structural signals such as "the kernel disappeared"), because none of it depends on
+the gate.
+
+**How it survived:** a constant hash looks like a stable hash. The gate printed `finite=True`, and
+nothing ever asserted that the logits were non-degenerate or that a *different* input produced a
+different hash. Sensitive instruments are the ones that change when the input changes; this one was
+never tested that way.
+
+**Fix:** both gates now refuse to print a verdict when the logits are all zero (`exit 2`), and the
+decode gate prints the JIT hash beside a no-JIT ground truth so a stale capture is visible. The
+remaining defect is upstream: the fused Linear's output buffer is not the one `TinyJit`'s return reads,
+so real logits still need to be recovered before any change can be certified.
+
 ## Guards now installed
 
 | guard | where |
@@ -1965,3 +1995,5 @@ replaced, not that the graph still captures.
 | parity claims need the instrument that covers the whole quantity, not the one call site | `mistake.md` M95 |
 | a faster kernel still needs a capture-safe binding form; check where the op sits in the graph | `mistake.md` M96 |
 | one clean run proves nothing for a capture-touching change; run twice and compare totals | `mistake.md` M97 |
+| a gate must be sensitivity-tested: a *different* input must give a different hash, and zeros must fail | `mistake.md` M98 |
+| a constant hash looks exactly like a stable hash; assert non-degeneracy before trusting any digest | `mistake.md` M98 |
