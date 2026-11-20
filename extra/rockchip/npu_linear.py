@@ -700,7 +700,7 @@ class _FusedInt8Plan:
         # UOp.alloc + Tensor rather than Tensor.empty: the wrapper's dtype/device canonicalisation
         # is 0.03 ms and this runs 323 times per decode token. 2-D so no reshape is needed.
         skip = 0
-        k = self._row_key(x)
+        k = self._row_key(x) if PAYLOAD_REUSE else None
         if k is not None:
           skip = 1 if _QUANTISED.get(k) is not None else 0
           _QUANTISED[k] = True
@@ -787,6 +787,10 @@ CORES_OVERRIDE: dict[int, int] = {}
 # A/B: the ssm_alpha+ssm_beta fusion is suspected of breaking numerics (logits are zero in the
 # fused stack while stock Linears give real logits). Set False to grade the unfused path.
 FUSE_ALPHA_BETA = True
+# A/B: reuse the pooled activation payload when the same row was already quantised. Suspected of
+# feeding stale codes to a second consumer of the same activation (block 0 explodes when several
+# Linears are fused). Set False to always quantise.
+PAYLOAD_REUSE = True
 # A/B switch: False routes NPULinear through the raw `packed_matmul_int8` (separate quantise,
 # submit, dequantise) instead of the fused C wrapper, so the k-proportional excess on
 # 2560x4096 can be attributed to the wrapper or to the device submit.

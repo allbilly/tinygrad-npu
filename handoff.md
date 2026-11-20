@@ -64,33 +64,43 @@ Consequences, stated plainly:
 - Every earlier claim of the form "parity `895365e2` held" in session notes should be read as
   "prefill was run and hashed a constant".
 
-### Where the fused path diverges (partially localised)
+### Where the fused path diverges (updated: cumulative inside one block)
 
-A block-by-block walk of the fused graph, prompt 128 tokens:
+Measured through the real forward, prompt 32 tokens, `start_pos 0` (which re-initialises the caches):
 
-```
-emb     abs-sum 3.5e3     nonzero 0.995
-blk0    abs-sum 3.6e27    nonzero 1.000
-blk1    abs-sum 6.9e37    nonzero 1.000
-all     abs-sum nan
-norm    abs-sum nan
-```
+| build | logits abs-sum | finite |
+| --- | --: | --- |
+| stock `nn.Linear` | **3.3439e5** | yes |
+| + `attn_gate` fused only | 5.4198e5 | yes |
+| + `attn_qkv` fused only | 3.2733e5 | yes |
+| + `ssm_out` fused only | 6.7801e5 | yes |
+| + `ffn_gate` fused only | 3.3441e5 | yes |
+| + `ssm_beta` fused only | 3.3423e5 | yes |
+| **all Linears fused** | **0.0000** (block 0 alone is 1.112e27, max 6.6e23) | at the output layer |
 
-So the fused stack **explodes to NaN within the first two blocks**; the final INT8 quantiser then maps
-NaN to zero codes, which is why the logits are exactly 0 rather than NaN.
+So **no single fused Linear destroys the model** (worst shift is `+ssm_out`, ~2x), and a single fused
+GEMM agrees with the stock matmul on random input to **2.6% max relative error** -- expected for INT8
+activation quantisation. The blow-up is **cumulative within a single block**: block 0 with every Linear
+fused reaches 1e27, and the final quantiser then maps the NaN to zero codes, which is why the logits
+are exactly 0 rather than NaN.
 
-**But the fused output layer is fine on its own:** `model.output(Tensor.rand(1, 2560))` gives
-abs-sum 73,258, 99.99% nonzero. The fault is upstream, in the fused *blocks*.
+An earlier block-0 bisect that replaced one Linear at a time *in place* reported `attn_gate` at 3.5e6 --
+**that result is invalid**: each run wrote the block's conv/scan state at the same position, so runs
+differed by accumulated state, not by the fused layer. The table above supersedes it.
 
 ### Ruled out as the cause (each measured, not argued)
 
 | candidate | test | result |
 | --- | --- | --- |
 | `WORD_LOAD` transform | gate with `WORD_LOAD=0` vs `1` | both zero |
-| `ssm_alpha`/`ssm_beta` fusion | `FUSE_ALPHA_BETA=False` vs `True` (`npu_linear.py`) | both zero |
-| fused-activation `_QUANTISED` skip map | cleared before the call | still zero |
+| `ssm_alpha`/`ssm_beta` fusion | `FUSE_ALPHA_BETA=False` vs `True` | both zero |
+| activation payload reuse | `PAYLOAD_REUSE=False` vs `True` (always quantise) | both zero |
+| fused output layer | `model.output(rand(1,2560))` in isolation | correct: abs-sum 73,258, 99.99% nonzero |
 
----
+What remains is the interaction of several fused GEMMs inside a GDN block -- the recurrence amplifies
+INT8 activation-quantisation error far beyond the ~2.6% a single layer shows. Whether that is our
+quantiser being coarser than the reference's (their path keeps state in fp16 and packs activations for
+a packed down-GEMM), or a genuine defect in one fused path, is not yet decided.
 
 ## Instruments (all in `extra/rockchip/`)
 
@@ -148,9 +158,11 @@ run-to-run 4.6% (7.7 ms).
 ## Next steps, in order
 
 1. **Fix the fused-path numerics — this comes before any optimisation.**
-   Bisect the fused blocks: with `npu_linear` in place, compare each block's output against the stock
-   build for the same input (block 0 already differs by ~24 orders of magnitude). The fault is in a
-   fused Linear inside the GDN/attention blocks, not in the output layer.
+   Bisect **within block 0** by fusing Linears in pairs/subsets (single fusions are safe, all-fused is
+   1e27), and split by role: the Linears feeding the GDN scan (`attn_qkv`, `ssm_alpha/beta`) versus the
+   FFN (`ffn_gate/up/down`). If the scan-side subset explodes and the FFN-side does not, the fault is
+   the recurrent state under INT8 activation quantisation, and the fix is at the quantiser (fp16
+   state / per-block scales like the reference's `_swiglu_pack`), not in a GEMM.
 2. **Make a real gate.** `decode_gate.py` must execute a T=1 step and change its hash when the token
    or position changes; both gates must keep the all-zero refusal.
 3. **Re-verify every landed change** (word-load, zero-pad, greedy, argmax, alpha/beta) against that
