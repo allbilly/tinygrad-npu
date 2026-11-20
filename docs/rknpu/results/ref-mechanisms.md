@@ -136,3 +136,36 @@ porting anything.
 **Not claimed:** any per-token class decomposition from `ref-calls.jsonl` until the segment split is
 shown to isolate a single token. My first attempt at that split produced a 1886-call / 563 ms
 "token" containing m=32 GEMMs, which is a batch, not a token.
+
+## Two-sided per-token decomposition, each side from its own instrumentation
+
+Their `ref-calls.jsonl` resolves into two block shapes: prefill blocks (1886-2836 calls, 11 m=1
+GEMMs, 363-740 ms) and **decode blocks of exactly 1700 calls with 203 m=1 GEMMs, device 136.4-137.0 ms,
+host 26.2-26.7 ms, copies 0.59 ms**. One block is one token -- not the 4-token batch I first
+normalised by, which had made the count look like 487 and briefly contradicted the archive's 203. The
+archive was right.
+
+| per token | ours | reference | delta |
+| --- | --: | --: | --: |
+| device submits | **307** | **203** | **+104** |
+| device ms | 142.66 | 136.6 | **+6.1** |
+| us per submit | 465 | 673 | ours are 31% cheaper each |
+| host CPU ms | 32.35 | 26.4 | **+6.0** |
+| host calls | 910 | **1700** | ours are *fewer* |
+| us per host call | 35.5 | 15.5 | **ours are 2.3x dearer** |
+| copies ms | -- | 0.59 | -- |
+
+Sources: ours = `decode-kernels/MANIFEST.md` (device, 307 submits) plus the itemiser's 175.01 ms total
+(host = total - device); theirs = `ref-calls.jsonl`, median of the eight 1700-call blocks. Their
+profile carries per-call `clock_gettime`, so their 163.5 ms block total sits ~10 ms above the 153.2 ms
+their own harness reports -- the same block, measured with and without instrumentation.
+
+**What this refutes.** The "they batch 32 tokens so they make far fewer host calls" story is wrong:
+they make **1700 host calls per token against our 910**. The advantage is not fewer calls, it is
+**cost per call** -- 15.5 us against our 35.5. Likewise on the device they make *fewer but dearer*
+submits (673 us against our 465).
+
+**What it implies.** Both remaining rows are efficiency-per-call, which is exactly what kernel-level
+porting addresses, and it is what the four landed changes did (word-load, zero-pad, greedy, argmax).
+The structural-batching project is not indicated by this data and should not be started on the
+strength of it.
