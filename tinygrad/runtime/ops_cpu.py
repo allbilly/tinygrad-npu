@@ -23,6 +23,7 @@ class CPUProgram(Program['CPUDevice']):
     self.dev, self.name, self.signature, self.profile_key, self.links = dev, obj.name, obj.signature, obj.profile_key, links
     self.lvp = obj.target.renderer == "LVP"
     self.packer = struct.Struct(''.join(unwrap(dt.fmt) for _, dt in TinyELF.iter_sig(self.signature)))
+    self._kernargs = None
     if dev.remote is not None:
       link_ids = json.dumps({n:p.fxn for n,p in links.items()}).encode()
       self.fxn:Any = dev.remote.rpc(RemoteCmd.LOAD_PROG, len(obj.lib), len(link_ids), payload=obj.lib + link_ids)[0]
@@ -48,7 +49,15 @@ class CPUProgram(Program['CPUDevice']):
   def __call__(self, *args:int, global_size:tuple[int,int,int]=(1,1,1), local_size:tuple[int,int,int]=(1,1,1),
                wait:bool=False, timeout:int|None=None) -> float|None:
     hdr = 12 if self.lvp else 0
-    kernargs = ctypes.create_string_buffer(hdr + len(args) * 8)
+    # Reuse the packed-args buffer instead of allocating one per launch. Every CPU kernel in this
+    # tree takes `void *args`, so each call was a `create_string_buffer` (malloc + zero) plus a
+    # struct pack: ~900 launches per decode token. The reference's CPUProgram takes typed ctypes
+    # arguments instead, and its tiny kernels cost 2-4x less per call than ours for that reason
+    # (E_8_4: 2.2 us vs 8.7 us for 8 elements) -- dispatch, not arithmetic. The buffer is per
+    # program and this device has a single owner, so reuse is safe.
+    if self._kernargs is None or len(self._kernargs) != hdr + len(args) * 8:
+      self._kernargs = ctypes.create_string_buffer(hdr + len(args) * 8)
+    kernargs = self._kernargs
     if self.lvp: struct.pack_into('<3I', kernargs, 0, *data64_le(ctypes.addressof(kernargs) + hdr), len(args) * 2)
     self.packer.pack_into(kernargs, hdr, *args)
     if (remote:=self.dev.remote) is not None:

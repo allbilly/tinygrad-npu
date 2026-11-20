@@ -169,3 +169,49 @@ submits (673 us against our 465).
 porting addresses, and it is what the four landed changes did (word-load, zero-pad, greedy, argmax).
 The structural-batching project is not indicated by this data and should not be started on the
 strength of it.
+
+## Matched-kernel comparison: the host gap is dispatch, not arithmetic
+
+The decode graphs are the same. Their 1700-call decode block and our 910-call token contain the
+**same kernel names with the same call counts**: `E_2_16_32_4` 48, `E_8_32_4_4` 24, `E_1024_4`
+48/72, `E_640_4` 98/97, `r_16_32_4` 48, `r_640_4` 65, `E_8192_4` 24, `E_16_64_4` 8, `E_8_4` 48,
+`E_62080_4` 1. So this is not two different models -- it is the same graph, compiled differently.
+
+| kernel | calls ours/theirs | theirs µs/call | ours µs/call | ratio |
+| --- | --- | --: | --: | --: |
+| `E_8_4` (8 elements!) | 48/48 | **2.2** | **8.7** | **4.0x** |
+| `r_640_4` | 65/65 | 3.0 | 13.6 | **4.5x** |
+| `E_640_4` | 97/98 | 6.9 | 14.2 | 2.1x |
+| `E_1024_4` | 72/48 | 16.3 | 23.9 | 1.5x |
+| `r_16_32_4` | 48/48 | 16.1 | 23.6 | 1.5x |
+| `E_8192_4` | 24/24 | 25.2 | 34.6 | 1.4x |
+| `E_2_16_32_4` | 48/48 | 50.6 | 46.8 | 0.9x |
+| `E_124160_2` | 1/1 | 2129.7 | 2104 | 1.0x |
+| attention | 8/8 | **34.4** | **290** | **8.4x** |
+| argmax | 1/1 | 86.3 | 96.6 | 1.1x |
+| `E_62080_4` | 1/1 | 8523.8 | 433.9 | **0.05x (ours wins)** |
+
+An 8-element kernel costing 8.7 us against 2.2 us cannot be arithmetic. It is the fixed dispatch
+cost, and the reference's source shows why:
+
+```python
+# theirs (ops_cpu.py, CPUProgram.__call__)
+self.fxn(*[ctypes.c_uint64(x) for x in args])
+# ours (same method, before this change)
+kernargs = ctypes.create_string_buffer(hdr + len(args) * 8)   # malloc + zero, every launch
+self.packer.pack_into(kernargs, hdr, *args)
+self.fxn(kernargs)
+```
+
+Every CPU kernel in this tree takes `void *args` and reads its pointers back out of that buffer; the
+reference passes typed ctypes arguments. At ~900 launches per token that is a malloc per launch.
+
+**Fixed so far:** the buffer is now allocated once per `CPUProgram` and reused. Total CPU
+**175.01 -> 173.92 ms/token**, parity `895365e2` unchanged. Worth 1.09 ms of the 6.07 ms host gap;
+too small for the ABBA to resolve (0.6%), so the itemiser is the instrument and the wall claim is
+deliberately not made.
+
+**Still open:** the rest of the dispatch difference is the ABI itself. Porting the typed-argument
+signature means changing `ClangRenderer` and every custom kernel in `extra/rockchip` (`attn.c`,
+`scan`, `argmax_native` all use `void *args`), for an estimated 4-5 us/call over ~900 calls. That is
+a project, and it is the largest remaining *identified* host item after attention.
