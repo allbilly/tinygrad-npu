@@ -1877,6 +1877,17 @@ defeats it.
 which existing binding form is known to work *there*. "The kernel is faster" is not the whole
 condition; the binding has to be capture-safe, and at the graph's entry it is not.
 
+### M97. Accepted a single clean run as proof that a capture-breaking wiring was safe
+
+The embedding gather was wired through `prog.call` and one 5-step itemiser run completed without error,
+with `E_80_32_64_4` gone and `rockchip_embed_2560` at 0.02 ms. I read that as "it works now".
+
+The next run of the same code cost **489.64 ms/token** against a 167.36 ms baseline -- the forward was
+not captured, and the first clean run had simply not hit the failure.
+
+**Fix:** for a change that touches JIT capture, one clean run proves nothing. Run it at least twice,
+compare the *total*, and treat "the kernel appeared" as a structural signal only -- it says the op was
+replaced, not that the graph still captures.
 ## Guards now installed
 
 | guard | where |
@@ -1953,3 +1964,4 @@ condition; the binding has to be capture-safe, and at the graph's entry it is no
 | reconcile a component sum to its own wall before comparing components across trees or runs | `mistake.md` M94 |
 | parity claims need the instrument that covers the whole quantity, not the one call site | `mistake.md` M95 |
 | a faster kernel still needs a capture-safe binding form; check where the op sits in the graph | `mistake.md` M96 |
+| one clean run proves nothing for a capture-touching change; run twice and compare totals | `mistake.md` M97 |

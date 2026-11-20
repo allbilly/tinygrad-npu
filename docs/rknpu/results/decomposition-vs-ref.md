@@ -313,3 +313,30 @@ were each below the measurement floor. The changes that demonstrably moved the w
 **So the rule for what is worth building here is now explicit:** a lever must be >= ~3 ms, or it must
 have a structural signature that proves it fired. Nothing below that can be defended, however clean
 the kernel is.
+
+## The embedding gather: structurally achievable, performance-wise not attachable
+
+Third attempt, now with a clean total for each wiring form. In every case the *kernel* works and the
+old op disappears; the *forward* stops being captured:
+
+| wiring | `E_80_32_64_4` | `rockchip_embed_2560` | total CPU |
+| --- | --- | --: | --: |
+| baseline | 1 call, 1.59 ms | -- | **167.36 ms** |
+| `Tensor.custom_kernel` | gone | 0.02 ms | **640-782 ms** |
+| direct `prog.call` | gone | 0.02 ms | **489.64 ms** (and one 5-step run looked clean first) |
+
+So the structural goal is met -- the O(vocab) kernel vanishes and is replaced by a 0.02 ms gather --
+and the model becomes 3-4.7x slower because the embedding sits at the **capture entry point**: any
+non-standard binding there invalidates the captured forward and it is rebuilt each token.
+
+The `prog.call` form is the worse failure of the two: it succeeded on one 5-step run and cost 489 ms on
+the next. A wiring that sometimes captures is worse than one that never does, because a single clean
+run reads as success.
+
+**Landing it needs the lookup hoisted out of `Transformer.forward`** -- and since the model *is* the
+generator (`generate` feeds the sampled token back), that means moving the generation loop out of the
+model, not a two-line change. For 1.59 ms = 0.93%, below the itemiser's 4.6% spread and the ABBA's
+~1.5% resolution, it cannot be demonstrated even if it works.
+
+**Reverted.** Baseline re-verified: 167.36 ms CPU, `E_80_32_64_4` present at 1.59 ms, parity
+`895365e27ed4255b`.
