@@ -229,3 +229,26 @@ is a model-interface change rather than a kernel.
 
 **Net effect of the attempt: zero, deliberately.** Nothing is shipped; `EMBED_KERNEL` is not in the
 tree and the measured baseline is unchanged.
+
+### `weight[idx]` in-model: same kernel, no gain (and my isolated 5.37 ms was wrong)
+
+Advanced indexing was the obvious capture-safe replacement, since it is a plain op rather than a
+custom kernel. Tested in-model, parity held:
+
+| lookup form | total CPU | `E_80_32_64_4` |
+| --- | --: | ---: |
+| `nn.Embedding(idx)` (mask) | 167.25 ms | **1.59 ms** |
+| `weight[idx]` (advanced index) | 167.46 ms | **1.66 ms** |
+
+So advanced indexing lowers to the *same* masked scan, and the 5.37 ms I quoted for it earlier was an
+isolated non-JIT call -- the M90 error again, this time caught before it was used.
+
+### Why the 1.60 ms is not worth what it costs to land
+
+With no `Ops.GATHER` in the backend, the lookup is O(vocabulary) by construction. The only route left
+is hoisting it out of `Transformer.forward` into the decode caller, which changes the model interface
+and the JIT's input set, for **1.59 ms = 0.9% of the wall**.
+
+Measured against that: two itemiser runs of the *same* code today gave **167.25** and **174.92 ms CPU**
+-- a 4.6% spread, five times the gain. Landing a 0.9% change behind an interface change, measured by
+an instrument that varies 4.6% between runs, is not a defensible trade.
