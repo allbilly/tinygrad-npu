@@ -118,3 +118,36 @@ tree splits into separate `r_*` labels, so the 8x per-call ratio is not a like-f
 | `ssm_alpha`+`ssm_beta` fusion | -0.35 | 48 -> 24 submits |
 | `cpu_profile` bypass | (CPU only) | 174.20 -> 167.96 CPU, no wall |
 | args-buffer reuse | (CPU only) | 175.01 -> 173.92 CPU |
+
+## The last unexplained millisecond: E_80_32_64_4, 1.60 ms for a single call
+
+It is the only entry in the MANIFEST with no counterpart in the reference profile, so it was traced
+rather than assumed.
+
+**What the emitted C says** (`identify_kernel.py E_80_32_64_4`, 39 lines):
+
+```c
+for (Lidx1_0 = 0; Lidx1_0 < 80; Lidx1_0++)          // 80 Q8_0 blocks = 2560 values
+  alu0 = val1*2720 + Lidx1_0*34;                    // val1 = a RUNTIME index, 34-byte blocks
+  for (Lidx1_1 = 0; Lidx1_1 < 32; Lidx1_1++)
+    for (Lidx2 = 0; Lidx2 < 64; Lidx2++) {
+      alu1 = Lidx2*3880;                            // 3880 = 248320/64 = vocab/64
+      ... write *(val3 + alu0 + Lidx1_1 + 2) if val1 falls in that tile, else 0 byte
+```
+
+- source `val3`: Q8_0 rows of 80 blocks (2-byte scale skipped by the `+2`), i.e. 2560 values
+- index `val1`: a **runtime scalar** read from a buffer
+- destination: 80 x 32 x 64 = 163,840 bytes across 64 tiles of 3,880 -- **248,320 = the vocabulary**
+- the comparisons `val1 < alu1 + 970/1940/2910/3880` write a byte only in the tile containing `val1`
+  and **zero everywhere else**
+
+So it is a **masked one-hot scatter over the vocabulary, sourced from a Q8_0 matrix** -- the shape of
+an embedding/product implemented as a matmul rather than a gather. One call per token, 1.60 ms.
+
+**Not yet named.** The compile-time stack only reaches `tinygrad/llm/model.py:967` (`Transformer.__call__`),
+because the kernel is compiled during realise. Naming the op needs the sink uop (`DEBUG=4`) for that
+kernel; guessing it from the arithmetic would be the fourth guess in this stretch, so it is left as the
+one open item with a measured 1.60 ms attached.
+
+For scale: 1.60 ms is 0.9% of the token -- ten times the norm+quantise fusion's realistic capture, which
+is why this was traced before that port was started.
