@@ -252,3 +252,37 @@ and the JIT's input set, for **1.59 ms = 0.9% of the wall**.
 Measured against that: two itemiser runs of the *same* code today gave **167.25** and **174.92 ms CPU**
 -- a 4.6% spread, five times the gain. Landing a 0.9% change behind an interface change, measured by
 an instrument that varies 4.6% between runs, is not a defensible trade.
+
+## What their per-label timings measure: wall per call, and the windows overlap
+
+`rockchip_replay.py:460` wraps every labelled call as
+
+```python
+'{U64 begin=now();' ... 'stats[{index+2}]=now()-begin;}'     # assignment, not +=
+```
+
+and `now()` is `clock_gettime(CLOCK_MONOTONIC)` (line 470). So each label records the **wall time of
+one call**, on one slot per call site -- not summed worker CPU, not accumulated.
+
+Given that, their components exceeding their measured wall is not an accounting artefact: the windows
+themselves overlap. With device submits blocking (136.62) and copies (0.59), the host wall is
+
+    153.2 - 136.62 - 0.59 = **16.0 ms**
+
+against **26.32 ms** of summed per-call host wall -- **1.65x concurrency**, supplied by their
+`ONPU_SHARED_HOST_POOL=1` / `ONPU_HOST_POOL_WFE=1` worker pool. Run-to-run variation is ruled out:
+their profiled run reported 6.500 tok/s against 6.525 unprofiled, 0.65 ms apart.
+
+**So the host lead is real: 16.0 ms wall against our 31.11 ms serial.**
+
+### But it is not recoverable by threading our current kernels
+
+Our pool (`librkpool.so`, `rk_run(fn, args, groups)`, spin-then-`wfe`) is the same interface, and the
+four-way split of our elementwise kernels was measured **null** (ratio 1.0031 over 12 pairs): those
+kernels are 8-97 us gathers where four workers contend rather than scale. Their pool parallelism pays
+on **fused C functions** that do real per-element work -- norm+quantise, swiglu pack -- whose total in
+our tree is the 1.91 ms ceiling already measured.
+
+So the 15 ms host gap is real, is theirs by design, and the only way to reach it is to port the fused
+host kernels that give each worker enough work to be worth a thread. That is the same port named
+earlier (`register_norm`, `_swiglu_pack`), and its capture on our side is ~2 ms, not 15.
