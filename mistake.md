@@ -1786,6 +1786,77 @@ in-model cost is the question, the itemiser (`decode_kernels_by_name.py`) answer
 takes one model load. Use the isolated loop only to prove a kernel *can* be faster, never to claim a
 wall or CPU total.
 
+### M91. Called a total "credible" when one of its two terms had no mechanism
+
+Asked whether 153.2 ms was reachable, I answered that "161 ms is credible -- it needs the prefill
+trade ... and the 2560x4096 row, whose nine hypotheses are already refuted". Those two clauses cannot
+both be true: if nine explanations have been refuted there is no fix to subtract, so the term is not an
+estimate, it is a hope.
+
+Compounding it, the prefill-trade figure was a **table estimate of 1.49 + 0.73 + 1.44 = 3.7 ms**, of
+which 1.44 had already been banked separately and 0.73 had actually been **measured at 0.71**. So the
+one term with a mechanism was worth 0.71 ms, not 3.7, and the other term had none.
+
+**Fix:** a reachability claim must list every term with its mechanism. If any term lacks one, the total
+is a *bound*, and the sentence must say which term is missing. Arithmetic that adds to a target is not
+evidence that the target is reachable.
+
+### M92. Summed three parallel tasks and called the sum a GEMM's cost -- twice, in opposite directions
+
+The MANIFEST's `calls` column counts **tasks**: a 3-part GEMM appears three times (96 entries for 32
+`n=2560,k=4096` GEMMs). The three tasks run in **parallel on three cores**, so one task's duration *is*
+the GEMM's wall.
+
+I first published per-call microseconds and GB/s from that column (25.1 GB/s) without checking what a
+"call" was. Then, on finding 96 vs 32, I divided the row total of 40.08 ms by 32 GEMMs, got 1253 us,
+and announced a **3.1x model-context penalty** and 8.4 GB/s -- a retraction of a retraction, published
+one turn later as "correction".
+
+The instrument that settled it was already in the tree: `shape_device_ab.py` measures one GEMM in
+isolation at **402 us**, against 418 us in-model -- 4% apart, no penalty.
+
+**Fix:** before publishing a per-unit number, establish what the unit is (`grep` the counter's
+increment site) and whether parallel work is being summed. For a 3-core GEMM the wall is `max(part)`,
+never `sum(parts)`.
+
+### M93. Built a per-name hook harness on a path already known to bypass the hook, and it measured nothing
+
+`reconcile_wall.py`'s first attempt had established that patching `CPUProgram.__call__` measures 0.00 ms
+for the fused Linear: the plan binds its CALL uop and `replay_c` invokes the compiled entry through a
+function pointer. Three turns later I built `raw_vs_fused.py` the same way. Its first two runs also
+reported nothing because a capture flag was never set, and the arm comparison was run before either
+defect was noticed.
+
+**Fix:** before writing a new instrument, re-read the note that says which instrument does **not** work
+for this path. For device time here: driver `submit_seconds` deltas, or `thread_time_ns` for CPU --
+never a class hook. And a harness must assert it captured something, not silently return zeros.
+
+### M94. Compared a profiled component sum against a wall from a different run
+
+I wrote that "153.2 ms is not credible ... matching their device (136.62) still leaves us at 165.0".
+That used the reference's *profiled* device figure against its *unprofiled* wall. Their components sum
+to **163.52** for a **153.20** wall -- a 10.32 ms discrepancy from different runs. Scaled to the wall,
+their device is **128.0**, and matching their components lands at 153.2 by construction.
+
+So the target was coherent and my "not credible" verdict was an artefact of mixing runs -- the same
+error M84 recorded for our own numbers, made against theirs.
+
+**Fix:** a component sum must reconcile to its own wall before it is compared with anything. If
+`sum(components) != wall`, either scale and say so, or do not use the components for absolute deltas.
+
+### M95. Announced host parity from an instrument that cannot see the host
+
+For two turns I reported the host "at parity" (24.85 ms against their 26.32) from the itemiser's
+`total - device`. `thread_time_ns` then measured **31.11 ms**. The itemiser sees only 25 of those
+because ~6 ms/token of executor work happens outside `CPUProgram.__call__`.
+
+A "parity" claim is exactly the kind that survives in later reasoning, and this one was quoted back in
+the banked-gains table before it was corrected.
+
+**Fix:** measure the whole quantity before claiming parity on it. For host time the thread clock is the
+only complete instrument in this tree; anything that wraps one call site measures a subset by
+construction.
+
 ## Guards now installed
 
 | guard | where |
@@ -1856,3 +1927,8 @@ wall or CPU total.
 | measure transfer per kernel by ablating that kernel, never from an adjacent experiment | `mistake.md` M88 |
 | parse generated text with a balanced scanner and compile the rewrite before measuring it | `mistake.md` M89 |
 | a stable isolated number is still an isolated number; use the itemiser for in-model cost | `mistake.md` M90 |
+| a reachability total needs a mechanism for every term; otherwise call it a bound and name the gap | `mistake.md` M91 |
+| establish what a counter's unit is, and use `max(part)` not `sum(parts)` for parallel work | `mistake.md` M92 |
+| re-read which instrument is known not to work on a path before building another one; assert it captured | `mistake.md` M93 |
+| reconcile a component sum to its own wall before comparing components across trees or runs | `mistake.md` M94 |
+| parity claims need the instrument that covers the whole quantity, not the one call site | `mistake.md` M95 |
