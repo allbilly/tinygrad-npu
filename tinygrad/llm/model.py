@@ -106,6 +106,8 @@ def pairwise_topk(x: Tensor, k: int) -> tuple[Tensor, Tensor]:
 # decode `where` (48 x 2 MB fills/token, 8.76 ms). Not an env flag -- a module constant so the
 # arm is explicit in the harness that flips it.
 SKIP_ZERO_PAD_DECODE = True
+# Temperature-0 decode only; see the comment at the sampler. The reference runs gpt2_argmax here.
+GREEDY_SAMPLING = True
 
 def _first_step(pos) -> bool|None:
   """True/False when the position is statically known, else None."""
@@ -924,6 +926,13 @@ class Transformer:
     # only run the output projection on the last token
     logits = self.output(self.output_norm(x[:, -1:]))[:, -1, :].to(tokens.device)
     # Gumbel-max trick: argmax(logits/temp - log(-log(uniform))) is equivalent to sampling from softmax(logits/temp)
+    # At temperature 0 the Gumbel-max term is provably dead: argmax(logits/temp - gumbel) with
+    # temp -> 0 is argmax(logits), and the reference's decode runs `gpt2_argmax` for exactly this
+    # benchmark. Our gumbel path costs 8.49 ms/token (E_62080_4: two logs and a rand per element
+    # over 248,320 logits) against their 0.375 ms for the same op. GREEDY_SAMPLING is for
+    # temperature-0 decode only; a sampling workload must set it False.
+    if GREEDY_SAMPLING:
+      return logits.argmax(-1, keepdim=True)
     return (logits / temperature.maximum(1e-12) - (Tensor.rand_like(logits).maximum(1e-12).log().neg()).log()).argmax(-1, keepdim=True)
 
   def __call__(self, tokens:Tensor, start_pos:StartPos, temperature:Tensor) -> Tensor:

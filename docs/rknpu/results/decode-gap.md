@@ -953,6 +953,57 @@ here rather than left to look current.
 | **gap** | **+24.1** |
 | gap before the fills fix | +32.4 |
 
+
+## Greedy at temperature 0: 8.06 ms of CPU removed, and why the old "null" was wrong
+
+The sampler at temperature 0 computed, per vocabulary element:
+
+```python
+(logits / temperature.maximum(1e-12) - (Tensor.rand_like(logits).maximum(1e-12).log().neg()).log())
+```
+
+Two `log`s and one `rand` over **248,320** elements. `E_62080_4` was that expression: **8.49 ms/token**.
+At temperature 0 the Gumbel term is dead (`logits/1e-12` dominates a [-1,1] noise), and the reference
+runs a bare `gpt2_argmax` for this benchmark -- its own profile shows `CPU:gpt2_argmax` 0.086 ms and
+`E_62080_4` 0.375 ms.
+
+Replacing it with `logits.argmax(-1, keepdim=True)` at temperature 0:
+
+| | before | after |
+| --- | --: | --: |
+| `E_62080_4` | 8.49 ms | **0.43 ms** |
+| total CPU, itemiser | 186.07 ms | **175.11 ms** |
+| parity (pre-sampling logits) | `895365e2` | **`895365e2`** |
+
+**Why the earlier ABBA said this was null.** `to_program_cache` is keyed such that the greedy graph's
+elementwise kernel keeps the *same name*, `E_62080_4`. With the harness resetting only the JIT, the
+second arm reused the first arm's compiled binary -- the noisy body -- and measured 0.9991. The
+structural check above (same name, 8.49 -> 0.43 ms, in a fresh process) is what exposed it. This is
+M83's defect surviving in a harness that *did* change the graph, because the key was not graph-deep.
+
+**Wall measurement, with its problem stated.** The arm is bimodal: both arms stall for ~70 ms in
+roughly 20% of blocks (NPU 1 GHz, DDR 2112, CPU6 2256000 -- the clocks are pinned, so this is not
+DVFS). Medians are therefore corrupted and not quoted. The fast modes are tight and consistent
+across two runs:
+
+| run | A greedy fast mode | B gumbel fast mode | delta |
+| --- | --: | --: | --: |
+| 1 (12 pairs) | 171.0 (8/12) | 180.9 (11/12) | **-9.9 ms** |
+| 2 (12 pairs) | 171.2 (7/12) | 181.4 (9/12) | **-10.2 ms** |
+
+Two independent methods -- CPU self time and fast-mode wall -- agree at **-10.0 to -11.0 ms**, which
+is the strongest agreement between a CPU delta and a wall delta yet measured here.
+
+### The next kernel: our argmax is 78x slower than theirs
+
+| | ours | theirs |
+| --- | --: | --: |
+| argmax over 248,320, isolated, 20 runs | **6.6 - 6.8 ms** (stable) | `gpt2_argmax` **0.086 ms** |
+
+Our reduce is 148 MB/s; theirs is 11 GB/s. That is **6.6 ms still in the path** after the greedy
+change, and it is a hand-written C kernel in their tree (`rockchip_greedy.py:10 _argmax`), not an
+architecture difference.
+
 ## Next, in order
 
 ## Next, in order

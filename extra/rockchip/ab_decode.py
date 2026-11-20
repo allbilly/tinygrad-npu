@@ -11,6 +11,7 @@ Usage: ab_decode.py [rounds] [steps]
 import pathlib, statistics as st, sys, time
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+import tinygrad.codegen as CG
 import thread_split; thread_split.install()
 from tinygrad.llm.kernels import replay_c as RC
 RC.install()
@@ -39,13 +40,17 @@ def temp_c() -> float: return float(TEMP.read_text()) / 1000
 def arm(flag: bool) -> tuple[float, float, float]:
   """Set the flag, re-capture both JITs, warm, then time STEPS decode steps."""
   M.GREEDY_SAMPLING = flag
+  CG.to_program_cache.clear()   # M83: the JIT reset alone reuses the other arm's binary
   model.prefill_jit.reset(); model.rollout_jit.reset()
   pos = 128
   def step():
     nonlocal pos
     t = Tensor([100 + (pos % 20)], dtype="int32").reshape(1, 1)
     model(t, (UOp.variable("start_pos", 0, 150).bind(pos),), tp).realize(); pos += 1
-  step(); step()                                   # capture + warm
+  # Four warm steps, not two: this harness clears `to_program_cache`, which forces ~1000 kernels
+  # to recompile per arm, and with two warm steps some of that landed in the measured block
+  # (bimodal 171 vs 248 ms with the median corrupted).
+  for _ in range(4): step()                                   # capture + warm
   t0, t1 = temp_c(), 0.0
   ts = []
   for _ in range(STEPS):
