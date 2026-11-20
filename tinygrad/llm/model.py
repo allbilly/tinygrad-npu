@@ -929,8 +929,11 @@ class Transformer:
     self.prefill_jit = TinyJit(self.forward)
     self.rollout_jit = TinyJit(self.forward)
 
-  def forward(self, tokens:Tensor, temperature:Tensor, *start_pos:int|UOp) -> Tensor:
-    x = self.token_embd(t:=tokens.to(self.token_embd.weight.device)).float()  # (B, T, D)
+  def forward(self, tokens:Tensor, temperature:Tensor, *start_pos:int|UOp, embd:Tensor|None=None) -> Tensor:
+    # `embd` lets the caller supply the already-gathered embedding row, so the O(vocabulary)
+    # lookup (`nn/_embedding_fwd`) is replaced by a 0.02 ms native gather outside the captured graph.
+    t = tokens.to(self.token_embd.weight.device)
+    x = (self.token_embd(t) if embd is None else embd.to(t.device)).float()  # (B, T, D)
     if (hc:=self.config.hc) is not None: x = x.unsqueeze(2).expand(*x.shape[:2], hc.count, x.shape[-1]).contiguous()
     elif self.config.attn_res_block_size: x = x.unsqueeze(2)
     idx_mask = None
@@ -959,12 +962,12 @@ class Transformer:
       return logits.argmax(-1, keepdim=True)
     return (logits / temperature.maximum(1e-12) - (Tensor.rand_like(logits).maximum(1e-12).log().neg()).log()).argmax(-1, keepdim=True)
 
-  def __call__(self, tokens:Tensor, start_pos:StartPos, temperature:Tensor) -> Tensor:
+  def __call__(self, tokens:Tensor, start_pos:StartPos, temperature:Tensor, embd:Tensor|None=None) -> Tensor:
     assert len(start_pos) in (1, tokens.shape[0]), "expected one shared position or one position per batch row"
     if self._position_count is None: self._position_count = len(start_pos)
     assert len(start_pos) == self._position_count, "position count is fixed for this model"
     positions = tuple(UOp.variable(f"start_pos_{b}", 0, self.max_context-1).bind(p) if isinstance(p, int) else p for b, p in enumerate(start_pos))
-    return (self.prefill_jit if resolve(tokens.shape[1] != 1) else self.rollout_jit)(tokens.contiguous(), temperature, *positions)
+    return (self.prefill_jit if resolve(tokens.shape[1] != 1) else self.rollout_jit)(tokens.contiguous(), temperature, *positions, **({'embd': embd} if embd is not None else {}))
 
   @staticmethod
   def from_gguf(gguf:Tensor|str|pathlib.Path, max_context:int|None=None,

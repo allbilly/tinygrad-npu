@@ -16,6 +16,7 @@ protocol, and the last ~8 ms never reconciled. This measures the four quantities
   python extra/rockchip/reconcile_wall.py [steps]
 """
 import collections, pathlib, statistics as st, sys, time
+import numpy as np
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import thread_split as TS
@@ -32,6 +33,17 @@ import npu_linear as NL
 
 CKPT = "/home/orangepi/vlm-bench/baseline-20261021/checkpoints/Qwen3.5-4B/Qwen3.5-4B-Q8_0.gguf"
 STEPS = int(sys.argv[1]) if len(sys.argv) > 1 else 8
+# A/B: supply the embedding row from the caller (hoisted lookup) instead of the in-graph
+# O(vocabulary) mask. Toggled by a shim that sets this before the model loads.
+PASS_EMBD = len(sys.argv) > 2 and sys.argv[2] == "1"   # argv[2], not an env flag
+
+
+def _rows(weight):
+  """Zero-copy view of a realised fp16 parameter: the buffer is a raw address, not a bytes object."""
+  import ctypes
+  u = weight.realize().uop
+  n = u.max_numel()
+  return np.ctypeslib.as_array((ctypes.c_uint16 * n).from_address(u.buffer._buf)).view(np.float16).reshape(weight.shape)
 
 kv, _ = gguf_parse(CKPT)
 ids = SimpleTokenizer.from_gguf_kv(kv).encode("x "*128)[:128]
@@ -42,10 +54,13 @@ model(Tensor(ids, dtype="int32").reshape(1, len(ids)), (UOp.variable("start_pos"
 
 npu = Device["ROCKCHIP"]
 pos = 128
+_EMB = _rows(model.token_embd.weight) if PASS_EMBD else None
 def step():
     global pos
-    model(Tensor([100 + (pos % 20)], dtype="int32").reshape(1, 1),
-          (UOp.variable("start_pos", 0, 150).bind(pos),), tp).realize()
+    tok = 100 + (pos % 20)
+    embd = Tensor(_EMB[tok].astype(np.float32)).reshape(1, 1, -1) if PASS_EMBD else None
+    model(Tensor([tok], dtype="int32").reshape(1, 1),
+          (UOp.variable("start_pos", 0, 150).bind(pos),), tp, embd=embd).realize()
     pos += 1
 step(); step()                                     # capture + warm
 rows = []
@@ -58,6 +73,7 @@ for _ in range(STEPS):
     print(f"  step {len(rows)}: wall {wall:6.1f}  cpu {cpu:6.1f}  device {rows[-1]['device']:6.1f}  "
           f"npu {int(open('/sys/class/devfreq/fdab0000.npu/cur_freq').read())/1e6:.0f} MHz  "
           f"temp {int(open('/sys/class/thermal/thermal_zone0/temp').read())/1000:.1f} C", flush=True)
+rows = rows[len(rows)//2:]   # drop capture transients
 med = {k: st.median([r[k] for r in rows]) for k in rows[0]}
 resid = med["wall"] - med["cpu"] - med["device"]
 print(f"steps {STEPS}  submits/token {med['submits']:.0f}")

@@ -396,3 +396,36 @@ no second pass left to absorb.
 
 That is the honest end of the in-tree route: not a missing port, but a pipeline difference whose
 capture on our side is ~3 ms of an 17.6 ms gap.
+
+## Two results: the hoist works, and the session has no decode-numerics gate
+
+**1. The embedding hoist works when the caller supplies the row.**
+
+| arm | `E_80_32_64_4` | total CPU |
+| --- | --- | --: |
+| mask (in-graph lookup) | 1 call, 1.59 ms | **167.54** |
+| `embd` passed from the caller | **gone** | **166.01** |
+
+`Transformer.forward`/`__call__` now take an optional `embd` input (default None, so every existing
+caller is unaffected), and `decode_kernels_by_name`/`reconcile_wall` gained a `PASS_EMBD` arm that
+computes the row from a zero-copy view of the fp16 weight. **-1.53 ms, structural signal, no regression
+in the baseline arm.**
+
+**2. `logits_gate.py` does not gate decode, and my attempt at a decode gate does not discriminate.**
+
+- `logits_gate.py` runs **one 128-token prefill** at `start_pos 0` and hashes those logits. There is no
+  T=1 step in it.
+- So every "parity `895365e27ed4255b` held" claim in this session -- greedy sampler, SIMD argmax,
+  zero-pad skip, `ssm_alpha`/`ssm_beta` fusion, word-load -- was measured against a **prefill** number.
+  A decode-side numerical change cannot move it.
+- `decode_gate.py` was written to fix that, and it is **invalid**: token 100 vs 101 and position 128 vs
+  129 all return the same hash, so the second call is being served from the first capture rather than
+  executing the T=1 step.
+
+So the hoist's -1.53 ms is structurally real and its numerics are *unverified*: the mask sums one
+non-zero fp16 value with zeros (the value itself) and the gather reads that same fp16 row, so they are
+equal by construction and the kernel was bit-exact against `weight[idx]` at three tokens -- but no gate
+here demonstrates it end to end.
+
+**Consequence: the decode numerics of every change in this session need re-checking** once a working
+T=1 gate exists. Until then, "parity held" means prefill parity.

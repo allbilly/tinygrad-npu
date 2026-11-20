@@ -13,6 +13,7 @@ and a fresh process is the cleanest way to guarantee the arm actually compiles.
   WORD_LOAD=1 python extra/rockchip/decode_kernels_by_name.py [steps]
 """
 import collections, os, pathlib, statistics as st, sys, time
+import numpy as np
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import thread_split
@@ -28,6 +29,14 @@ import npu_linear as NL
 
 CKPT = "/home/orangepi/vlm-bench/baseline-20261021/checkpoints/Qwen3.5-4B/Qwen3.5-4B-Q8_0.gguf"
 STEPS = int(sys.argv[1]) if len(sys.argv) > 1 else 5
+PASS_EMBD = len(sys.argv) > 2 and sys.argv[2] == "1"   # caller supplies the embedding row
+
+
+def _rows(weight):
+  import ctypes
+  u = weight.realize().uop
+  n = u.max_numel()
+  return np.ctypeslib.as_array((ctypes.c_uint16 * n).from_address(u.buffer._buf)).view(np.float16).reshape(weight.shape)
 kv, _ = gguf_parse(CKPT)
 ids = SimpleTokenizer.from_gguf_kv(kv).encode("x "*128)[:128]
 model, _ = Transformer.from_gguf(CKPT, max_context=160)
@@ -35,6 +44,7 @@ NL.fuse_linears(model); NL.replace_linears(model); NL.prepare_linears(model)
 tp = Tensor([0.0])
 model(Tensor(ids, dtype="int32").reshape(1, len(ids)), (UOp.variable("start_pos", 0, 150).bind(0),), tp).realize()
 
+_EMB = _rows(model.token_embd.weight) if PASS_EMBD else None
 acc = collections.defaultdict(lambda: [0, 0.0])
 on = [False]
 orig = CPUProgram.__call__
@@ -49,7 +59,10 @@ CPUProgram.__call__ = wrapped
 pos = 128
 def step():
   global pos
-  model(Tensor([100 + (pos % 20)], dtype="int32").reshape(1, 1), (UOp.variable("start_pos", 0, 150).bind(pos),), tp).realize()
+  tok = 100 + (pos % 20)
+  embd = Tensor(_EMB[tok].astype(np.float32)).reshape(1, 1, -1) if PASS_EMBD else None
+  model(Tensor([tok], dtype="int32").reshape(1, 1), (UOp.variable("start_pos", 0, 150).bind(pos),), tp,
+        embd=embd).realize()
   pos += 1
 step(); step()                                    # warm / capture
 on[0] = True
