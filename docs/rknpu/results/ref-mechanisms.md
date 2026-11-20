@@ -215,3 +215,49 @@ deliberately not made.
 signature means changing `ClangRenderer` and every custom kernel in `extra/rockchip` (`attn.c`,
 `scan`, `argmax_native` all use `void *args`), for an estimated 4-5 us/call over ~900 calls. That is
 a project, and it is the largest remaining *identified* host item after attention.
+
+## The per-call dispatch overhead: found, removed, and it does not reach the wall
+
+The matched-kernel table pointed at dispatch: `E_8_4` is 8 elements at 8.7 us against their 2.2.
+Two candidates were tested by direct measurement.
+
+**Refuted: the argument ABI.** Their `CPUProgram` passes typed ctypes arguments, ours packs a buffer.
+A trivial kernel called 200,000 times through both styles:
+
+| dispatch style | ns/call |
+| --- | --: |
+| packed args buffer (ours) | **694** |
+| typed ctypes args (theirs) | 844 |
+
+Typed arguments are **150 ns slower** -- `c_uint64` construction costs more than `pack_into` plus one
+ctypes call. The ABI port I had queued as "the largest remaining identified host item" is worth
+**-0.135 ms** if done, i.e. nothing. Dropped.
+
+**Confirmed: `cpu_profile` per call.** `CPUProgram.__call__` entered a generator context manager and
+built a `ProfileRangeEvent` on *every* launch, then discarded it when `PROFILE` is off. Bypassed when
+profiling is disabled:
+
+| | before | after |
+| --- | --: | --: |
+| total CPU, itemiser | 174.20 ms | **167.96** |
+| `E_640_4` | 13.5 us/call | **6.8** (theirs 6.9) |
+| `r_640_4` | 13.1 | **6.6** (theirs 3.0) |
+| `E_8_4` | 12.4 | **6.0** (theirs 2.2) |
+| parity | `895365e2` | **`895365e2`** |
+
+**-6.24 ms of CPU, and no wall movement.** The paired A/B (arm A re-enables `PROFILE`, i.e. the old
+path; arm B is the new one):
+
+| arm | median | fast mode |
+| --- | --: | --: |
+| A profiled (old) | 192.62 | 171.5 |
+| B bare (new) | 189.08 | 171.4 |
+
+7 of 12 pairs, both arms bimodal across 171-245 ms, fast modes within 0.1 ms. So the 6.24 ms of
+host work is **not on the critical path** -- the third time a CPU-side saving has failed to transfer
+here (fills, sampler, this). The per-kernel numbers now match the reference and the wall does not,
+which means the wall's 171 ms is set by something the itemiser does not attribute: the device path,
+not the host.
+
+**Kept anyway**: it is strictly less work per call, parity is unchanged, and the per-kernel table is
+now comparable with theirs. But it is not a step toward 153.2 and the gap stays +17.8.

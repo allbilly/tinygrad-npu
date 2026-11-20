@@ -1,7 +1,7 @@
 from __future__ import annotations
 import platform, ctypes, struct, json
 from typing import Any
-from tinygrad.helpers import OSX, unwrap, data64_le, cpu_profile
+from tinygrad.helpers import OSX, PROFILE, unwrap, data64_le, cpu_profile, perf_counter_us
 from tinygrad.device import Compiled, Program, HostAllocator, BufferSpec
 from tinygrad.renderer import TinyELF
 from tinygrad.runtime.support.c import DLL
@@ -63,8 +63,18 @@ class CPUProgram(Program['CPUDevice']):
     if (remote:=self.dev.remote) is not None:
       ret = (remote._rpc if wait else remote._post)(remote.sock, RemoteCmd.EXEC_PROG, self.fxn, len(kernargs), int(wait), payload=bytes(kernargs))
       return ret[0] / 1e9 if ret is not None else None
-    with cpu_profile(self.name, self.dev.device, profile_key=self.profile_key) as prof: self.fxn(kernargs)
-    return float(unwrap(prof.en) - prof.st) * 1e-6 if wait else None
+    # `cpu_profile` builds a ProfileRangeEvent and enters a generator context manager on every
+    # call, then throws the event away when PROFILE is off. At ~900 CPU launches per decode token
+    # that allocation is a large part of the per-call cost the reference does not pay: their
+    # 8-element kernel measures 2.2 us against our 12.4. Only profile when profiling is on.
+    if PROFILE:
+      with cpu_profile(self.name, self.dev.device, profile_key=self.profile_key) as prof: self.fxn(kernargs)
+      return float(unwrap(prof.en) - prof.st) * 1e-6 if wait else None
+    if wait:
+      t0 = perf_counter_us(); self.fxn(kernargs)
+      return float(perf_counter_us() - t0) * 1e-3
+    self.fxn(kernargs)
+    return None
 
 class CPUDevice(Compiled):
   renderers = [ClangRenderer, CPULLVMRenderer, LVPRenderer, X86Renderer, TCCRenderer]
