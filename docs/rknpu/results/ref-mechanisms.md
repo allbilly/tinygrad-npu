@@ -714,3 +714,27 @@ each attention block) and none of them shares an input. The lever exists but the
 The residual on this row is therefore intrinsic to our GEMM at this width: overhead above the DMA
 floor is 53-95 us across the width sweep against **35 us** for theirs, and at `n=2560` there is no
 wider call available to amortise it.
+
+## "Fewer, larger submits": yes at m=1, no at m=128 -- measured on the same weight
+
+The reference does issue fewer, wider GEMMs (18432, 12352 against our 9216x2 and 8192+4096), so the
+obvious question is whether we can do the same. Measured directly, one packed 12288-wide weight, both
+call shapes, no model:
+
+| regime | one 12288-wide call | split 4096 + 8192 | verdict |
+| --- | --: | --: | --- |
+| **m=128** (prefill) | **3461 us**, 1 submit | **3038 us**, 2 submits | wider is **14% slower** |
+| **m=1** (decode) | 12288-wide fusion in-model | two calls | wider is **0.71 ms faster** (`167.19 -> 166.48`) |
+
+So the prefill regression is **the GEMM, not the slicing** -- the same weight, same bytes, one submit
+instead of two, and it is 14% slower. That matches the +15-22% the ABBA measured across four runs and
+replaces an earlier hypothesis that the 128x12288 slice was responsible.
+
+The asymmetry is the point: at `m=1` the per-submit width limit is 24576 and a wide call amortises the
+fixed per-call cost (the width sweep: 25.9 GB/s at n=2560, 31.1 at n=5120, 31.8 at n=10240). At
+`m=128` the limit is 12288 and a call at exactly that width packs worse than two calls inside it.
+
+**Consequence:** "fewer, larger submits" is available only as a decode-only behaviour -- one wide call
+when `rows == 1`, the split calls when `rows > 1`, on the same packed weight via `column_offset`. That
+is implementable, and it is worth **0.71 ms of decode (0.4%)**. It is not worth restructuring the
+forward for.
