@@ -670,7 +670,7 @@ So the +73 us is *not* explained by the call form, and this instrument cannot sp
 candidates. That closes the last in-tree avenue that the step named: localisation now needs the
 driver, which needs root.
 
-## Correction: the per-shape table's "calls" are TASKS, so the 2560x4096 numbers were 3x off
+## The per-shape numbers are per TASK, and that is fine: the tasks run in parallel
 
 `shape_device_ab.py` measures one fused GEMM in isolation, JIT-captured, from `npu.submit_seconds`:
 
@@ -682,38 +682,35 @@ driver, which needs root.
 | **2560x4096** | 10.49 | 1 | **402** | **26.1** | 30% |
 | 9216x2560 | 23.59 | 1 | 762 | 31.0 | 9% |
 
-and the width sweep at k=4096, which is the actionable part:
+Counting calls in one decode token: **32** `NPULinear` calls with shape `n=2560, k=4096`
+(`ssm_out` x24, `attn_output` x8), against **96** manifest entries. So the manifest's `calls` column
+counts **tasks** -- the three `_matmul_parts` slices 864/864/832 -- not GEMMs.
+
+**That does not make the row 3x slower, because the three tasks run in parallel on three cores.**
+Summing them triple-counts: the row total of 40.08 ms over 96 entries is 418 us per task, and one
+task *is* the GEMM's wall. Isolation agrees: **402 us** for the whole GEMM. An earlier version of
+this section divided the row total by 32 GEMMs, got 1253 us, and concluded a 3.1x model-context
+penalty; that was a summation error, now retracted.
+
+So the published comparison stands as originally written: **418 us against their 345 us, 25.1 against
+30.4 GB/s, +73 us per GEMM.** There is no model-context penalty -- isolation reproduces the model
+within 4%.
+
+### Why the width lever cannot be applied here
+
+The sweep showed wider calls are more efficient at the same k:
 
 | shape | MB | us/call | GB/s | above floor |
 | --- | --: | --: | --: | --: |
 | 2560x4096 | 10.49 | 405 | 25.9 | 30% |
-| **5120x4096** | 20.97 | 674 | **31.1** | 9% |
+| 5120x4096 | 20.97 | 674 | 31.1 | 9% |
 | 7680x4096 | 31.46 | 1004 | 31.3 | 8% |
 | 10240x4096 | 41.94 | 1320 | 31.8 | 6% |
 
-At the same k, widening n recovers full efficiency: the cost is a fixed ~90 us per call.
+Fusing two `n=2560` GEMMs into one `n=5120` would save ~136 us per pair, but **there is no pair to
+fuse**: the 32 Linears of this shape are one per block (`ssm_out` in each GDN block, `attn_output` in
+each attention block) and none of them shares an input. The lever exists but the model cannot use it.
 
-**But counting calls in the model contradicts the manifest, and the manifest is what was wrong.**
-Instrumenting `NPULinear.__call__` over one decode token:
-
-- model calls with shape `n=2560, k=4096`: **32** (they are `ssm_out` x24 and `attn_output` x8)
-- manifest entries for that shape: **96**
-- total model calls 209, but 283 submits/token
-
-96 = 32 x 3: the manifest's `calls` column counts **tasks** (the three `_matmul_parts` slices
-864/864/832), not GEMMs. So every "us/call" and "GB/s" figure published for this row was computed on
-the wrong denominator:
-
-| | per task (as published) | per GEMM (corrected) |
-| --- | --: | --: |
-| ours | 417.8 us, "25.2 GB/s" | **1253 us, 8.4 GB/s** |
-| theirs | 345 us, "30.4 GB/s" | **1053 us, 10.0 GB/s** |
-
-The ratio (ours 19% slower) is unchanged, but the absolute numbers are withdrawn: this GEMM runs at
-**8.4 GB/s in the model** against **26.1 GB/s in isolation** -- a 3.1x model-context penalty, and
-their model context pays 2.6x its own. So the residual is a **model-context effect**, not a property
-of the shape, and the width sweep says a wider call amortises whatever the fixed cost is.
-
-Next: find what the model context adds (the isolated call has no domain switching and no per-call
-payload allocation; the model has both), and test the n=5120 fusion that the sweep says is worth
-~136 us per pair.
+The residual on this row is therefore intrinsic to our GEMM at this width: overhead above the DMA
+floor is 53-95 us across the width sweep against **35 us** for theirs, and at `n=2560` there is no
+wider call available to amortise it.
