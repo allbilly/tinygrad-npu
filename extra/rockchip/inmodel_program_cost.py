@@ -48,7 +48,99 @@ def main() -> int:
   from tinygrad.helpers import data64_le, unwrap, cpu_profile
   from tinygrad.runtime.ops_cpu import CPUProgram
 
+  import tinygrad.engine.realize as _R
+  # Where the 144 us/program inside the executor actually goes: the per-CALL rewrite that
+  # resolves buffers and dispatches. Measured before changing any core file.
+  exec_stats = {"n": 0, "ns": 0}
+  _pm = _R.pm_exec
+  class _TimedPM:
+    def rewrite(self, uop, ctx):
+      if not state["on"]: return _pm.rewrite(uop, ctx)
+      t0 = time.perf_counter_ns(); r = _pm.rewrite(uop, ctx)
+      exec_stats["n"] += 1; exec_stats["ns"] += time.perf_counter_ns() - t0
+      return r
+  _R.pm_exec = _TimedPM()
+
+  # Position-indexed replay: `call.without_after` builds a new uop per dispatch, so the CALL's
+  # index within the captured linear is the only stable identity. Bindings are keyed by index and
+  # verified against a fresh resolution before first use, so a wrong binding is caught, not run.
+  from tinygrad.dtype import AddrSpace
+  from tinygrad.device import Device as _Device
+  from tinygrad.helpers import DEBUG as _DEBUG
+  from tinygrad.uop.ops import Ops as _Ops
+  rep = {"hit": 0, "miss": 0, "skip": 0, "ns": 0, "idx": -1}
+  _rep_cache: dict[tuple, tuple] = {}
+  _orig_run_linear = _R.run_linear
+
+  def _bind(ctx, call, ast):
+    """exec_kernel's resolution, returning the binding instead of executing it."""
+    resolved = [_R._resolve(call.src[1+i], ctx.input_uops) for i in ast.arg.globals]
+    outs = []
+    for device, (bufs, device_vars) in zip(_R.to_tuple(_R.get_call_arg_uops(call)[0].device), _R.unwrap_multi(call, resolved)):
+      if device.split(":")[0] in _R.HOST_DEVS: _Device[device].synchronize(ctx.timeout)
+      vv = {**ctx.var_vals, **device_vars, **{x.expr: x.arg.val for x in call.src[1:] if x.is_bound_var}}
+      pb = {i: b.ensure_allocated() for i, b in zip(ast.arg.globals, bufs)}
+      rt = _R.get_runtime(device, ast, cache=ctx.cache)
+      gsz, lsz = ast.arg.launch_dims(vv)
+      args = [(vv[p.expr] if p.is_variable else _R._resolve(call.src[1+p.arg.slot], ctx.input_uops).val)
+              if p.addrspace is AddrSpace.ALU else pb[p.arg.slot].get_buf(device) for p in ast.kernel_params]
+      outs.append((rt, args, gsz, lsz))
+    return outs
+
+  replay = {"on": False}
+  def run_linear_pos(linear, var_vals=None, input_uops=(), update_stats=True, jit=False, wait=False):
+    if not replay["on"]:
+      return _orig_run_linear(linear, var_vals, input_uops, update_stats, jit, wait)
+    assert linear.op is _Ops.LINEAR
+    if len(linear.src) == 0: return
+    inputs = list(input_uops)
+    if not jit:
+      linear = _R.link_linear(_R.compile_linear(linear, validate=_R.VALIDATE_WITH_CPU, input_uops=inputs, cache=True), input_uops=inputs)
+    ctx = _R.ExecContext(var_vals or {}, tuple(inputs), update_stats, jit, wait or _DEBUG >= 2)
+    for i, call in enumerate(linear.src):
+      rep["idx"] = i
+      c = call.without_after
+      key = (i, tuple(sorted(ctx.var_vals.items())))
+      t0 = time.perf_counter_ns()
+      if (hit := _rep_cache.get(key)) is not None:
+        for rt, args, gsz, lsz in hit:
+          rt(*args, global_size=gsz, local_size=lsz, wait=ctx.wait, timeout=ctx.timeout)
+        rep["hit"] += 1; rep["ns"] += time.perf_counter_ns() - t0
+      else:
+        _R.pm_exec.rewrite(c, ctx)
+        rep["miss"] += 1
+        # Only plain PROGRAM calls can be replayed by binding their arguments.
+        # COPY/STORE calls have no ProgramInfo (`ast.arg is None`), and HCQ calls
+        # carry queue/profiling semantics in exec_hcq that a bare rt() would skip.
+        ast = c.src[0]
+        if ast.op is _Ops.PROGRAM and ast.arg is not None and getattr(c.arg, "hcq", None) is None:
+          try:
+            _rep_cache[key] = _bind(ctx, c, ast)
+          except (AttributeError, KeyError) as exc:
+            rep["skip"] += 1
+            if rep["skip"] <= 3: print(f"[replay] skip call {i}: {type(exc).__name__}: {exc}", flush=True)
+        else:
+          rep["skip"] += 1
+    rep["idx"] = -1
+  _R.run_linear = run_linear_pos
+  # `tinygrad.engine.jit` holds its own reference (`from ... import run_linear`), so patching the
+  # module attribute alone is invisible to the JIT -- the same from-import trap as
+  # ClangCompiler.compile_cached.
+  import tinygrad.engine.jit as _J
+  _J.run_linear = run_linear_pos
+
   state = {"on": False}
+  copy_stats = {"n": 0, "ns": 0}
+  _orig_copy = _R.exec_copy
+  def _copy_hook(ctx, call, ast):
+    if not state["on"]:
+      return _orig_copy(ctx, call, ast)
+    t0 = time.perf_counter_ns()
+    out = _orig_copy(ctx, call, ast)
+    copy_stats["n"] += 1
+    copy_stats["ns"] += time.perf_counter_ns() - t0
+    return out
+  _R.exec_copy = _copy_hook
   stats = {"outer_ns": 0, "pack_ns": 0, "fxn_ns": 0, "thread_ns": 0, "calls": 0}
   by_name: dict[str, list[int]] = collections.defaultdict(lambda: [0, 0, 0])  # calls, outer_ns, fxn_ns, thread_ns
   original = CPUProgram.__call__
@@ -102,6 +194,16 @@ def main() -> int:
   nbytes = packed_weight_bytes(model)
   load_seconds = time.time() - load_started
 
+  # The JIT re-runs the Python forward on every call to rebuild the graph; time that separately
+  # from the replay, since time spent inside `model(...)` includes both.
+  build_stats = {"ns": 0}
+  _jit = getattr(model, "prefill_jit", None)
+  if _jit is not None and getattr(_jit, "fxn", None) is not None:
+    _f = _jit.fxn
+    def _timed_fxn(*a, **k):
+      t = time.perf_counter_ns(); r = _f(*a, **k); build_stats["ns"] += time.perf_counter_ns() - t; return r
+    _jit.fxn = _timed_fxn
+
   temperature = Tensor([0.0])
   prompt_tensor = Tensor(ids, dtype="int32").reshape(1, args.prompt)
   v_start = UOp.variable("start_pos", 0, max_context - 1)
@@ -109,16 +211,24 @@ def main() -> int:
 
   # 1 captures the JIT; then instrument / bare / instrument, so the observer effect is a
   # measured ratio between adjacent trials rather than an assumption.
-  plan = [("capture", False), ("instrumented-a", True), ("bare", False), ("instrumented-b", True)]
+  plan = [("capture", False, False), ("instrumented-a", True, True), ("bare", False, False),
+          ("instrumented-b", True, True), ("replay-only", False, True)]
   trials = []
-  for tag, instrument in plan:
+  for tag, instrument, replay_on in plan:
     stats.update(outer_ns=0, pack_ns=0, fxn_ns=0, thread_ns=0, calls=0)
+    copy_stats.update(n=0, ns=0)
+    exec_stats.update(n=0, ns=0)
+    rep.update(hit=0, miss=0, skip=0, ns=0)
+    build_stats["ns"] = 0
     by_name.clear()
     state["on"] = instrument
+    replay["on"] = replay_on
     npu = Device["ROCKCHIP"]
     s0, w0 = npu.submit_count, npu.submit_seconds
     t0 = time.perf_counter()
-    logits = model(prompt_tensor, (pos_zero,), temperature).realize()
+    lazy = model(prompt_tensor, (pos_zero,), temperature)   # JIT: rebuilds the Python graph
+    t_build = time.perf_counter() - t0
+    logits = lazy.realize()                                  # then replays the captured linear
     wall = time.perf_counter() - t0
     # Bitwise identity at the model boundary: two runs of the same configuration must agree here
     # before a transformed run can be compared with an untransformed one.
@@ -128,8 +238,9 @@ def main() -> int:
     logits_hash = hashlib.sha256(arr.tobytes()).hexdigest()[:16]
     print(f"logits finite: {bool(_np.isfinite(arr).all())}", flush=True)
     state["on"] = False
+    replay["on"] = False
     row = {
-      "tag": tag, "instrumented": instrument,
+      "tag": tag, "instrumented": instrument, "replay_enabled": replay_on,
       "wall_ms": round(wall * 1e3, 1),
       "cpu_programs": stats["calls"],
       "dispatch_outer_ms": round(stats["outer_ns"] / 1e6, 1),
@@ -138,6 +249,16 @@ def main() -> int:
       "thread_cpu_ms": round(stats["thread_ns"] / 1e6, 1),
       "non_program_ms": round(wall * 1e3 - stats["outer_ns"] / 1e6, 1),
       "logits_sha256_16": logits_hash,
+      "graph_build_ms": round(t_build * 1e3, 1),
+      "python_forward_ms": round(build_stats["ns"] / 1e6, 1),
+      "exec_calls": exec_stats["n"],
+      "exec_rewrite_ms": round(exec_stats["ns"] / 1e6, 1),
+      "replay_hit": rep["hit"],
+      "replay_miss": rep["miss"],
+      "replay_skip": rep["skip"],
+      "replay_ms": round(rep["ns"] / 1e6, 1),
+      "copies": copy_stats["n"],
+      "copy_ms": round(copy_stats["ns"] / 1e6, 1),
       "npu_submits": npu.submit_count - s0,
       "temp_c": round(int(pathlib.Path("/sys/class/thermal/thermal_zone0/temp").read_text()) / 1000, 1),
       "npu_seconds": round(npu.submit_seconds - w0, 3),
