@@ -431,3 +431,39 @@ irrelevant. `FUSE_QKV_GATE` stays False and the rule stays in the tree behind it
 landed and 167.64 on a later run of the same code, so its *total* effect (~0.35 ms) is inside the
 itemiser's run-to-run spread (~0.45 ms). Its structural effect is solid -- 48 x `n=32` (1.47 ms) is
 now 24 x `n=64` (0.96 ms) and 24 submits are gone.
+
+## The CBUF experiment is withdrawn: the register program is already theirs
+
+The +6.31 ms same-shape gap on `m=1, n=2560, k=4096` pointed at `int8_task_plan` (tasks, banks,
+subcores), and testing it needed authorisation because that recipe family wedged the board at
+k=9216. Before asking, the comparison was done from source -- no board access, no register change.
+
+**CBUF_CON0 for this shape is `0xb1` in both trees.** Their `tinygrad/runtime/support/rockchip_int8.py:135-146`
+is the same formula as our `tinygrad/runtime/ops_rockchip.py:136-146`, including the same override:
+
+```python
+groups = ceildiv(k,512)                                   # 8 at k=4096
+banks  = max(0x1b, 177-15*(groups-1)-15*groups*(ceildiv(m,64)-1))
+if m==1 and k==4096 and (n==512 or n>=1024): banks = 0xb1  # both trees
+```
+
+Their extra clause (`n in NARROW_DECODE_WIDTHS and ONPU_INT8_DECODE_NARROW_CBUF`) is unreachable
+for `n=2560` because `n>=1024` already matches. Then the whole emitted register set was parsed and
+diffed:
+
+| | registers parsed | identical | differing |
+| --- | --: | --: | --: |
+| ours vs theirs, int8 body | 31 | **31** | **0** |
+
+Byte-identical across CNA, DPU and CORE targets. So:
+
+1. **The CBUF/task-plan experiment has no parameter to change for this shape.** It is withdrawn, and
+   the board-wedge risk it carried buys nothing. That authorisation is not needed.
+2. **The +6.31 ms is not in the register recipe.** It has to be in what surrounds the registers: the
+   task/core mapping (`_encode_task_chain` builds **3 tasks with 3 bodies**, one per `_matmul_parts`
+   slice `(0,864),(864,864),(1728,832)`, while one task with three subcores would set up CNA/CBUF
+   once), or in the buffer stride/padding, or in how the per-call CPU is attributed.
+
+The next comparison is therefore **task granularity, not registers** -- same math, one CNA setup
+instead of three. That is a task-encoding change, which is a different risk class from the register
+program that wedged the board.
