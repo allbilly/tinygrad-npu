@@ -780,6 +780,12 @@ def _fused_plan(dev, m: int, n: int, k: int, depth_in: int, cores: int, column_o
     return plan
 
 
+# Per-output-width core split, for in-model A/B only (cores=3 is the shipped value everywhere).
+# The fused forward hard-codes the default, so this is the single knob a harness can flip without
+# touching the CBUF register recipe (which wedged the board at k=9216).
+CORES_OVERRIDE: dict[int, int] = {}
+
+
 def packed_matmul_int8_fused(dense: Tensor, weight: Tensor, w_scale: Tensor, columns: int, device: str,
                              m: int, row_offset: int = 0, k_offset: int = 0, column_offset: int = 0,
                              cores: int = 3) -> Tensor:
@@ -886,7 +892,8 @@ class NPULinear:
                         # 4B geometry (parity_shapes.py, 9/9).
                         piece = packed_matmul_int8_fused(dense, weight, scales, w2, self.device,
                                                          part.shape[0], row_offset=r0, k_offset=pk,
-                                                         column_offset=col)
+                                                         column_offset=col,
+                                                         cores=CORES_OVERRIDE.get(w2, 3))
                         acc = piece if acc is None else acc + piece
                     if acc is None:
                         raise RuntimeError("NPULinear.prepare() was not called")

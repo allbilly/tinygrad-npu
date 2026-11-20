@@ -306,3 +306,22 @@ That is M90 again and it says nothing about the device. A cores sweep has to be 
   recorded cost is **+14.7% prefill**, against a frozen 1,198.87 ms target;
 - the `+6.31 ms` same-shape gap points at CBUF/tiling width (`ONPU_INT8_DECODE_NARROW_CBUF` in their
   recipe), and the only CBUF experiment this tree has run (k=9216) wedged the board and rebooted it.
+
+### Attempt on the +6.31 ms same-shape gap: the core split is not it
+
+`n=2560, k=4096`, 96 calls in both trees, ours 417.8 us against their 351. The fused forward
+hard-codes `cores=3`, so the first hypothesis was that 2560 is being split badly. A/B **in-model**
+(JIT captured, itemiser over 5 warm decode steps, override on `npu_linear.CORES_OVERRIDE[2560]`):
+
+| cores for n=2560 | per call | total |
+| --- | --: | --: |
+| **3 (shipped)** | **417.8 us** | **40.11 ms** |
+| 1 | 965.2 us | 92.65 ms |
+
+Three cores are worth 2.3x and are already in use. The hypothesis is refuted, so the 19% is not the
+core split. What is left is the task plan itself (`int8_task_plan`: tasks per submit, CBUF banks,
+subcore assignment) -- the recipe area that wedged this board at k=9216, and which I have not
+touched.
+
+`npu_linear.CORES_OVERRIDE` is kept: default empty (so every shape uses 3, the shipped value) and it
+is the hook an in-model A/B needs, since the fused forward does not expose the argument.
