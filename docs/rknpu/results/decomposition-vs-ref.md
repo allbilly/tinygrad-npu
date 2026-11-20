@@ -144,8 +144,30 @@ for (Lidx1_0 = 0; Lidx1_0 < 80; Lidx1_0++)          // 80 Q8_0 blocks = 2560 val
 So it is a **masked one-hot scatter over the vocabulary, sourced from a Q8_0 matrix** -- the shape of
 an embedding/product implemented as a matmul rather than a gather. One call per token, 1.60 ms.
 
-**Not yet named.** The compile-time stack only reaches `tinygrad/llm/model.py:967` (`Transformer.__call__`),
-because the kernel is compiled during realise. Naming the op needs the sink uop (`DEBUG=4`) for that
+**NAMED: it is the token-embedding lookup.** `tinygrad/nn/__init__.py:360-362`:
+
+```python
+def _embedding_fwd(weight, idx):
+  arange = Tensor.arange(weight.shape[0])                       # 248,320
+  return (arange == idx.unsqueeze(-1)).unsqueeze(-1).where(weight, 0).sum(-2, dtype=weight.dtype)
+```
+
+That is a mask over the **entire vocabulary** plus a masked select of the Q8_0 weight row -- exactly
+the emitted kernel (compare a runtime index against vocab positions, write the weight byte or zero,
+64 tiles of 3880 = 248,320). So one token fetch of 2,560 values costs **1.60 ms**, 0.94% of the wall,
+and the reference profile has no counterpart because their lookup is not O(vocab).
+
+`USE_ATOMICS` does not help: it is a ContextVar (`helpers.py:300`), so the env var I first tried did
+nothing, and `_embedding_fwd_fxn` calls the same `_embedding_fwd` anyway.
+
+**The obvious fix is measured and does not work:** `weight[idx]` (advanced indexing) is correct but
+costs **5.37 ms** per call on a 1,000-row table in isolation -- it lowers to the same scan. This tree
+has no gather op (`Ops.GATHER` does not exist). So the fix is a native Q8_0 row-dequant kernel, in the
+shape of `argmax_native.py`: read the token id, dequantise `depth/32` blocks (34 bytes each) into the
+output row. Expected **1.60 -> ~0.01 ms**.
+
+The compile-time stack only reaches `tinygrad/llm/model.py:967` (`Transformer.__call__`), because the
+kernel is compiled during realise. Naming the op needs the sink uop (`DEBUG=4`) for that
 kernel; guessing it from the arithmetic would be the fourth guess in this stretch, so it is left as the
 one open item with a measured 1.60 ms attached.
 
@@ -181,7 +203,7 @@ step rather than another instrument.
 
 | item | ms | state |
 | --- | --: | --- |
-| `E_80_32_64_4` | **1.60** | real, reproducible, unnamed |
+| `E_80_32_64_4` | **1.60** | **named**: the embedding lookup is O(vocab); fix = native row gather |
 | their components-vs-wall discrepancy | 10.32 | unexplained; not used in any claim |
 
 Neither is claimed as a lever. The decomposition otherwise closes at
