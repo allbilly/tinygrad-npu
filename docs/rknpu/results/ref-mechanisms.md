@@ -606,3 +606,38 @@ Device is **83.4%** of the wall. Reaching 153.2 ms means removing 17.6 ms, i.e. 
 time** -- no amount of host work can do it, because all host work is only 18.2% and most of that
 (25 of 31.1 ms) is kernel time already at reference parity per call. The remaining device work is
 the +6.0 ms same-shape row and the +3.7 ms of split GEMMs.
+
+## The slow shape is 35% above the DMA floor, and the excess scales with k
+
+Separating bandwidth from per-call overhead using this board's 33.79 GB/s LPDDR ceiling
+(2112 MHz x 8 bytes x 2):
+
+| shape (n,k) | MB | floor us | ours us | our GB/s | above floor |
+| --- | --: | --: | --: | --: | --: |
+| 24576x2560 | 62.91 | 1862 | 2019 | 31.2 | **8%** |
+| 10240x2560 | 26.21 | 776 | 862 | 30.4 | 11% |
+| 9216x2560 | 23.59 | 698 | 779 | 30.3 | 12% |
+| 8192x2560 | 20.97 | 621 | 692 | 30.3 | 12% |
+| **2560x4096** | 10.49 | 310 | **418** | 25.1 | **35%** |
+| 4096x2560 | 10.49 | 310 | 370 | 28.4 | 19% |
+| 2560x2560 | 6.55 | 194 | 240 | 27.3 | 24% |
+| 2560x1024 | 2.62 | 78 | 113 | 23.2 | 46% |
+
+Their two measured shapes sit at **11%** (2560x4096, 345 us) and 30% (2560x1024, 101 us) above the
+same floor. So their k=4096 behaves like one of our *wide* shapes, and ours does not.
+
+The excess over theirs, as overhead:
+
+| shape | ours - floor | theirs - floor | delta |
+| --- | --: | --: | --: |
+| 2560x4096 | 108 us | 35 us | **+73 us** |
+| 2560x1024 | 35 us | 23 us | **+12 us** |
+
+**The delta scales with k** -- 4x the k gives ~6x the excess. That rules out a fixed per-submit cost
+(a fixed cost would be k-independent, and it would also show up as a delta at k=1024 of the same
+size) and points inside the **K loop**: the per-k-block weight fetch. At k=4096 the CNA runs
+`ceildiv(k,64) = 64` blocks; +73 us over 64 blocks is ~1.1 us per block.
+
+That is a much narrower target than "the GEMM is slow", and it is the specific thing a driver-side
+trace should confirm or refute: whether our weight fetches stall on the k-block boundary while
+theirs stream.
