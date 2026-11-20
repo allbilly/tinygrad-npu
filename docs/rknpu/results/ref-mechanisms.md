@@ -562,3 +562,47 @@ rather than guess an eighth time.
 **Honest bound on the objective:** +17.8 ms total = **+6.0** this row + **+3.7** from GEMMs we still
 split (fusion measured at +15-22% prefill) + the rest in host/residual that the cross-run comparison
 cannot resolve. Reaching 153.2 needs a mechanism none of the above identifies.
+
+## The residual is closed: 83.4% device, 18.2% CPU, and the wall sums
+
+Every earlier decomposition inferred device time from a kernel dump produced by a different
+protocol, which is why ~8 ms never reconciled. `reconcile_wall.py` measures the three quantities on
+the **same steps**: wall (`perf_counter`), all CPU work (`thread_time_ns`, which covers every
+dispatch path), and device wait from the driver's own `npu.submit_seconds`.
+
+| step | wall ms | thread CPU ms | device ms |
+| --: | --: | --: | --: |
+| 1 | 180.0 | 40.2 | 142.7 |
+| 2 | 217.6 | 77.8 | 143.3 |
+| 3 | 192.3 | 52.5 | 142.4 |
+| 4 | 170.7 | 31.1 | 142.3 |
+| 5 | 170.4 | 30.8 | 142.2 |
+| 6 | 170.5 | 30.8 | 142.3 |
+| 7 | 170.8 | 31.1 | 142.4 |
+| 8 | 170.4 | 30.8 | 142.3 |
+
+Steps 1-3 are capture transients; 4-8 are the steady state:
+
+| component | ms | share |
+| --- | --: | --: |
+| device wait (`submit_seconds`) | 142.34 | **83.4%** |
+| thread CPU (all kernels + python) | 31.11 | **18.2%** |
+| residual (syncs/copies/alloc, negative = clock overlap) | -2.69 | -1.6% |
+| **wall** | **170.76** | |
+
+**Correction to the two-sided table.** Our host CPU is **31.1 ms**, not the 24.85 derived from
+`itemiser total - device`: the itemiser wraps `CPUProgram.__call__`, and the fused Linear binds its
+CALL uop directly (`npu_linear.py:712`, `self.program.call(...)`) so its in-call quantise and
+dequantise are counted, but **~6 ms of executor/Python work per token is not**. That is the
+difference the "unattributed" 7-8 ms was made of: not device, not mystery work, just CPU the
+itemiser cannot see.
+
+**First attempt failed instructively:** a class hook on `CPUProgram.__call__` measured 0.00 ms for the
+fused Linears, because that path never enters it. The thread clock was the right instrument.
+
+### What this settles about the objective
+
+Device is **83.4%** of the wall. Reaching 153.2 ms means removing 17.6 ms, i.e. **12% of device
+time** -- no amount of host work can do it, because all host work is only 18.2% and most of that
+(25 of 31.1 ms) is kernel time already at reference parity per call. The remaining device work is
+the +6.0 ms same-shape row and the +3.7 ms of split GEMMs.
