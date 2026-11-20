@@ -1662,6 +1662,103 @@ byte-for-byte in the configuration you intend (or diff its shape first: row coun
 And when a class has more than one number, label the protocol next to each rather than picking the
 one that suits the narrative.
 
+### M85. Ran two NPU workloads at once and reported both numbers as measurements
+
+I backgrounded `bench_llm.py --npu` (a 1+1 smoke run) and then started
+`decode_kernels_by_name.py` and `logits_gate.py` in the foreground. The very command that launched the
+itemiser printed the held lock:
+
+```
+/tmp/rk3588_npu_submit.lock: 541990     # the bench_llm PID
+```
+
+and I proceeded anyway.
+
+Both results are invalid: the itemiser reported **185.16 ms/token** of total CPU against 194.53 in the
+clean run, and the background run degraded from 1.94 to 1.60 tok/s against 3.42 uncontended. I noticed
+only because the second smoke run's numbers looked wrong, not because I checked.
+
+The lock is a **per-submit serialisation** -- it stops two workers corrupting one device, it does not
+stop them contending for it. Timing taken with it held is meaningless. The same turn's headline
+measurement (the no-pad ABBA) was re-run after the background job finished and is clean; the numbers
+that were not re-run are labelled invalid in `decode-gap.md`.
+
+**Fix:** `fuser /tmp/rk3588_npu_submit.lock` immediately before any measurement, and a held PID means
+*do not start*. Never background a benchmark while a foreground measurement is planned in the same
+turn. When it happens anyway, find every number taken under it and mark it, rather than keeping the
+ones that happen to look plausible.
+
+### M86. Wrote timing instrumentation into two struct slots that were already counters
+
+To attribute the time inside the fused INT8 Linear I wrapped the two `sync_mem` ioctls in
+`clock_gettime` and accumulated the nanoseconds into `stats[5]`. But `stats[5]` is the
+dequantise-success counter:
+
+```c
+if (dfp(rockchip_linear_dq,dctx,{QZ_THREADS}) != 0) {{{planes_serial}}} else stats[5] += 1;
+```
+
+Moving them to `stats[3]` was no better -- that one counts quantise successes. Only then did I
+enumerate the slots: 0 submit, 1 calls, 2 tasks, 3 quantise hits, 4 quantise ns, 5 dequantise hits,
+6 dequantise ns. **All seven are live**, and the Python side allocates `ctypes.c_uint64 * 7`, so an
+"eighth slot" would have written past the buffer on a device path.
+
+The measurement itself (syncs 2.8 us/call, not the ~14 I had been assuming) is valid -- it came from
+the first patch, before I moved it -- but shipping that patch would have corrupted two counters that
+the dispatch path uses to decide whether quantisation succeeded.
+
+**Fix:** before writing one field of an instrumented struct, list every slot the producer writes and
+every slot the consumer reads (`grep -n 'stats\['`), and grow the allocation on both sides rather than
+reusing a slot. Instrumentation that silently overwrites a counter is worse than none: the counter is
+usually a correctness check and the timing is usually diagnostic.
+
+### M87. Set an environment variable the script never reads, and read the unchanged output as a result
+
+`MAX_CALLS_PER_SEG=1 python dump_decode_kernels.py` produced 16 `seg*` rows, twice. The constant was a
+**local inside `build()`**, so the variable could not have had any effect. I read "still 16 rows" as
+"per-kernel mode is not available" instead of "my knob is not connected", and on that reading
+overwrote the 35-row artifact (M84).
+
+Two invocations with the same output is not evidence about the system. It is evidence about the knob
+only if the knob was shown to do something.
+
+**Fix:** prove a knob is connected before interpreting anything downstream of it -- set two different
+values and confirm the output *changes*, or grep its definition and see it read from the environment or
+attribute being set. An unchanged output is evidence about the knob first, and about the system only
+second.
+
+### M88. Inferred a kernel's wall transfer from an experiment that removed something else
+
+The greedy-sampler ABBA (ratio 0.9991 over 16 pairs) led me to write that the 248,320-element
+vocabulary op "does not transfer", and I built the reconciliation of three elementwise figures on that
+sentence. Ablating the kernel itself measured **+5.31 ms of wall from 8.50 ms of kernel** -- 62%
+transfer. The sampler ABBA changed the sampling *path*; it never removed this kernel, and the kernel is
+present in both paths.
+
+This is M82 wearing different clothes: there, a mechanism said "the work is gone" and the wall said
+"nothing changed"; here, one experiment said "nothing transfers" and a different experiment said "62%
+does". In both cases the resolution was a direct measurement, not a third inference.
+
+**Fix:** transfer is a per-kernel property, measured by ablating *that* kernel (`ab_noop.py`). Never
+carry a transfer factor across experiments, even when the kernels look adjacent.
+
+### M89. Hand-counted delimiters in machine-generated code
+
+The word-load rewrite matches `__builtin_bit_cast(float, (unsigned int)(...))` in emitter output. I
+wrote the pattern by reading the emitted source and got it wrong three times in a row:
+
+1. one `(` too many, so it matched **nothing**;
+2. after fixing that, it rewrote **1 of 4** sites, because I required offsets 0-3 and the later groups
+   start at 4, 8, 12;
+3. the replacement consumed one paren too few, and clang failed with `extraneous ')' before ';'`.
+
+Each was caught by a test -- site count, then compile -- and cost about four iterations.
+
+**Fix:** for generated text, locate the construct with a balanced scanner, parse the operands out of the
+captured span, and require consecutive offsets rather than specific ones. Then **compile the
+transformed source** before measuring anything, and keep a bracket-balance fail-safe that falls back to
+the untransformed source. Never transcribe a delimiter count by eye.
+
 ## Guards now installed
 
 | guard | where |
@@ -1725,3 +1822,9 @@ one that suits the narrative.
 | diff the log's configuration lines on a >20% disagreement; an absent line is a difference | `mistake.md` M72 |
 | enumerate disabled constants / unexercised branches in the file under edit before building a lever | `mistake.md` M73 |
 | a disabled constant's verdict needs a counter, and must be re-tested when its premise is removed | `mistake.md` M73 |
+| `fuser /tmp/rk3588_npu_submit.lock` immediately before a measurement; a held PID means do not start | `mistake.md` M85 |
+| the submit lock prevents corruption, not contention: discard and label numbers taken under it | `mistake.md` M85 |
+| enumerate every live slot of an instrumented struct; grow the allocation instead of reusing a slot | `mistake.md` M86 |
+| prove a knob is connected (output changes between two values) before interpreting its output | `mistake.md` M87 |
+| measure transfer per kernel by ablating that kernel, never from an adjacent experiment | `mistake.md` M88 |
+| parse generated text with a balanced scanner and compile the rewrite before measuring it | `mistake.md` M89 |
