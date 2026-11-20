@@ -501,3 +501,34 @@ explain an 18% per-call advantage with byte-identical registers -- and it is the
 
 It is labelled a hypothesis because it cannot be tested without building the token loop, and every
 cheaper explanation has now been measured and eliminated.
+
+## Pipelining refuted: their per-call time is 345 us with or without cross-token overlap
+
+The last hypothesis was that their `DecodeLoop` hides the next token's weight DMA behind the current
+token's compute, which would make `m=1` GEMMs look faster than ours without any device difference.
+Tested by running their worker with a **1-token decode request** (`--tokens 1`), so the C loop cannot
+overlap tokens, and reading the same kernel from the profile:
+
+| run | blocks | per-call, `rockchip_int8_1_2560_4096` |
+| --- | --: | --- |
+| 4-token loop (earlier profile) | 9 | 345, 345, 345, 346, 345, 346, 345, 345, 345 us |
+| **1-token loop** (`--tokens 1`) | 9 | 346, 345, 345, 345, 345, 345, 345, 345, 346 us |
+| ours (itemiser, 96 calls) | -- | **417.8 us** |
+
+**345 us in both cases, to the microsecond.** Removing cross-token overlap changes nothing, so the
+gap is a genuine device difference, not a measurement artefact:
+
+- theirs: 345 us for 10.49 MB of weights = **30.4 GB/s**
+- ours: 417.8 us including ~9.4 us of in-call quantise/sync/dequantise = **408 us** device = **25.7 GB/s**
+- **+63 us per call, 18%, and 96 calls is +6.0 ms** -- the bulk of the +6.31 ms row.
+
+Everything structural has already been compared equal (registers 31/31, CBUF_CON0, task encoding,
+subcore expression, K padding, core split), so the difference is in the *environment* the identical
+program runs in. The remaining candidate, and their own source documents it: **`ONPU_NPU_DOMAINS=3`
+with `ONPU_NPU_DOMAIN_BYTES=3221225472`**. Their tree splits weights across three IOMMU domains
+because a single >3 GiB allocation returns EFAULT on this driver; we run two. Different domain layout
+means different DMA address topology for the same 10.5 MB stream, which is the kind of thing that
+moves sustained bandwidth by ~18% without changing a single register.
+
+That is the next thing to measure, and unlike the CBUF recipe it does not touch the register program
+that wedged the board.
